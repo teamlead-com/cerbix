@@ -97,6 +97,42 @@ func TestTheRangeAndCursorAreRefusedByName(t *testing.T) {
 	}
 }
 
+// The range bound is the CONFIGURED retention, not the built-in default.
+//
+// `ledger.expected_run_retention_days` is bounded 2..90 and reaches the store; the handler read
+// `domain.DefaultExpectedRunRetentionDays` instead, so the bound was a constant fourteen days. An
+// instance keeping ninety days of windows refused a thirty-day range for rows it still held, and
+// one configured to keep two days accepted a fourteen-day range it could not answer. Both
+// directions are asserted, because a fix that only widened the bound would pass a test that only
+// checked the wide case.
+func TestTheRangeBoundFollowsTheConfiguredRetention(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	thirtyDays := "from=" + now.AddDate(0, 0, -30).Format(time.RFC3339) + "&to=" + now.Format(time.RFC3339)
+	fiveDays := "from=" + now.AddDate(0, 0, -5).Format(time.RFC3339) + "&to=" + now.Format(time.RFC3339)
+
+	for _, tc := range []struct {
+		name      string
+		retention int
+		query     string
+		want      int
+	}{
+		{"ninety days answers a thirty-day range", 90, thirtyDays, http.StatusOK},
+		{"the default still refuses thirty days", 0, thirtyDays, http.StatusBadRequest},
+		{"two days refuses a five-day range", 2, fiveDays, http.StatusBadRequest},
+		{"the default answers five days", 0, fiveDays, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := seededStore()
+			fs.expectedRunRetentionDays = tc.retention
+			rec := do(newHandler(fs), o1Admin, http.MethodGet, expectedRunURL("p1", "mon1", tc.query), "")
+			if rec.Code != tc.want {
+				t.Fatalf("retention %d answered %d, want %d: %s",
+					tc.retention, rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
+
 // The response carries computed verdicts and the two bounds, and `interval_assumed` reaches the
 // caller (invariants 20f, 26b).
 //

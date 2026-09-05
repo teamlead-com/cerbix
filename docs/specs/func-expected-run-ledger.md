@@ -1,7 +1,7 @@
 # Spec: The fact that a run was expected (func-expected-run-ledger)
 
 > **Lifecycle: DESIGN APPROVED AT REVISION 22 — approved range `9f46f40..9e114a4`, D-0237.**
-> **Document revision 30: AMENDMENT UNDER REVIEW.** The approval is the RANGE; the revision number
+> **Document revision 33: the amendment is APPROVED as a design and phase F's IMPLEMENTATION is APPROVED at party [50], on the reviewed uncommitted tree and for that phase only — it authorizes no commit, push, tag or release.** The P0 that blocked the arc at [16] — a false `expected_never_issued` on a running instance — is closed by §7.4. The approval is the RANGE; the revision number
 > tracks the DOCUMENT, and later revisions never extend the range. Each amendment gets its own
 > disposition, and this line states the CURRENT one only — it accumulated four superseded clauses
 > before revision 26 rewrote it whole, which is the same defect `6b47bad` fixed in the status cell.
@@ -17,9 +17,25 @@
 > | 28 | **design** — C's claim shape, the agent stamp-ceiling defect, §17.9 | UNDER REVIEW |
 > | 29 | **design** — D's retention and read API, E's stroke rule, §17.10 | UNDER REVIEW |
 > | 30 | **design** — E's render, and two defects a live stack found, §17.11 | UNDER REVIEW |
+> | 31 | **design** — the post-implementation audit: sixteen findings, §17.12 | UNDER REVIEW |
+> | 32 | **design** — the review of revision 31: the retention bootstrap in the SPA and in the live gate, §17.13 | UNDER REVIEW |
+> | 33 | **design + implementation** — the publish boundary: a false `expected_never_issued` on a live instance, §7.4, §17.14, §17.15 | design ACCEPTED [20]; **implementation APPROVED [50]**, `D-0243` |
 >
-> **EVERY PHASE IMPLEMENTED, INCLUDING E'S RENDER. All 68 invariants are DISCHARGED and one is a
-> recorded withdrawal** (§17.2). The mock was approved on 2026-09-05 and the panel now strokes what
+> **FR-032 is DONE because the reviewed FINAL TREE — revision 33, `D-0243`, `iter-0176` — resolves
+> the range-level P0. Revisions 27–32 remain historical UNDER REVIEW records: they are neither
+> independently approved nor any authority for a commit, push, tag or release** (reviewer ruling at
+> party [52]). They were genuine intermediate states withheld at [16] over that P0, and promoting
+> them retroactively would claim a review that never happened.
+>
+> **EVERY PHASE IMPLEMENTED, INCLUDING F'S PUBLISH BOUNDARY AND ITS RENDER. 80 invariants are DISCHARGED and
+> one is a recorded withdrawal** (§17.2). **Revision 31 is a post-implementation AUDIT of the whole arc
+> against the tree and against a running instance — sixteen findings, five of them in the
+> requirement's own subject, recorded with their fixes in §17.12.** Two were measurable only on a
+> live stack: a window answered EARLY could never be answered at all, so every leader restart and
+> every confirm-accelerated probe produced a false `issued_never_claimed`; and the claim event lost
+> its race with the advance sixty-one times in sixty-two. A third is the shape both of those hide
+> behind — §11's HOT gauge was wired to nothing and reached no binary's `/metrics`, while the
+> invariants that own it were DISCHARGED by tests either side of the missing wire. The mock was approved on 2026-09-05 and the panel now strokes what
 > the ledger can defend. Starting the stack immediately found TWO defects every unit suite had
 > passed — the ledger was inert with the carrier off, and a job carried a field its carrier does not
 > define — both recorded in §17.11 with regressions. The owner authorized implementation
@@ -178,13 +194,13 @@ probed, or weaken §3.1.
 | **Durable `next_due`** — the leader persists the instant it already computes in memory | The persisted `next_due_at` stays in the past while nothing advances it | **CHOSEN.** Expectation is written by the component that owns it, and no probe instant changes |
 | **Gap inference** — keep only `last_issued_at` and divide the gap by the interval | Counted as `floor(gap / interval)` | **Rejected.** Boundaries inferred rather than recorded, and an interval change inside the gap makes even the count approximate |
 
-`nextRun` in `internal/scheduler/scheduler.go:1111` is a `map[string]time.Time` created **empty**
-each time leadership is taken, and consulted at `:1418`. Three consequences, all verified in the
+`nextRun` in `internal/scheduler/scheduler.go` is a `map[string]time.Time` created **empty**
+each time leadership is taken, and consulted by `dueForDispatch`. Three consequences, all verified in the
 tree: the schedule is **emergent, not a grid** (every advance is `nextRun[m.ID] = now.Add(iv)` at
-`:1442`, `:1473`, `:1487`); on leader loss the map is gone, so **every active monitor is due on the
+at every advance site); on leader loss the map is gone, so **every active monitor is due on the
 first tick** after failover and nothing records the interval that went unprobed; and the advance is
-deliberately **skipped on dispatch failure** (`:1466-1471`, `:1480-1486`) and deliberately **taken
-on a policy skip** (`:1442`, `:1449`). This design persists that map and changes none of the three.
+deliberately **skipped on dispatch failure** on the plain branch and deliberately **taken
+on a policy skip**. This design persists that map and changes none of the three.
 
 ### 5.2 What revision 1 got wrong, kept so it is not proposed again
 
@@ -272,12 +288,26 @@ CREATE TABLE expected_runs (
     -- "dispatched on an old carrier". The two are different facts and the schema now says so.
     CONSTRAINT expected_runs_carrier_iff_job
         CHECK ((job_id IS NULL) = (carrier_generation IS NULL)),
+    -- A non-positive threshold makes the lateness test meaningless, and §14.2's conservative
+    -- orphan minimum is exactly where a zero could be introduced.
+    CONSTRAINT expected_runs_interval_positive CHECK (interval_seconds > 0),
     FOREIGN KEY (monitor_id, project_id) REFERENCES monitors (id, project_id) ON DELETE CASCADE
-) PARTITION BY RANGE (due_at) WITH (fillfactor = 70);
+) PARTITION BY RANGE (due_at);
+
+-- The DEFAULT partition, following `heartbeats` and NOT the gate ledger. The reason is
+-- directional: a row here is evidence that a run did not complete, and an insert lost to a
+-- missing partition would erase exactly the fact the ledger exists to keep (invariant 16a).
+CREATE TABLE expected_runs_default PARTITION OF expected_runs DEFAULT WITH (fillfactor = 70);
 
 CREATE INDEX expected_runs_job_idx ON expected_runs (monitor_id, job_id)
     WHERE job_id IS NOT NULL;
 ```
+
+**`fillfactor` is on the PARTITION and never on the partitioned parent**, and the DDL above says so
+because an earlier revision did not: storage parameters are per-relation in PostgreSQL and
+`CREATE TABLE ... PARTITION OF` does not inherit them, so a `WITH (fillfactor = 70)` on the parent
+would have applied to nothing that ever holds a row (§11, invariant 23a). The dated partitions are
+created the same way by the maintenance pass.
 
 **The window, not the job, is the identity.** `due_at` comes from the persisted `next_due_at`, which
 advances monotonically, so two concurrently outstanding runs necessarily have **different**
@@ -307,12 +337,16 @@ CREATE TABLE monitor_schedule (
     schedule_created_at   timestamptz NOT NULL DEFAULT statement_timestamp(),
     gap_truncated_before  timestamptz,            -- windows before this were NOT materialized (§9.3)
     updated_at            timestamptz NOT NULL DEFAULT statement_timestamp(),
+    -- §7.1 spaces a gap with `make_interval(secs => interval_in_force)` and PostgreSQL raises
+    -- `step size cannot equal zero`, which would abort the whole tick's advance for every monitor
+    -- in the batch on one bad row. Refusing the value at the WRITE is the fail-closed direction.
+    CONSTRAINT monitor_schedule_interval_positive CHECK (interval_in_force > 0),
     FOREIGN KEY (monitor_id, project_id) REFERENCES monitors (id, project_id) ON DELETE CASCADE
 );
 ```
 
 `interval_in_force` and `confirm_phase` are on the row because the confirm phase substitutes
-`m.ConfirmInterval()` for a run (`scheduler.go:1428-1434`); reading the monitor's current interval
+`m.ConfirmInterval()` for a run (`effectiveInterval` in `scheduler.go`); reading the monitor's current interval
 would misdate every window probed under acceleration.
 
 ### 6.3 `monitor_execution_revisions` — the configuration timeline (§3.3)
@@ -399,7 +433,8 @@ WITH picked AS (
      -- config write between publish and here PASSED the old check while having changed the
      -- revision, the interval and possibly the region (reviewer P0 at [237]).
      -- `m.execution_revision` is deliberately the column the ingest gate reads at
-     -- `internal/store/monitors.go:1342`, so this fence and the result-rejection rule cannot drift.
+     -- `RecordScheduledResult` in `internal/store/monitors.go`, so this fence and the
+     -- result-rejection rule cannot drift.
      WHERE s.next_due_at = v.expected_due
        AND m.execution_revision = v.expected_revision
      ORDER BY s.monitor_id
@@ -506,10 +541,10 @@ the statement exists to prevent — so the dependency is stated rather than assu
 **The honest statement count**, since "batched" was rejected as an answer: **one** statement per tick
 for the advance, the current window, the gap windows and the fence, whatever mix of issues and skips
 that tick contains, plus the one credentialed materialization that already exists. It does not scale
-with monitor count — `scheduler.go:637` sets `tick: time.Second`, so 1000 monitors means ~17 array
+with monitor count — `lead()` in `scheduler.go` ticks once a second, so 1000 monitors means ~17 array
 elements, not 17 statements. What scales per run is the claim event (§8.4) and the terminal fill,
 and the terminal costs no round trip because it joins the transaction that already inserts the
-heartbeat (`internal/store/monitors.go:1376`).
+heartbeat (`RecordScheduledResult` in `internal/store/monitors.go`).
 
 **Ordering against the publish.** For an issuing caller the statement runs **after** a successful
 dispatch, matching today's in-memory rule. A crash after the publish and before the statement leaves
@@ -525,25 +560,37 @@ Revisions 1 to 3 asserted a "three-rule contract". The audit required at [227] f
 write to `nextRun` in `internal/scheduler/scheduler.go`, classified, with what each does about the
 ledger:
 
-| # | Cause | In-memory advance | Sites | Ledger |
+**Sites are named, not numbered.** Every earlier revision of this table cited line numbers, and by
+the time B2 landed the file had grown by five hundred lines and not one of them pointed at a
+`nextRun` write any more — while `make docs-check` still passed, because it validates that a cited
+PATH exists and never that a cited LINE says anything. A table whose evidence has silently detached
+from the tree is worse than one with no citations, so the anchors are now the enclosing branch.
+
+| # | Cause | In-memory advance | Sites in `internal/scheduler/scheduler.go` | Ledger |
 | --- | --- | --- | --- | --- |
-| 1 | **Dispatch succeeded** | `now + iv` | `:1473` pull, `:1487` AMQP, `:1680` credentialed | §7.1 with `job_id` |
-| 2 | **Dispatch failed** | *none* — retried next tick | `:1466-1471`, `:1480-1486` | Nothing: the expectation is unchanged, so there is nothing to preserve |
-| 3 | **Policy skip** — no capable canary runner, no in-flight slot | `now + iv` | `:1442`, `:1449` plain; `:1644`, `:1648` credentialed | §7.1 with `skip_reason` |
-| 4 | **Backoff** — credential unresolved, no capable executor, publish failure | `now + credentialFailureRetry(...)` | `:1576`, `:1604`, `:1631`, `:1674` | §7.1 with `skip_reason`, a delayed `next_due` and the UNCHANGED interval |
-| 5 | **Confirm acceleration** — moves the due instant EARLIER | `fast` | `:1757` (`enterConfirm`) | §7.3 — never a caller |
+| 1 | **Dispatch succeeded** | `now + iv` | after `publishScheduledJob` returns nil, on the plain branch and on the credentialed one — ONE publisher for all three transports since B1 | §7.1 with `job_id` |
+| 2 | **Dispatch failed** | `now + iv`, since phase F | `publishPending`'s error path | **AMENDED by §7.4.** The window is ALREADY reserved when the transport refuses the job, so the confirm writes `withheld_reason` on it and the row reads `reserved`. Two things follow, and both are consequences of the ordering rather than choices: there is no longer such a thing as a dispatch that records nothing, and the in-memory instant must move WITH the expectation the reserve already wrote — leaving it behind, as this rule did while nothing was recorded, would make the monitor due every tick and mint one reserved window per tick for the whole of an outage. A failed publish therefore costs one interval instead of one tick |
+| 3 | **Policy skip** — no capable canary runner, no in-flight slot | `now + iv` | `!s.canaryRunnerAvailable` and `!s.claimCanarySlot`, on BOTH branches — four sites | §7.1 with `skip_reason` |
+| 4 | **Backoff** — credential unresolved, no capable executor, publish failure | `now + credentialFailureRetry(...)` | the credentialed branch's three remaining sites: batch error, `item.Reason != ""`, `no_capable_executor` — its publish failure moved to `publishPending` with the plain branch's | §7.1 with `skip_reason`, a delayed `next_due` and the UNCHANGED interval. **Phase F removed the fourth site**: a publish failure can no longer be a `skip_reason`, because the window is reserved before the publish is attempted and a skip says cerbix CHOSE not to run it. It is a withholding now, and `transport_backoff` is written by nothing — the constant and the CHECK value stay so rows written before phase F still read |
+| 5 | **Confirm acceleration** — moves the due instant EARLIER | `fast` | `enterConfirm` | §7.3 — never a caller |
 
 Rules 1, 3 and 4 are the forward-moving callers and all three go through §7.1, on **both** the plain
 and credentialed branches. FR-029 shipped an in-flight claim on one branch only, and that finding is
 the same mistake this structure is arranged to make unrepeatable.
 
-A sixth path, `checkStalePush` at `:1805`, writes `nextRun` for **push** monitors, which §15 excludes
-from the ledger. Named so it is a stated exclusion rather than an unhandled path.
+A sixth path, `checkStalePush`, writes `nextRun` for **push** monitors, which §15 excludes from the
+ledger. Named so it is a stated exclusion rather than an unhandled path.
+
+**Rule 5 makes `nextRun` EARLIER than the persisted `next_due_at`, and so does leadership
+acquisition** — the map is created empty, so `dueForDispatch` is true for every monitor while its
+standing expectation may still be in the future. Both therefore dispatch a job whose `DueAt`
+postdates its own `IssuedAt`. That is legal and §13.1 now says so; it was not, and the consequence
+is recorded in §17.12.
 
 ### 7.3 Confirm acceleration cannot lose a gap
 
 Rule 5 is not a caller, and the reason is in the code rather than in an argument.
-`enterConfirm` (`scheduler.go:1756-1757`) writes `nextRun[m.ID] = fast` only
+`enterConfirm` (`scheduler.go`) writes `nextRun[m.ID] = fast` only
 `if due, ok := nextRun[m.ID]; !ok || due.After(fast)` — that is, only when the standing expectation
 is **later** than the accelerated one. An expectation already in the past is therefore never moved,
 so no intervening window can be skipped and there is nothing to materialize or fence.
@@ -561,6 +608,171 @@ statement structurally incapable of moving `next_due_at` forward; a rule with no
 incapable of it in the strongest available sense, and invariant 2c's property — no window probed
 under confirm is misdated — is now carried by the pair being unable to describe different instants
 rather than by a second writer remembering to keep them in step.
+
+### 7.4 The publish boundary — the advance moves BEFORE the dispatch
+
+**This section is revision 33. It exists because a running instance produced a false claim that a
+run had not happened, and because the first two fixes proposed for it were both wrong.**
+
+#### What was measured
+
+Six `advance_expectations_failed` errors in seven minutes of ordinary browser-suite load, every one
+of them `deadlock detected (SQLSTATE 40P01)`. Postgres names both participants and they are this
+ledger's two writers: §7.1's advance (`advanceExpectationsSQL`) and §8.3's fill
+(`fillExpectedRunTerminalSQL`). Neither retries. On that instance **every** window claiming
+`expected_never_issued` was false — two of two, each contradicted by a heartbeat inside its own
+window, on enabled monitors that were up.
+
+#### The chain, and why the fix cannot live in the gap materializer
+
+1. The advance fails. `monitor_schedule.next_due_at` stays where it was, and the batch's payload —
+   which holds the identity of jobs **already published** — is discarded by `lead()`.
+2. The next tick calls `LoadDueExpectations`, which reads `next_due_at` FRESH every tick, and mints
+   the job's `DueAt` from the value that never moved. The job is published carrying a window that
+   has already been answered.
+3. Its result reaches §8.3, which targets that stale window. The row there already carries a
+   DIFFERENT `job_id`, so `expectedRunAdmissibleSQL` refuses it — correctly — and zero rows affected
+   is a documented normal outcome. **The run correlates to nothing and leaves no trace**, not even a
+   refusal: §13.1 annotates its own run or nothing.
+4. The next successful advance computes `first_expected` from the stale instant and materializes the
+   window the run actually answered as a GAP: `expected_never_issued`.
+
+So one failed advance produces two wrong outcomes — a real result that reaches no window, and a
+fabricated absence at the instant it answered. A predicate on the gap could decline to assert the
+second; nothing there can recover the first. **The divergence is created at PUBLISH time**, by
+dispatching against an expectation the leader already knows it failed to move.
+
+`lead()`'s comment at the failure site says "the residual points at withholding". It does not: the
+next tick's materialization ASSERTS that no run happened, which is the opposite of withholding. That
+sentence is the arc's dominant defect class one more time — prose promising what the mechanism
+beside it does not do — and it is why the failure survived every review.
+
+#### The rule
+
+**A job is never published for a window the ledger has not already recorded.** The tick becomes
+three steps instead of two:
+
+| Step | What it does | What it guarantees |
+| --- | --- | --- |
+| **RESERVE** | §7.1's statement, moved AHEAD of the dispatch: it writes the window with its minted identity in the `reserved` state, moves `next_due_at`, materializes the gaps this move passes over, and writes the fence — one statement, as before | An instant is either recorded or the schedule never passed it. A gap can no longer cover an instant a job was published for, because the publish cannot precede the row |
+| **PUBLISH** | The transport, unchanged | — |
+| **CONFIRM** | One batched UPDATE per tick, setting `issued_at` on the rows whose publish succeeded and a withholding reason on those whose publish failed | `issued_at` is written by the CORE and only by the core |
+
+A RESERVE that fails publishes nothing. The schedule is unchanged, so the same payload — the same
+`(monitor_id, due_at, job_id, carrier)` — is retried on the next tick, and the retry is idempotent
+because the row's key is `(monitor_id, due_at)` and the fence still compares `next_due_at` against
+the instant the payload was built for. **Deferring a probe is the accepted cost**; publishing one
+whose evidence cannot be recorded is not.
+
+#### The batch is not the unit — the WINDOW is
+
+A reserve of many monitors can succeed for some and be refused for others: §13.2's optimistic fence
+rejects an item whose configuration changed between the decision and the statement, and it does so
+by leaving that item out of `picked`, which writes it nowhere at all. **The statement therefore
+returns the windows it wrote, not a count**, and a dispatch may leave the process only when its OWN
+window is in that set.
+
+The first implementation of this phase did not do that: it published whenever the call returned
+without an error and merely logged a short result, so a fenced item's job went out with no window
+behind it — the ordering invariant broken on the one path that looks like success (reviewer P0 at
+[28]). A count cannot say WHICH items were refused, and publishing on a count is publishing on an
+assumption.
+
+The two failure shapes are handled differently, and the difference is knowledge:
+
+| The reserve | What is known | What happens to the payload |
+| --- | --- | --- |
+| returned an ERROR | nothing — the statement may or may not have committed | HELD unchanged and re-submitted next tick. Minting a second identity for an instant that may already have been dispatched is the defect from the other side |
+| returned SHORT | the missing items were written nowhere, and their payloads are stale — the fence rejected the revision they name | DROPPED. The monitor is decided again next tick from its current configuration, with `nextRun` untouched so that happens at once. Holding a stale payload would re-submit a rejected revision once per tick, forever |
+
+**The asymmetry is KNOWLEDGE and nothing else, and the reviewer ruled on it at [30]:** a missing
+`(monitor_id, due_at)` in the returned set means the predicate admitted no item and wrote no row, so
+the instant is provably undispatched and re-deciding it may mint the current revision's identity; an
+error means the commit status is unknown, and there the payload must stay exactly as it was. No
+retry bound and no give-up rule is needed for the fenced case, because dropping terminates by
+construction. Both halves are guarded — 27i that an unreserved job never leaves, 27j that a dropped
+one is decided again and published ONCE.
+
+#### The state the model did not have
+
+A reserved window may not read `issued_never_claimed`. That verdict means a job was PUBLISHED
+(`internal/domain/expectedrun.go`), and between RESERVE and CONFIRM no such claim is available. It
+may not read `expected_never_issued` either, which asserts the opposite of what is known. The model
+therefore gains one durable state and one verdict:
+
+- `expected_runs.reserved_at` — set by the RESERVE, never by any executor-supplied value;
+- `expected_runs.withheld_reason` — set by the CONFIRM when the publish failed, EMPTY otherwise (the column is `NOT NULL DEFAULT ''`, so the absence of a reason is a value rather than a NULL that would mean three things). Its vocabulary is CLOSED, exactly as `skip_reason`'s is, and closed at BOTH boundaries: the CHECK admits only `''` and `publish_failed`, and `ConfirmExpectations` refuses anything else before it reaches SQL. It was closed in the constant, in `openapi.yaml` and in the runbook while both boundaries admitted any string, which the final-tree audit found (§17.16);
+- verdict **`reserved`** — "the core minted this window's identity and no dispatch is recorded for
+  it". It licenses no stroke, is excluded from the coverage numerator, and is counted in its
+  denominator, because a window that was due is a window that was due.
+
+`Verdict()`'s order gains one test and the position is part of the specification: `unknown` stays
+FIRST, because a window below the ledger carrier can answer nothing whatever else is true of it;
+then a terminal outcome, which outranks every absence; then `reserved`, before the absence tests,
+so a row the core never confirmed can never be read as a published job that vanished.
+
+#### One materialization, one identity
+
+Required at [20], and it closes the door the amendment would otherwise leave open: a durable ROW
+whose JOB identity is not durable recreates the stale-identity defect in a new form.
+
+The `CheckJob` is materialized **once**, by the RESERVE, and every later step uses that same
+immutable value:
+
+| Field | Bound at | Read by |
+| --- | --- | --- |
+| `monitor_id`, `due_at` | RESERVE | the row's own key |
+| `job_id` | RESERVE | PUBLISH, and §8.1's admissibility predicate |
+| `execution_revision`, `region`, `carrier_generation` | RESERVE, from the resolved dispatch decision | PUBLISH, and §13's fence |
+| `JobIssuedAt` on the wire | RESERVE — it is `reserved_at`, so the instant an executor echoes is one the core already made durable | §8.3, which may not lower it (invariant 20e) |
+| `issued_at` on the row | CONFIRM, and nothing else | `Verdict()`'s lateness measure |
+
+Two instants, deliberately: `reserved_at` is when the identity was minted and committed, `issued_at`
+is when the publish returned. The wire carries the FIRST, so an executor's echo can never introduce a
+value the core did not already own — invariant 20e held structurally rather than by a merge
+expression.
+
+**PUBLISH, CONFIRM, the retry and a handover may never mint a second `job_id` for a reserved
+`(monitor_id, due_at)`.** The retry of a failed RESERVE re-sends the payload held in memory,
+unchanged; a RESERVE that never committed leaves nothing durable, so its instant is genuinely
+undispatched and a later gap for it is true. **A new leader does NOT republish a reserved window.**
+It holds no materialized payload for it and will not build one: the window stays `reserved`, which is
+the honest deferred-loss record, and the schedule has already moved past it so nothing re-mints. The
+cost is one lost probe per reserved window across a handover, and it is the accepted one — the
+alternative is a second identity for an instant that may already have been dispatched, which is the
+defect this whole amendment exists to remove.
+
+#### Every way this can go wrong, and what the ledger then says
+
+| Case | Rendered verdict | Why it is the honest one |
+| --- | --- | --- |
+| RESERVE fails (deadlock, DB down, cancellation) | no row is written; the instant is materialized as `expected_never_issued` by a later advance | Nothing was published, so the absence is TRUE |
+| RESERVE commits, process dies before PUBLISH | `reserved` | The core cannot prove a dispatch. It does not claim one, and it does not claim the run was missed |
+| RESERVE commits, PUBLISH fails | `reserved`, with `withheld_reason` | Same knowledge, plus the reason |
+| RESERVE commits, PUBLISH succeeds, CONFIRM lost | `reserved`, and the executor's result still fills the terminal facts | A terminal outranks the missing confirm and reads `covered`; the run is not lost because the row already exists |
+| Claim or terminal arrives BEFORE the confirm | the row exists, so both land | This is §17.12's second finding removed STRUCTURALLY rather than by re-offering an unmatched claim: the window is written before the job leaves the process |
+| Leader handover while reserved | the new leader reads a schedule already moved past the instant, so it mints nothing for it | Obligation: a later tick may never republish the same `due_at` under a new `job_id` |
+| Retry exhaustion | the payload is dropped only with the schedule UNMOVED, so the instant is either retried or truly never dispatched | The two states the old code conflated are now distinguishable |
+| Carrier below 4 | `unknown`, as before | Rule 1 is tested first and this amendment does not touch it |
+
+#### Why not the two alternatives
+
+**A bounded retry alone** narrows the window in which the deadlock is observed and changes nothing
+after exhaustion: the payload is still lost and the same false gap still follows. It is a smaller
+version of the same defect.
+
+**A predicate forbidding a gap to swallow a dispatched window** needs to know which instants were
+dispatched, and after a lost payload nothing durable knows. An in-memory "unsettled" flag fails the
+handover case: a new leader reads the unmoved `next_due_at`, finds the monitor due, and reproduces
+the whole chain.
+
+#### The cost, stated rather than discovered
+
+One extra round-trip per tick — the CONFIRM — and dispatch latency grows by the RESERVE, which is
+the same statement that used to run after it. The deadlock itself is NOT eliminated: the two writers
+still contend, and the amendment changes the consequence from a fabricated fact to a deferred probe.
+Reducing the contention (a canonical row order across both writers) is a separate question and is
+deliberately not folded in here.
 
 ## 8. Idempotency, ordering and crash semantics
 
@@ -640,7 +852,7 @@ Revision 3 called this load-bearing and gave neither SQL nor validity rules — 
 consequence of it rather than a separate check.
 
 **Where it runs is the first rule.** The fill lives in the SAME transaction as the heartbeat insert
-and **behind the same gate**. `internal/store/monitors.go:1337-1344` rejects a result whose
+and **behind the same gate**. `RecordScheduledResult` (`internal/store/monitors.go`) rejects a result whose
 `execution_revision` is missing (outside `observe` mode) or mismatched, and the comment is explicit:
 *"A reject inserts nothing."* Steps 4 and 4b then reject a future timestamp, one outside retention,
 and one that precedes its job's issue beyond `allowed_skew`. A refused result must therefore fill
@@ -689,7 +901,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9, $10, $11, $12)
 ON CONFLICT (monitor_id, due_at) DO UPDATE
    SET job_id             = COALESCE(expected_runs.job_id, $4),
        carrier_generation = COALESCE(expected_runs.carrier_generation, $7),
-       issued_at          = LEAST(COALESCE(expected_runs.issued_at,  $9), $9),
+       issued_at          = COALESCE(expected_runs.issued_at, $9),   -- the CORE's, never lowered
        claimed_at         = LEAST(COALESCE(expected_runs.claimed_at, $10), $10),
        outcome            = CASE WHEN expected_runs.terminal_at IS NULL
                                        OR $11 < expected_runs.terminal_at THEN $12
@@ -762,7 +974,7 @@ server-owned and no row is ever left at a column default (reviewer P0 at [233]).
 
 **The trust boundary, stated rather than assumed.** Adoption trusts that `due_at`, `job_id` and
 `issued_at` came from the core. They did: all three are minted by the database at materialization
-(`internal/store/materialize.go:84`) and copied verbatim by the executor. A forged triple is bounded
+(`MaterializeExecutionConfigs` in `internal/store/materialize.go`) and copied verbatim by the executor. A forged triple is bounded
 by the same revision fence and skew checks that already gate every heartbeat, and by the boundary in
 §13 that refuses a non-UUID id. This is the same trust the product already extends to an executor
 for the heartbeat itself; it is not new surface, and pretending the ledger could verify more than
@@ -773,6 +985,19 @@ the heartbeat path does would be a false assurance.
 The executor emits the claim **after** taking the job off the transport and **before** the first
 attempt. It is best-effort: if the publish fails the probe still runs, so a missing claim means
 "unwitnessed", never "did not happen", and **a terminal outcome always outranks a missing claim**.
+
+**The claim routinely arrives BEFORE the window it answers, and the core holds it rather than
+dropping it.** §7.1 flushes the advance once per tick, after every publish in that tick, so on a
+fast transport the executor's claim reaches ingest while the row is still uncommitted. The claim
+statement is an UPDATE and may not create the row (§8.1), so it matched nothing and was let go.
+Measured on a running `role=all` instance: **one claim landed across sixty-two generation-4
+windows.** That cost no verdict — a terminal outranks a missing claim — but it made
+`issued_never_claimed` mean "the claim raced the advance" far more often than the executor loss §8.5
+says the state is for, and it left `claimed_never_finished` effectively unreachable. The consumer
+therefore parks an unmatched claim and re-offers it a bounded number of times at the tick's own
+scale; the claim's INSTANT is untouched by the retry, because `claimed_at` records when the run
+started and the merge rule is earliest-wins. A claim that correlates to no window at all exhausts
+the same bound and is dropped in silence, with no special case.
 
 `worker` and `agent` gain no database handle and no ack concept — the claim rides the existing result
 path as a typed message, which is what §4a required. This is the one genuinely new per-run round
@@ -837,6 +1062,13 @@ alone. Materializing them is neither useful nor free, so §7's statement bounds 
   DESC)` so the most recent windows are kept and the choice is deterministic. It is per monitor, not
   per batch — the [225] P0 was precisely a batch-wide `LIMIT`. It exists to bound one statement's
   work, not to express a policy, which is why the retention clip is the rule and this is a valve.
+  **The cap bounds the SERIES and not only the rows written**, and that distinction is an
+  implementation correction rather than a restatement: applied after `row_number()` alone it left
+  `generate_series` and the window function materializing every window back to the retention floor —
+  `retention_days x 86400 / interval_seconds` per monitor, for every monitor in the batch, inside
+  the one statement a returning leader runs first. The series' lower bound is therefore the LATEST
+  of the retention floor and `cap` steps below the upper bound, with exactly one extra index
+  generated so the `rn <= cap` filter still has something to drop and the fence can see that it did.
 
 Revisions 2 through 5 carried this as a bare constant with, in my own words, "no analysis behind it".
 [231] refused that, correctly: a bound with no rule behind it is a number someone will change without
@@ -851,6 +1083,16 @@ Before the fence, the span is treated exactly as pre-`ledger_from`: **not stored
 nothing. No verdict is derived for it, so this is neither a rollup nor inference — it is an explicit
 statement that the ledger cannot answer, which is the only honest thing to record about time whose
 windows were never written.
+
+**Every materialized window lands on the monitor's own grid — `first_expected + k x interval` — and
+that took a change to say honestly.** `generate_series(start, stop, step)` emits `start + k*step`,
+so the moment `start` became the retention floor rather than `first_expected`, which it did whenever
+the clip bit, the gap windows sat at instants no expectation ever fell on. Nothing broke: a
+never-issued window is only ever compared for equality against an instant the core minted, so it was
+never adopted and never claimable. What broke was `due_at` meaning "the instant a run was expected",
+which is this ledger's entire subject. The series is now over step INDICES and the instant is
+derived from the index, which makes the grid structural and lets the cap bound the series at the
+same time.
 
 The cap's value still has no analysis behind it (§18), and it is the last constant in this design
 chosen by feel rather than by argument.
@@ -970,11 +1212,12 @@ rate, and cannot be computed from the schema.
 | Datum | Value |
 | --- | --- |
 | Metric | `cerbix_expected_runs_hot_update_ratio`, a single gauge **aggregated over the current retention window**, with NO partition label — partition names are unbounded over time and would be exactly the high-cardinality mistake |
-| Supporting counters | `cerbix_expected_runs_updates_total`, `cerbix_expected_runs_hot_updates_total` — monotonic, unlabelled |
+| Supporting samples | `cerbix_expected_runs_updates`, `cerbix_expected_runs_hot_updates` — unlabelled GAUGES. They were specified as `_total` counters and are neither: the values are `pg_stat_user_tables` sums over the retained partitions, so dropping a partition subtracts its statistics and the series goes DOWN. A `_total` counter that decreases is read by Prometheus as a process restart, so `rate()` over it would invent traffic that never happened |
 | Source | `pg_stat_user_tables`, summed across the retained partitions |
 | Sample window | The gate is evaluated only once at least **1,000** updates have accumulated; below that the sample says nothing |
 | Threshold | ratio **>= 0.90** passes; below it, §11's append-only variant is selected rather than absorbed |
 | Zero denominator | `n_tup_upd = 0` means the ratio is UNDEFINED: the gauge is **not published** and the gate neither passes nor fails. A gauge reporting 0 or 1 for "no data" is a lie in whichever direction happens to be convenient |
+| Wiring | The leader's maintenance pass samples it and publishes through `WithLedgerMetrics`, at **every** `scheduler.New(...)` construction. Stated as a row because it was the defect: the builder existed, the runbook told an operator to watch the gauge, and nothing called it — so the series was exported by no binary at all and §11's measurement gate could not run. `TestEveryLeaderConstructionWiresTheLedgerPass` reads `cli.go` and fails on a construction missing it |
 
 No `pg_stat_user_tables` metric exists in this repository today — `pg_stat_activity` is read once,
 in `internal/store/gatemaintenance.go:1153` — so this is new work, named as such in phase D rather
@@ -1034,7 +1277,7 @@ Runs per day is exact arithmetic; bytes carry the model's uncertainty.
 
 `expected_run_retention_days`: **14 by the owner's ruling of 2026-09-04** (§5.3), with minimum 2 and
 maximum 90 as the enforced bounds the reviewer required at [222]. Fourteen days covers a fortnight
-of incident review, is where the stroke is actually wanted, and bounds 1000 monitors to ~5.4 GB. The `heartbeats` default is 30 (`internal/config/config.go:516`) and the gate ledger's is 90
+of incident review, is where the stroke is actually wanted, and bounds 1000 monitors to ~5.4 GB. The `heartbeats` default is 30 (`defaults()` in `internal/config/config.go`) and the gate ledger's is 90
 with bounds 7–365 (`:529`, `:691`); this sits below both deliberately, because a window's evidentiary
 value decays faster than a heartbeat's.
 
@@ -1083,7 +1326,7 @@ rather than hidden behind "convert every producer":
 
 - **Three mint sites exist**, all in `internal/store/materialize.go` — `:84`, `:356`, `:377` — and
   all are already `gen_random_uuid()::text`. Converting them is dropping the `::text`.
-- **Two dispatch paths mint nothing at all.** `scheduler.go:1456` (pull) and `:1476` (AMQP) publish
+- **Two dispatch paths mint nothing at all.** The plain branch's pull and AMQP publishes
   `dispatch.CheckJob{Monitor: m}` with no `JobID`, no `IssuedAt` and no `ProtocolVersion`. So phase B
   does not convert a producer on those paths — it **creates** one. That is the larger half of the
   work and calling it a conversion would understate it.
@@ -1104,7 +1347,7 @@ rather than hidden behind "convert every producer":
 
   **So the ledger does not census executors. It uses the isolation this project already uses for
   exactly this problem:** a new protocol gets its own carrier, and only capable executors consume it
-  (FR-020 / D-0160, `carrierGeneration[region]` at `scheduler.go:1514`). Eligibility becomes a
+  (FR-020 / D-0160, `carrierGeneration[region]` in `scheduler.go`). Eligibility becomes a
   property of the ROW rather than a global instant, so no census, no activation timestamp and no
   `ledger_from` involvement is required.
 
@@ -1120,15 +1363,15 @@ rather than hidden behind "convert every producer":
 
   | Transport | What selects the carrier | Server-owned? |
   | --- | --- | --- |
-  | **pull** | which of `EnqueuePullJob` / `V2` / `V3` the leader called; the row's `protocol_version` is, in that file's words, "the row's carrier generation, **stamped by the server**" (`internal/store/pulljobs.go:67`, and `handlers_agent.go:219` calls it "the SERVER's stamp") | yes, and already persisted |
-  | **AMQP** | which queue the leader published to, decided by `carrierGeneration[region]` (`scheduler.go:1514`, `:1529`, `:1552`) before the publish | yes |
-  | **inproc** | the `ProtocolVersion` the core itself put on the job (`inproc.go:34`) | yes — see the caveat below |
+  | **pull** | which of `EnqueuePullJob` / `V2` / `V3` the leader called; the row's `protocol_version` is, in that file's words, "the row's carrier generation, **stamped by the server**" (`internal/store/pulljobs.go:67`, and `agentJobsProtocol` in `handlers_agent.go` calls it "the SERVER's stamp") | yes, and already persisted |
+  | **AMQP** | which queue the leader published to, decided by `carrierGeneration[region]`, raised through `raiseCarrier` in `scheduler.go`, before the publish | yes |
+  | **inproc** | the `ProtocolVersion` the core itself put on the job (`InProc.PublishJob` in `inproc.go`) | yes — see the caveat below |
 
   So `PublishJob` and the pull enqueue **return the carrier they used**, and the leader passes it into
   §7.1 as `$9` for every issued row. It is never recovered from a payload and never inferred.
 
   **The ledger minimum is its own generation, not a reused one.** `ProtocolV3` means "carries
-  envelope v2" (`internal/dispatch/credentials.go:16-21`) — a credential capability. Reusing it
+  envelope v2" (`internal/dispatch/credentials.go`) — a credential capability. Reusing it
   would make a non-credentialed monitor's ledger eligibility depend on a credential carrier, which
   is a different question. Phase B introduces **`ProtocolV4` = "carries `JobID`, `IssuedAt` and
   `DueAt` on every dispatch path"**, and `LedgerMinCarrier = dispatch.ProtocolV4`. One generation per
@@ -1141,12 +1384,12 @@ The code physically supports **1..3 only**, and every one of those surfaces has 
 
 | Surface | Today | V4 |
 | --- | --- | --- |
-| AMQP queues | three prefixes: `checks.jobs.`, `checks.jobs.v2.`, `checks.jobs.v3.` (`amqp.go:29-35`), mapped by `jobsQueueForGeneration` (`:152`) | a fourth prefix `checks.jobs.v4.<region>` and its mapping entry |
+| AMQP queues | three prefixes: `checks.jobs.`, `checks.jobs.v2.`, `checks.jobs.v3.` (`amqp.go`), mapped by `jobsQueueForGeneration` | a fourth prefix `checks.jobs.v4.<region>` and its mapping entry |
 | Pull rows | `pull_jobs_protocol_version_check CHECK (protocol_version IN (1,2,3))`, and the same on `pull_tests` (00062, widened by 00063) | a migration **widening** both to `IN (1,2,3,4)` — 00063's own comment says why: *"CHECK is widened rather than dropped: an unknown generation must still be rejected at the boundary"* |
-| Pull claim | `ClaimPullJobs`, `…V2`, `…V3`, each leasing "every generation at or below" its own (`pulljobs.go:77-97`) | `ClaimPullJobsV4`, and an `agentJobsV4` endpoint beside `agentJobsV3` (`handlers_agent.go:119`) |
-| Scheduler admission | `carrierGeneration[region]` raised to 3 only for regions that ANNOUNCE the capability (`scheduler.go:1514`, `:1529`, `:1552`) | the same shape for 4, over a `LiveLedgerV4JobRegions`-style source |
+| Pull claim | `ClaimPullJobs`, `…V2`, `…V3`, each leasing "every generation at or below" its own (`claimPullJobs` in `pulljobs.go`) | `ClaimPullJobsV4`, and an `agentJobsV4` endpoint beside `agentJobsV3` (`handlers_agent.go`) |
+| Scheduler admission | `carrierGeneration[region]` raised to 3 only for regions that ANNOUNCE the capability (`raiseCarrier` in `scheduler.go`) | the same shape for 4, over a `LiveLedgerV4JobRegions`-style source |
 | Enqueue | `EnqueuePullJob`/`V2`/`V3` | `EnqueuePullJobV4` |
-| **In-process (`role=all`)** | no queue and no row: `CarrierGeneration` **is** the job's own `ProtocolVersion` (`inproc.go:34`, and `cli.go:255`, whose comment says "no wire between the materializer and this runner") | nothing to grow, and that is the hazard — the generation is whatever the producer stamped, so this transport's inertness is the FLAG, never isolation |
+| **In-process (`role=all`)** | no queue and no row: `CarrierGeneration` **is** the job's own `ProtocolVersion` (`InProc.PublishJob` in `inproc.go`, and the `role=all` wiring in `cli.go`, whose comment says "no wire between the materializer and this runner") | nothing to grow, and that is the hazard — the generation is whatever the producer stamped, so this transport's inertness is the FLAG, never isolation |
 
 **`role=all` is a PRODUCTION topology** (`docker/docker-compose.prod.yml` line 1: "single-process
 (--role all)"), not a development convenience, and revision 23 omitted it from this table entirely.
@@ -1198,8 +1441,8 @@ its payload exists.** That is a stronger guarantee than deploying the payload al
 depend on a deploy order being respected.
 
 `ledger.carrier_enabled` gates selection, defaulting **false** — the same shape as
-`WithCredentialEnvelopes` (`scheduler.go:570`, `:603`) and `resultRevisionMode`
-(`internal/store/store.go:197`), which is how the credential carrier was staged.
+`WithCredentialEnvelopes` (`scheduler.go`) and `resultRevisionMode`
+(`internal/store/store.go`), which is how the credential carrier was staged.
 
 **A default is not a contract, and the difference is what a B1 binary does when an operator supplies
 `true`** (reviewer P0 at [423]). Defaulting false says nothing about that input, and both plausible
@@ -1210,12 +1453,12 @@ invalid configuration". So the contract is versioned and explicit:
 
 | Phase | `ledger.carrier_enabled` absent or `false` | `ledger.carrier_enabled: true` |
 | --- | --- | --- |
-| **B1** | accepted; the carrier is deployed and inert | **REFUSED at startup.** `(*Config).Validate` (`internal/config/config.go:552`) returns an error naming the key and saying that the V4 payload — `DueAt` and the identity it carries — arrives only in B2, so the carrier cannot be selected yet. The process exits before any business logic, exactly as an empty `server.listen` does today |
+| **B1** | accepted; the carrier is deployed and inert | **REFUSED at startup.** `(*Config).Validate` (`internal/config/config.go`) returns an error naming the key and saying that the V4 payload — `DueAt` and the identity it carries — arrives only in B2, so the carrier cannot be selected yet. The process exits before any business logic, exactly as an empty `server.listen` does today |
 | **B2** | accepted; selection stays off | accepted; the SAME validated snapshot reaches selection, wired in the atomic change that adds the payload and the ledger together |
 
 **Ownership is named so it cannot drift into a role-local branch or an environment read.** The value
 is a field of the config struct, validated by `(*Config).Validate`, and reaches the leader through
-the scheduler construction path — `scheduler.New(...)` at `internal/cli/cli.go:1067` (`case "all"`)
+the scheduler construction path — `scheduler.New(...)` in `internal/cli/cli.go` (`case "all"`)
 and `:1100` (`case "scheduler"`), the only two roles that build one. Not `os.Getenv`, not a check
 inside `lead()`, and not a different answer per role: a gate that each role decides for itself is a
 gate that a mixed deployment disagrees about, which is the failure §16.1 exists to describe.
@@ -1326,17 +1569,17 @@ from `issued_at` would invent a window or collide with a real one. So the field 
 | Job field | `dispatch.CheckJob.DueAt time.Time`, `json:"due_at,omitempty"`, beside `JobID` and `IssuedAt` |
 | Result field | `domain.Heartbeat.DueAt time.Time`, `json:"due_at,omitempty"`, copied by `dispatch.StampResult` alongside `JobID` and `JobIssuedAt` — the ONE owner of that copy, as its comment requires |
 | ~~Spacing fields~~ | **REMOVED in revision 19.** Revisions 16–18 carried `EffectiveIntervalSeconds` on the job and the result so the orphan insert could fill `interval_seconds`. The reviewer's question at [258]/[260] — whether the base-versus-confirm residual is compatible with a truthful coverage claim — is answered NO, so the field, its ingress validation and the residual are all gone. §14.2 has the replacement, which needs no wire value at all |
-| Not a table column | Like `JobID`, `JobIssuedAt` and `ExecutionRevision` (`internal/domain/monitor.go:618-629`), it is wire-only. §4a forbids overloading the `heartbeats` TABLE, which this does not touch |
-| Mint owner | The **core**, from `monitor_schedule.next_due_at`, read by the leader's own batched read in the same tick — NOT from the 15-second snapshot (`refreshEvery`, `scheduler.go:236`), which would be stale by design |
-| Validation | `due_at <= issued_at` (an expectation cannot postdate its own dispatch), and `due_at` inside the retention window. A violation refuses CORRELATION — the result is still recorded as a heartbeat — exactly as a non-UUID `job_id` is treated (§13) |
+| Not a table column | Like `JobID`, `JobIssuedAt` and `ExecutionRevision` (`domain.Heartbeat` in `internal/domain/monitor.go`), it is wire-only. §4a forbids overloading the `heartbeats` TABLE, which this does not touch |
+| Mint owner | The **core**, from `monitor_schedule.next_due_at`, read by the leader's own batched read in the same tick — NOT from the 15-second snapshot (`refreshEvery` in `scheduler.go`), which would be stale by design |
+| Validation | `due_at` inside the RETENTION window, and nothing else. A violation refuses CORRELATION — the result is still recorded as a heartbeat — exactly as a non-UUID `job_id` is treated (§13). **`due_at <= issued_at` was here and is WITHDRAWN**: the core dispatches from the leader's in-memory `nextRun`, which is legitimately earlier than the persisted `next_due_at` on leadership acquisition and under confirm acceleration, so the core itself mints jobs whose `DueAt` postdates their own `IssuedAt`. Refusing them made the window the core had just written unanswerable by the run it was written for — a false `issued_never_claimed`, which invariant 25 forbids. See §17.12 |
 | Propagation | All three transports carry `CheckJob` verbatim: AMQP as the JSON body, pull as the JSON payload of a `pull_jobs` row, inproc as the struct itself. A new field therefore propagates by construction, and this is stated rather than assumed because it is the reason no per-transport work is needed |
 | Rolling upgrade | An old executor drops the unknown field, so the result returns with `DueAt` zero. That is treated as **no correlation** — never as `due_at = epoch` — and the window stays `unknown`, which is precisely what `LedgerMinCarrier` gates |
 
 ### 13.3 Who owns the effective interval
 
 **ONE function, because it is currently computed twice.** `iv := m.Interval()` followed by a possible
-`iv = m.ConfirmInterval()` appears at `scheduler.go:1427` (plain path) and again at `:1635`
-(credentialed path). Two sites computing one fact is the divergence this design has been bitten by
+`iv = m.ConfirmInterval()` appeared once on the plain dispatch path and again on the
+credentialed one. Two sites computing one fact is the divergence this design has been bitten by
 three times, so the effective interval gets a single owner — one helper both call, in the shape
 `dispatch.StampResult` already uses for job identity ("one owner, because three executors publish
 results and a stamp each applied separately would drift the first time one was edited"). The
@@ -1354,7 +1597,7 @@ datum §10 and invariant 14a **guarantee does not change**, because leaving it a
 invariant 1 true. A configuration write between publish and write therefore PASSED the fence while
 having changed `execution_revision`, `interval_in_force`, `confirm_phase` and possibly the monitor's
 region. §7.1 then wrote the old job with the NEW revision; the result, carrying the old one, is
-rejected at `internal/store/monitors.go:1342`; and the ledger claimed an issued run of a generation
+rejected by `RecordScheduledResult`; and the ledger claimed an issued run of a generation
 that never ran. That was reviewer P0 at [237], and it is the exact crossing the fence existed to
 prevent.
 
@@ -1374,7 +1617,7 @@ one predicate covers every monitor datum because `UpdateMonitor` bumps the revis
 selection are covered transitively by it.
 
 The column compared is `monitors.execution_revision`, deliberately the same one the ingest gate reads
-at `monitors.go:1342`, so the ledger's fence and the result-rejection rule cannot drift apart.
+by `RecordScheduledResult`, so the ledger's fence and the result-rejection rule cannot drift apart.
 
 **On mismatch nothing happens at all**: no advance, no window, no fence write. The monitor stays due
 and the next tick republishes at the current revision.
@@ -1402,7 +1645,7 @@ prose before sending rather than after.
 
 **A stale-revision job can also never create a blocking orphan**, and that is worth stating because
 it is the horn of [239]'s trilemma that looks most dangerous. The terminal path (§8.3) is reachable
-only for an ADMISSIBLE result, and `monitors.go:1337-1344` refuses a stale revision before any
+only for an ADMISSIBLE result, and `RecordScheduledResult` refuses a stale revision before any
 insert. So a fenced-out rev5 job cannot insert a row at `(monitor_id, D)` and cannot stand in the way
 of the rev6 materialization.
 
@@ -1443,14 +1686,18 @@ bypassed, and a query that is safe only because of its caller is not safe. Invar
 nothing back.
 
 **Response.** Windows in `due_at` order with computed verdicts (never stored — invariant 19), plus
-the two facts that bound what the answer means: `ledger_from` and `gap_truncated_before`. **Each
+the THREE facts that bound what the answer means: `ledger_from`, `gap_truncated_before` and
+`retention_days`. **Each
 window also carries `interval_assumed`**, because a `covered_late` produced by §14.2's conservative
 threshold may be an artefact of the assumption rather than real lateness, and a caller that cannot
 tell the two apart has been handed a verdict without its confidence. This was missing until revision
 20: the flag existed in the table and appeared in no response, which is a fact stored and never
 read — the mirror image of the defects in §5.2. A range
-extending before `ledger_from` returns its windows as `unknown` and says so in the payload rather
-than silently starting later, so a caller cannot mistake a clipped range for a covered one.
+extending before `ledger_from` returns the windows it HAS plus that bound, rather than silently
+starting later, so a caller cannot mistake a clipped range for a covered one. It does not
+manufacture `unknown` windows for the span before it — an earlier revision said it would, and there
+are no rows there to return; inventing placeholders would be the read-time derivation §6.1 exists
+to avoid.
 
 **Pagination**, specified to the convention this repository already publishes for the gate decision
 ledger (`openapi.yaml:1470-1495`) rather than left as "opaque cursor" — reviewer P1-2 at [244], and
@@ -1458,16 +1705,28 @@ it caught that my `limit=<1..1000>` contradicted the established bound:
 
 | Element | Contract |
 | --- | --- |
-| Range | half-open `[from, to)`, both **REQUIRED**, `from < to`, at most the retention window (14 days) |
+| Range | half-open `[from, to)`, both **REQUIRED**, `from < to`, at most **the CONFIGURED retention window** — `ledger.expected_run_retention_days`, 2..90, default 14. The bound was the built-in default rather than the configuration, so a ninety-day instance refused a thirty-day range for rows it still held |
 | Order | `due_at DESC`. **No tiebreak is needed and the reason is structural**: the route is monitor-scoped and the primary key is `(monitor_id, due_at)`, so `due_at` is unique within one monitor. If this route is ever widened to project scope a `monitor_id` tiebreak becomes mandatory — noted here because that change would otherwise silently start dropping rows |
 | Cursor | opaque to the client, `base64url("v1:" + due_at as RFC3339Nano)`. The version prefix exists so a later change is DETECTABLE rather than misread |
 | Comparison | the keyset of the LAST RETURNED item; the next page is bound **strictly below** it, so a key returned once is never returned again |
 | `next_cursor` | **null on the last page** |
+| `retention_days` | The bound above, on every page. A caller cannot form a valid query without it: a client that assumed the default asked ranges a differently-configured instance answered `range_too_wide`, which cost it the whole answer including the other two bounds |
 | Invalid cursor | 400 `cursor_invalid` — strict decode, no tolerance: a bad version prefix, bad base64 or an unparseable instant all fail the same way |
 | Cursor outside the range | 400 `cursor_invalid`. A cursor whose `due_at` falls outside the requested `[from, to)` cannot belong to this traversal, and ignoring it would return a page from a different query than the caller asked for |
 | `limit` | minimum 1, **maximum 200, default 50** — the same bounds as every other paged endpoint here; 400 `limit_invalid` for 0, negative, non-integer or above 200 |
 | Empty page | `[]` with a null `next_cursor`. Never 404: an empty answer is a fact about the range, not a missing resource |
 | Other errors | 400 `range_required` \| `range_invalid` \| `range_too_wide`; 404 for a project or monitor not visible (§13a's 404-hidden rule) |
+
+**What a CLIENT must do with `retention_days`, because publishing it is not enough.** The bound
+arrives ON the answer, and that answer was already asked under whatever bound the client held — so
+the request that teaches the bound is, in both directions, a request asked under the wrong one. A
+client drawing a span wider than its assumption must therefore treat any successful answer as
+DISCOVERY and then test COMPLETENESS: if the bound now held would start the request EARLIER than the
+request that produced the answer did, ask once more under the learned bound. One comparison covers
+the assumed default and the minimum fallback alike; `learned > assumed` covers neither reliably
+(§17.13). Stopping at the first answer hands §14's gate a set missing members over the older part of
+the span, which renders identically to "no run was due there" — the distinction this requirement
+exists to make.
 | Traversal | LIVE, as the gate ledger's is: rows committed or dropped during a traversal may or may not appear, and each item's presence follows the single-window response |
 
 One deliberate divergence from that precedent, stated so it does not read as an oversight: the gate
@@ -1592,7 +1851,7 @@ and this document still does not claim that benefit, because nothing has been an
 - **No retroactive backfill.** History before the migration is `unknown` (§6.3).
 - **Push monitors are excluded — the owner's ruling of 2026-09-04**, and the reason is the lesson
   this design learned seven times: *"a push that did not arrive"* is already **detected** and already
-  **recorded as a fact**. `scheduler.go:1415` never dispatches them and `checkStalePush`
+  **recorded as a fact**. `dueForDispatch` never dispatches them and `checkStalePush`
   (`:1780-1805`) owns their staleness, synthesising a DOWN that lands as a heartbeat. A ledger window
   for push would be a **second mechanism for one obligation**, and two mechanisms sharing an
   obligation diverge on it — [225], [229] and [241] are all that defect. If push coverage is wanted
@@ -1609,6 +1868,7 @@ and this document still does not claim that benefit, because nothing has been an
 | **C** | The claim event, IMPLEMENTED. `Dispatcher` grows NOTHING — the claim is a typed MEMBER of `domain.Heartbeat` riding the results path, exactly as `ProbeError` is, which is what §4a actually requires and what keeps invariant 11's five-method set true through this phase. `worker` and `agent` emit it; §8.1's merge, with its admissibility predicate extracted so the claim and the terminal share ONE expression (invariant 7a) | `-race`; the ingest fake breaks on interface growth, which is intended. A live distributed stack is NOT claimed for this phase and the reason is stated in §17.9 rather than left as a gap |
 | **D** | Retention, `ledger_from`, the read API returning computed verdicts, and the HOT-ratio gauge. IMPLEMENTED. The partitions and the DEFAULT partition moved to B2 (above); `gap_truncated_before` is WRITTEN by §7.1 in B2 and READ here, which is the half D owns | `-race`; the capacity measurement of invariant 22. BOTH storage modes is satisfied by construction rather than by two runs: `expected_runs` is declaratively partitioned in both, so there is no hypertable branch to diverge — stated here rather than left as an unrun gate |
 | **E** | The FR-031 stroke, behind §14's gate. IMPLEMENTED: the rule (`strokeSegments`), the render (segments plus the expectation ruler), and the mock that decided how it looks (`docs/design/mock-expected-run-stroke.html`, approved 2026-09-05) | unit tests over every clause of §14's gate with four mutations killed; the panel's own surface tests with four more; and `e2e/tests/expected-runs.spec.ts` on a LIVE stack, which is where §17.11's two defects were found |
+| **F** | **The publish boundary (§7.4), revision 33.** RESERVE before dispatch, CONFIRM after it, the `reserved` state and its verdict, and the retry of an unchanged payload. **IMPLEMENTED, approved at [50]** — this phase exists because a running instance produced a false `expected_never_issued`, which no unit suite and no live gate had been able to see | §17.14's twelve rows, every one a named test with a killed mutation; a DETERMINISTIC two-transaction lock cycle rather than a load-produced one; and the live cross-check as a supplement, never as the oracle |
 
 ### 16.1 The mixed-version matrix
 
@@ -1634,8 +1894,8 @@ cannot arise at all, and the safety argument is a different one:
 | --- | --- | --- |
 | AMQP | apply | announcement plus the gate: a region is promoted only when its workers announce V4 AND `ledger.carrier_enabled` is on, and an old worker is not subscribed to the v4 prefix |
 | pull | apply | announcement plus the gate: the region is promoted only when its agents announce V4 and `ledger.carrier_enabled` is on. An agent then claims through its own generation's endpoint, whose predicate is `protocol_version <= its own`, so a generation-4 row is outside its result set |
-| in-process (pure `role=all`) | **impossible** | the FLAG alone. Core and executor are one binary, so there is no version skew to discover and no announcement to withhold — `scheduler.go:1546-1552` raises the generation because "a same-process executor IS this binary". Invariant **10k** is the proof: with `ledger.carrier_enabled` false, `lead()`'s resolved map stamps nothing above 3 |
-| `role=all` with `pull.regions` | apply, for those regions only | announcement plus the gate, exactly as pull: the region is promoted only when its AGENTS announce V4 and `ledger.carrier_enabled` is on. The local executor does not count toward it — `scheduler.go:1542` skips pull-served regions in that branch (`if s.pullRegions[region] { continue }`) because an in-process runner "is no evidence" about the agent that will claim the row |
+| in-process (pure `role=all`) | **impossible** | the FLAG alone. Core and executor are one binary, so there is no version skew to discover and no announcement to withhold — `resolveLedgerCarrier` raises the generation because "a same-process executor IS this binary". Invariant **10k** is the proof: with `ledger.carrier_enabled` false, `lead()`'s resolved map stamps nothing above 3 |
+| `role=all` with `pull.regions` | apply, for those regions only | announcement plus the gate, exactly as pull: the region is promoted only when its AGENTS announce V4 and `ledger.carrier_enabled` is on. The local executor does not count toward it — `resolveLedgerCarrier` skips pull-served regions in that branch (`if s.pullRegions[region] { continue }`) because an in-process runner "is no evidence" about the agent that will claim the row |
 
 **Reading row 3 in-process would be a category error.** It says the executor withholds its V4
 announcement, so `carrierGeneration` stays ≤3 — but an in-process executor makes no announcement to
@@ -1732,8 +1992,8 @@ Discharged as a SET in `docs/traceability.md`.
     what §4a and `amqp.go:191-194` actually require ("this keeps the transport seam free of an ack
     concept the Dispatcher interface does not expose").
 11a. The unqualified claim "no ack concept" was FALSE about the tree and is withdrawn. The pull
-    agent has had a lease-ack since it existed: `internal/agent/agent.go:290` acks only the jobs it
-    processed, and `:329` buffers without acking so the leases lapse server-side and the jobs are
+    agent has had a lease-ack since it existed: `Agent.poll` in `internal/agent/agent.go` acks only the jobs it
+    processed, and its buffer path buffers without acking so the leases lapse server-side and the jobs are
     re-delivered. That mechanism is pre-existing, load-bearing for the pull transport, and out of
     this requirement's scope. Found by trying to specify invariant 11's test — the second time
     §17.2's ENTRY gate caught an invariant asserting something the tree contradicts.
@@ -1771,8 +2031,10 @@ Discharged as a SET in `docs/traceability.md`.
 20. A stroke on the Response time panel is permitted only for a span entirely plain `covered` and
     entirely at or after `ledger_from`. A single `covered_late` window forbids it.
 20d. The effective interval has ONE owner — a single helper called by both the plain
-    (`scheduler.go:1427`) and credentialed (`:1635`) paths, and passed into
-    `materialize.go` rather than recomputed there.
+    and credentialed dispatch paths. `materialize.go` neither computes nor receives it: the
+    leader asks `effectiveInterval` after materialization returns, so there is no second site to
+    keep in step. The clause "passed into `materialize.go`" was written for a shape the code
+    never took.
 20g. `interval_assumed` is EXPLANATORY ONLY. No verdict, gate, numerator or surface may use it to
     treat a `covered_late` window as `covered`. A stroke drawn because a window's lateness was
     "assumed rather than measured" is the truthful-rendering gate widened by accident, and this
@@ -1782,9 +2044,16 @@ Discharged as a SET in `docs/traceability.md`.
 20f. `interval_assumed` is returned with every window the read API emits. A `covered_late` whose
     threshold was assumed is distinguishable from one measured against the interval that actually
     spaced the window.
-20e. The lateness threshold is NEVER taken from a result. A window the core recorded uses its own
-    `interval_seconds`; an orphan row uses `MIN(interval, confirm_interval)` for its revision and
-    sets `interval_assumed`. No executor-supplied value can move a window from `covered_late` to
+20e. Neither term of the lateness test is taken from a result. The THRESHOLD is the row's own
+    `interval_seconds` — an orphan row uses `MIN(interval, confirm_interval)` for its revision and
+    sets `interval_assumed`. The MEASUREMENT is `issued_at - due_at`, and `issued_at` has exactly
+    ONE writer on a window the core recorded: §7.1's advance. **The second half was the invariant's
+    words and not its mechanism until the §17.12 audit**: §8.3's upsert took
+    `issued_at = LEAST(COALESCE(existing, $n), $n)` against the executor's ECHO of `JobIssuedAt`, so
+    a result naming an earlier instant lowered the core's own value, shrank the lateness and
+    promoted `covered_late` to `covered`. It is `COALESCE(existing, $n)` — first-writer-wins — and
+    the orphan path, which has no core value to keep, is the only place a result still supplies it
+    (§8.3's trust boundary). No executor-supplied value can move a window from `covered_late` to
     `covered`.
 20c. Every `INSERT INTO expected_runs` names `interval_seconds`, and the value is the interval that
     SPACED that window — the one in force BEFORE the advance for the current window, the
@@ -1815,9 +2084,13 @@ Discharged as a SET in `docs/traceability.md`.
     gaps fences each one independently, and no monitor's windows are lost to another's volume.
 24c. `ledger_from` is computed from persisted inputs, never stored, so dropping a partition cannot
     leave it stale in the over-claiming direction.
-25. A result whose `job_id` is absent or not a UUID, or whose `due_at` is absent, postdates its own
-    `issued_at` or falls outside retention, correlates to NO window, is still recorded as a
-    heartbeat, and never produces a false `issued_never_claimed`.
+25. A result whose `job_id` is absent or not a UUID, or whose `due_at` is absent or falls outside
+    retention, correlates to NO window, is still recorded as a heartbeat, and never produces a
+    false `issued_never_claimed`. **"Postdates its own `issued_at`" was in this list and is
+    WITHDRAWN** — it was the clause that PRODUCED the false `issued_never_claimed` it forbids, on
+    every leader restart and every confirm-accelerated probe (§17.12). What replaces it is an
+    asymmetry: an early window may be FILLED and never INVENTED, so the orphan insert of §8.3
+    requires the row to exist already, and only the core can put one there.
 25a. `DueAt` is minted by the CORE from `monitor_schedule.next_due_at` in the dispatching tick, never
     from the leader's 15-second snapshot, and is copied onto the result by `dispatch.StampResult`
     alone.
@@ -1843,8 +2116,16 @@ Discharged as a SET in `docs/traceability.md`.
 26a. Every ledger query carries its own `project_id` predicate in SQL, proven by a cross-project
     negative test against the STORE layer, not only through the handler. A monitor outside the
     caller's tenancy is 404 hidden, and a mismatched `projectID`/`monitorID` pair is 404 too.
-26b. The read API returns `ledger_from` and `gap_truncated_before` with every answer, and a range
-    reaching before `ledger_from` returns `unknown` windows rather than silently starting later.
+26b. The read API returns THREE bounds with every answer — `ledger_from`, `gap_truncated_before`
+    and `retention_days` — and a range reaching before `ledger_from` returns the windows it HAS
+    plus the bound that says the rest is unanswerable, never a page silently clipped to a later
+    start. **"Returns `unknown` windows" was the earlier wording and is corrected rather than
+    implemented**: there are no rows before `ledger_from` to return, `openapi.yaml` already
+    described the behaviour the handler has, and manufacturing placeholder windows would be the
+    read-time derivation §6.1 exists to avoid. `retention_days` joined the pair in the same
+    amendment: it is the widest range the endpoint will answer, and a client that assumed the
+    built-in default asked ranges a differently-configured instance refused with
+    `range_too_wide` — dropping the whole answer, bounds included.
 
 ### 17.1 The test case invariants 24a and 24b are discharged by
 
@@ -1972,19 +2253,28 @@ passes against that mutation has not reached the mechanism and is worthless here
 defect the reviewer found by reading SQL that my own prose contradicted, and a regression of it must
 be caught by a test rather than by another review round.
 
-### 17.2 The discharge audit — 69 invariants: 0 covered, 0 specified, 68 discharged, 1 withdrawn, 0 to specify
+### 17.2 The discharge audit — 81 invariants: 0 covered, 0 specified, 80 discharged, 1 withdrawn, 0 to specify
 
 The owner authorized this audit on 2026-09-04 and the reviewer had insisted at [272] that it be
 sized as its own scope rather than folded into the design approval. It asks one question of each
 invariant: **is there something that DIES when this is violated?** Invariant 20g had nothing until
 the reviewer found it at [270], which is why a count of 64 proves nothing on its own.
 
-**Result: 69 invariants — 0 covered, 0 SPECIFIED, 68 DISCHARGED, 1 withdrawn, 0 to specify.**
-Every phase is implemented and every row is discharged: 13a by phase A, 10j by B1-M, four by B1's
-transport slice, 38 by B2's payload-and-ledger slice, 11 by C's claim event, 11 by D's retention and
-read API, and 4 by E's stroke rule. The single remaining row is 11a, a recorded WITHDRAWAL — the
+**Result: 81 invariants — 0 covered, 0 SPECIFIED, 80 DISCHARGED, 1 withdrawn, 0 to specify.**
+Every phase is implemented and every row is discharged: 13a by phase A, 10j by
+B1-M, four by B1's transport slice, 38 by B2's payload-and-ledger slice, 11 by C's claim event, 11
+by D's retention and read API, and 4 by E's stroke rule. Row 11a is a recorded WITHDRAWAL — the
 unqualified claim "no ack concept" was false about the tree, and the withdrawal stays in the table
 rather than being deleted, because a row that vanishes is a claim nobody can find again.
+
+**Twelve of those rows are phase F**, added because a running instance produced a false
+`expected_never_issued` — the fabricated absence of §7.4 — and the amendment that answers it is
+revision 33. They were SPECIFIED before the phase's code existed, which is what §17.2's ENTRY rule
+requires, and they are DISCHARGED now: every one names a test that exists, runs and kills its
+mutation. **Two of those mutations survived their first test, and TWO of the rows exist only because the
+REVIEWER found what they cover** — 27i, the partially reserved batch, and 27j, which proves the
+positive reason a fenced payload is dropped rather than held. A discharge map whose last state was
+"everything is proven" is exactly the map this arc said would be wrong next, and it was.
 
 Two rows MOVED into B2 with the code — 16a and 23a, which D had, because B2 ships the partitions its
 own inserts need — by the same rule that moved §10's segment close out of A: each row belongs to the
@@ -2054,16 +2344,16 @@ next audit will start from the error this one exists to correct.
 | # | Phase | Check kind | Status | Where, or what is missing |
 | --- | --- | --- | --- | --- |
 | 1 | B2 | behavioural | **DISCHARGED** | `TestTheAdvancePersistsTheInstantTheLeaderAlreadyComputed` (`internal/scheduler`) — the persisted instant IS the one the leader computed. **One exception is declared** in the invariant itself: unifying the effective interval moves a non-credentialed monitor's post-verdict probe later |
-| 2 | B2 | behavioural | **DISCHARGED** | all five rules: 1, 3 and 4 in `TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoRecordsNothing`, rule 2 in its own sub-test (it records NOTHING), rule 5 in `TestConfirmAccelerationWritesNoLedgerStatement` |
+| 2 | B2 | behavioural | **DISCHARGED** | all five rules: 1, 3 and 4 in `TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoWithholds`, rule 2 in its own sub-test — which phase F AMENDED: a failed dispatch now WITHHOLDS on a reserved window instead of recording nothing (§7.2, §7.4) — and rule 5 in `TestConfirmAccelerationWritesNoLedgerStatement` |
 | 2a | B2 | source scan | **DISCHARGED** | `TestExactlyOneStatementAdvancesTheExpectation` — an enumerated SET, killed by adding a second `SET next_due_at` |
 | 2b | B2 | behavioural | **DISCHARGED** | `TestABackoffDelayNeverBecomesTheIntervalInForce` (store) and the rule-4 sub-test (scheduler): the delay moves the instant and never the interval |
 | 2c | B2 | behavioural | **DISCHARGED** | `TestTheCurrentWindowRecordsTheIntervalThatSpacedItAndNotTheNextOne` and `TestAConfigurationWriteLeavesTheProbeInstantAlone` — the pair is written by one statement, so there is no restore to test |
 | 2d | B2 | source scan | **DISCHARGED** | `TestConfirmAccelerationWritesNoLedgerStatement` — rule 5 calls no ledger statement at all |
 | 3 | B2 | behavioural | **DISCHARGED** | `TestALeaderGapWhoseFirstActionIsAPolicySkipStillMaterializesTheGap` and `TestABackoffDelayNeverBecomesTheIntervalInForce` both start from a persisted past `next_due_at` |
 | 4 | B2 | behavioural | **DISCHARGED** | `TestABadlyIdentifiedResultCorrelatesToNoWindowAndStillLands` — the heartbeat lands and NO window is covered; the verdict function reads only the window's own row, so inference is impossible by construction |
-| 5 | B2 | behavioural | **DISCHARGED** | `TestTheThreeStatesThisRequirementExistsToDistinguish` — asserted as a SET, so all three collapsing into one verdict fails it |
-| 6 | B2 | behavioural | **DISCHARGED** | the same case: claimed-never-finished distinct from both |
-| 7 | C | behavioural | **DISCHARGED** | `TestARepeatedClaimResolvesToTheEarliestObservation` — both arrival orders, killed by assignment for `LEAST` |
+| 5 | B2 | behavioural | **DISCHARGED** | `TestTheThreeStatesThisRequirementExistsToDistinguish` — asserted as a SET, so all three collapsing into one verdict fails it. Re-discharged in the §17.12 amendment: the SET was representable while `issued_never_claimed` was being produced for windows that had been claimed, so `TestAWindowAnsweredBeforeItsDueInstantIsCovered` and `TestAClaimThatOvertookItsWindowIsRetriedUntilTheWindowExists` carry the half about which state a real run lands in |
+| 6 | B2 | behavioural | **DISCHARGED** | the same case: claimed-never-finished distinct from both — and reachable at all only since the claim retry of §17.12, without which `claimed_at` almost never landed in the in-process topology |
+| 7 | C | behavioural | **DISCHARGED** | `TestARepeatedClaimResolvesToTheEarliestObservation` — both arrival orders, killed by assignment for `LEAST`. The clause "no event writes another event's column" gained its own case in the §17.12 audit: `TestAnExecutorCannotLowerTheIssueInstantItWasHanded`, because the terminal statement was writing the ISSUE event's `issued_at` and nothing said it may not |
 | 7a | C | source scan | **DISCHARGED** | `TestEveryEventStatementUsesTheOneAdmissibilityPredicate` — the claim and the terminal are built on ONE shared expression, and the REFUSAL is asserted NOT to use it (invariant 10f) |
 | 7b | C | behavioural | **DISCHARGED** | `TestAClaimIsRefusedByTheRevisionAndByADeliberateSkip` — §8.1's two negatives, which lived in prose and in no test, plus the converse |
 | 7c | C | behavioural | **DISCHARGED** | the reversed-arrival case from [241], both pairs (§17.8) |
@@ -2100,19 +2390,19 @@ next audit will start from the error this one exists to correct.
 | 20a | E | behavioural | **DISCHARGED** | `TestARunLaterThanItsWindowsOwnIntervalIsCoveredLate` (domain) and the stroke rule's refusal of `covered_late` |
 | 20b | E | behavioural | **DISCHARGED** | `TestAPushMonitorNeverExpectsAWindow` — no schedule row, no window, by every path a push monitor has |
 | 20c | B2 | behavioural | **DISCHARGED** | `TestTheCurrentWindowRecordsTheIntervalThatSpacedItAndNotTheNextOne`, killed by writing `new_interval` |
-| 20d | B2 | source scan | **DISCHARGED** | `TestTheEffectiveIntervalHasExactlyOneOwner` — an enumerated SET of `ConfirmInterval()` callers |
-| 20e | D | behavioural | **DISCHARGED** | the orphan-threshold case (§17.8), plus `TestTheResponseCarriesComputedVerdictsAndItsBounds` proving the assumed threshold reaches a caller |
+| 20d | B2 | source scan | **DISCHARGED** | `TestTheEffectiveIntervalHasExactlyOneOwner` — an enumerated SET of `ConfirmInterval()` callers. The invariant's "passed into `materialize.go`" clause was CORRECTED rather than discharged: that file neither computes nor receives the interval, so there was never a second site there to keep in step |
+| 20e | D | behavioural | **DISCHARGED** | the orphan-threshold case (§17.8), plus `TestTheResponseCarriesComputedVerdictsAndItsBounds` proving the assumed threshold reaches a caller; and, for the MEASUREMENT half the §17.12 audit found unguarded, `TestAnExecutorCannotLowerTheIssueInstantItWasHanded` — a result echoing an earlier `JobIssuedAt` must move neither `issued_at` nor the verdict |
 | 20f | D | behavioural | **DISCHARGED** | `TestTheResponseCarriesComputedVerdictsAndItsBounds` — `interval_assumed` is on the response a consumer actually sees |
 | 20g | E | behavioural | **DISCHARGED** | `TestAnAssumedIntervalNeverPromotesAVerdict` (domain) and the stroke rule's own case, which never reads the flag at all |
 | 21 | B2 | source scan | **DISCHARGED** | `TestNoStoreReadOfTheLedgerFeedsADispatchDecision` and `TestNoSchedulerOrProberPathReadsTheLedger` — the latter inspects string LITERALS, because the table is named in the prose |
-| 22 | D | measurement | **DISCHARGED** | `TestTheHOTRatioIsUndefinedUntilSomethingHasUpdated` for the sample, and `TestTheLedgerBoundsAreEnforcedAndZeroMeansDefault` (config) for the enforced retention bounds |
-| 23 | D | measurement | **DISCHARGED** | `TestTheHOTRatioIsUndefinedUntilSomethingHasUpdated` — ONE unlabelled gauge, unpublished on a zero denominator, with the counters still exported |
+| 22 | D | measurement | **DISCHARGED** | `TestTheHOTRatioIsUndefinedUntilSomethingHasUpdated` for the sample, `TestTheLedgerBoundsAreEnforcedAndZeroMeansDefault` (config) for the enforced retention bounds, and — added in the §17.12 amendment — `TestEveryLeaderConstructionWiresTheLedgerPass`, without which the sample was correct and reached no binary's `/metrics` |
+| 23 | D | measurement | **DISCHARGED** | `TestTheHOTRatioIsUndefinedUntilSomethingHasUpdated` — ONE unlabelled gauge, unpublished on a zero denominator, with its two inputs still exported. Those two are GAUGES since the §17.12 amendment: as `pg_stat` sums over the retained partitions they FALL when a partition is dropped, which a `_total` counter may not do |
 | 23a | B2 | schema assertion | **DISCHARGED** | moved from D with the partitions: `TestANewlyCreatedPartitionCarriesTheFillfactor` and `TestThePartitionMaintainerSetsTheFillfactorItself` |
 | 24 | B2 | behavioural | **DISCHARGED** | §17.1 (a), (b) and (c), all three implemented |
 | 24a | B2 | behavioural | **DISCHARGED** | the same, plus `TestTheFenceOnlyEverMovesForwardAndIsNeverErased`, which a surviving mutation forced into existence |
 | 24b | B2 | behavioural | **DISCHARGED** | `TestTheGapCapIsPerMonitorAndEachMonitorFencesItsOwn` — killed by revision 2's batch-wide LIMIT |
 | 24c | D | behavioural | **DISCHARGED** | `TestDroppingAPartitionMovesLedgerFromAndClaimsNothingBeforeIt` — the bound MOVES with the drop, which a stored one would not |
-| 25 | B2 | behavioural | **DISCHARGED** | `TestABadlyIdentifiedResultCorrelatesToNoWindowAndStillLands` — five shapes, each with the heartbeat asserted separately |
+| 25 | B2 | behavioural | **DISCHARGED** | `TestABadlyIdentifiedResultCorrelatesToNoWindowAndStillLands` — five shapes, each with the heartbeat asserted separately; and, for the clause the §17.12 amendment WITHDREW, `TestAWindowAnsweredBeforeItsDueInstantIsCovered` beside `TestAnEarlyWindowIsAdoptedButNeverInvented`, which are the two halves of "filled, never invented" |
 | 25a | B2 | source scan | **DISCHARGED** | `TestOnlyStampResultCopiesTheWindowOntoAResult` across five packages, plus the minting site in the schedule read and the materializer's own join |
 | 25b | C | behavioural | **DISCHARGED** | the crossed-pair case (§17.8) |
 | 25c | B2 | source scan | **DISCHARGED** | `TestEveryWindowInsertNamesTheColumnsThatCannotBeDefaulted` — an enumerated SET, killed by revision 7's and revision 15's own omissions |
@@ -2121,7 +2411,19 @@ next audit will start from the error this one exists to correct.
 | 25f | B2 | document check | **DISCHARGED** | §13.1's table names `DueAt`'s type, tag, mint source and single copier, and `TestOnlyStampResultCopies...` enforces the last of those against the tree |
 | 26 | B2 | schema assertion | **DISCHARGED** | `TestTheLedgerForeignKeysAreComposite` — the constraint's COLUMN SET on both tables |
 | 26a | D | behavioural | **DISCHARGED** | `TestAMismatchedProjectAndMonitorReturnNothingAtTheStoreLayer` at the store, and `TestAProjectAndMonitorThatDoNotBelongTogetherAreNotFound` at the handler |
-| 26b | D | behavioural | **DISCHARGED** | `TestEveryPageCarriesTheBoundsThatSayWhatItMeans`, including the EMPTY page — which is the one a caller would otherwise read as "nothing was due" |
+| 26b | D | behavioural | **DISCHARGED** | `TestEveryPageCarriesTheBoundsThatSayWhatItMeans`, including the EMPTY page — which is the one a caller would otherwise read as "nothing was due" — and `TestTheRangeBoundFollowsTheConfiguredRetention` for the third bound the §17.12 amendment added |
+| 27 | F | behavioural | **DISCHARGED** | `TestNoJobIsPublishedBeforeItsWindowIsRecorded` (§17.14), killed by the shipped order — publish, then advance |
+| 27a | F | behavioural | **DISCHARGED** | `TestAGapNeverCoversAnInstantAJobWasPublishedFor`, killed by letting the gap CTE run over a reserved instant |
+| 27b | F | behavioural | **DISCHARGED** | `TestAFailedReserveDefersTheDispatchAndMovesNothing`, killed by publishing after the failure |
+| 27c | F | behavioural | **DISCHARGED** | `TestTheReserveRetryIsIdempotentUnderTheSamePayload`, killed by re-minting the payload between attempts |
+| 27d | F | behavioural, TWO transactions | **DISCHARGED** | `TestATwoTransactionLockCycleLeavesNoFalseNeverIssued` — the 40P01 cycle FORCED, not waited for; killed by log-and-discard |
+| 27e | F | behavioural | **DISCHARGED** | `TestAReservedWindowIsNeitherMissedNorIssued`, killed by mapping `reserved` onto either absence verdict |
+| 27f | F | behavioural | **DISCHARGED** | `TestANewLeaderNeverRepublishesAReservedWindow`, killed by minting from an unmoved `next_due_at` |
+| 27h | F | behavioural | **DISCHARGED** | `TestTheFillCannotWriteIssuedAtOnAReservedRow`, killed by restoring the executor-owned merge for a reserved row |
+| 27j | F | behavioural | **DISCHARGED** | `TestAFencedPayloadIsDroppedAndTheMonitorIsDecidedAgain` — the POSITIVE half of the drop rule, required by the reviewer at [30] because 27i alone proves only that an unreserved job stays put; killed by holding the fenced payload, which never terminates |
+| 27i | F | behavioural | **DISCHARGED** | `TestAPartiallyReservedBatchPublishesOnlyWhatItReserved` — the path that LOOKS like success; killed by publishing on `err == nil` and logging the short count |
+| 27k | F | behavioural, SET | **DISCHARGED** | the vocabulary as a set (§17.15). It also repairs a defect older than this phase: `unknown` was drawn as a missed run against the phase-E mock's own table, on the shipped default configuration |
+| 27g | F | live cross-check, SUPPLEMENTARY | **DISCHARGED** | `e2e/tests/expected-runs.spec.ts` — runs recorded may not outnumber windows that say a job was dispatched. Measured against the recorded defect: 4 runs against 3 dispatched windows on the instance §7.4 was written from, and equal populations on the phase-F build |
 
 ### 17.3 Phase A's entry gate — invariant 13a specified
 
@@ -2134,8 +2436,8 @@ row — so its configuration was indescribable until someone updated it. The rev
 [304] because the invariant said "every bump" while the property is "every generation", and a
 fence-keyed guard is blind to initialization by construction.
 
-Both create paths — `CreateMonitor` at `internal/store/monitors.go:650` and the file-apply loop at
-`internal/store/fileapply.go:262` — call the SAME `insertMonitorTx`, so ONE write covers both and
+Both create paths — `CreateMonitor` in `internal/store/monitors.go` and the file-apply loop in
+the apply loop in `internal/store/fileapply.go` — call the SAME `insertMonitorTx`, so ONE write covers both and
 they cannot diverge. That is a stronger fix than patching two sites, and it is why the guard's
 creation half keys on `INSERT INTO monitors` rather than on either caller.
 
@@ -2145,12 +2447,12 @@ because the `INSERT` lives inside one. Two properties, two detections, and neith
 the other.
 
 **There are FOUR revision-bump sites, not one.** `revisionFenceSetSQL` — the D-0142 fence — appears
-at `internal/store/monitors.go:878` (inside `updateMonitorTx`), `internal/store/monitorretire.go:153`
+in `internal/store/monitors.go` (inside `updateMonitorTx`), `internal/store/monitorretire.go`
 (retire: `retired_at`, `enabled = false`), `:219` (restore: `retired_at` cleared, `enabled = true`)
-and `internal/store/secrets.go:434` (a secret rotation changes what the monitor executes). All four
+and `internal/store/secrets.go` (a secret rotation changes what the monitor executes). All four
 are legitimate generation changes.
 
-**The fourth is a BULK bump, which the other three are not.** `secrets.go:434` is the rotation fence:
+**The fourth is a BULK bump, which the other three are not.** `fenceSecretMonitors` in `secrets.go` is the rotation fence:
 `UPDATE monitors SET <fence> WHERE id = ANY($1::uuid[]) AND project_id = $2` — it bumps every monitor
 that references the rotated secret, in one statement. Its timeline write must therefore insert **one
 row per affected monitor**, not one row. A test that rotates a secret referenced by a single monitor
@@ -2158,7 +2460,7 @@ would pass against an implementation that writes exactly one row regardless, so 
 secret referenced by **three**.
 
 **Seven occurrences of the identifier, four of them real uses**, and the difference is why the guard
-must parse rather than grep: `monitors.go:45` is the doc comment, `:51` is the `const` definition,
+must parse rather than grep: in `monitors.go` the identifier appears in its own doc comment and in the `const` definition,
 and **`:874` is the identifier appearing inside a raw SQL string as an SQL comment**
 (`-- fence (see revisionFenceSetSQL)`). A text scan counts that as a fifth use; a `go/ast` scan sees
 a `BasicLit` and does not. The guard counts identifier REFERENCES in expressions, which is exactly
@@ -2173,7 +2475,7 @@ all four, not one.
 | Claim of 13a | Check kind | Test | The mutation that must kill it |
 | --- | --- | --- | --- |
 | Every bump writes its row in the SAME transaction | behavioural, per site | Four store tests, one per site — update, retire, restore, and a secret rotation touching THREE monitors: bump, then assert a `monitor_execution_revisions` row exists for the NEW revision of every affected monitor. Then force the row-write to fail and assert the BUMP rolled back: no generation without a row | Move the timeline insert after the transaction commits, at any one of the four sites — the forced-failure half must then leave a bumped revision with no row and fail BY NAME, naming the site. And for the rotation site specifically, write ONE row instead of one per monitor: the three-monitor test must fail where a one-monitor test would pass |
-| No FUTURE site can bump without one | **source scan** | A `go/parser`/`go/ast` test over `internal/store`'s non-test files, in the shape of `internal/api/monitordoors_test.go`: every identifier REFERENCE to `revisionFenceSetSQL` — not every textual occurrence, see above — must be inside a function that also references the timeline insert. Asserts the count is exactly four and enumerates them, so a new site is a failure rather than a silent pass. Placed in `internal/store` beside the code it guards, per [286] | TWO mutations: add a fifth use in a function with no timeline insert (the scan must fail and NAME the function); and change the scan to a text match, which then counts `monitors.go:874`'s SQL comment as a use and reports five — a guard that miscounts its own subject is worse than none |
+| No FUTURE site can bump without one | **source scan** | A `go/parser`/`go/ast` test over `internal/store`'s non-test files, in the shape of `internal/api/monitordoors_test.go`: every identifier REFERENCE to `revisionFenceSetSQL` — not every textual occurrence, see above — must be inside a function that also references the timeline insert. Asserts the count is exactly four and enumerates them, so a new site is a failure rather than a silent pass. Placed in `internal/store` beside the code it guards, per [286] | TWO mutations: add a fifth use in a function with no timeline insert (the scan must fail and NAME the function); and change the scan to a text match, which then counts the SQL comment in `updateMonitorTx` as a use and reports five — a guard that miscounts its own subject is worse than none |
 | The backfill writes exactly one row per monitor | behavioural | Seed monitors including a DISABLED one and a RETIRED one, migrate, assert `count(monitor_execution_revisions) == count(monitors)` and `effective_from = monitors.updated_at` | Restrict the backfill to `WHERE enabled` — the disabled monitor then has no row and the count assertion fails |
 | Every row carries that revision's four cadence fields | behavioural | Assert `interval_seconds`, `confirm_interval_seconds`, `timeout_seconds` and `retries` each equal the monitor's value | Drop `confirm_interval_seconds` from the backfill's projection. A test asserting only `interval_seconds` would survive this, which is why all four are asserted individually |
 
@@ -2241,7 +2543,7 @@ instead of a test shaped to fit finished code.
 
 **Invariant 11, corrected before it could be implemented.** The import half is true today and needs
 pinning: `internal/worker` and `internal/agent` import only `dispatch` and `domain`, no store
-package. The "no ack concept" half was **false** — `internal/agent/agent.go:290` acks only the jobs
+package. The "no ack concept" half was **false** — `Agent.poll` in `internal/agent/agent.go` acks only the jobs
 it processed and `:329` deliberately does not ack so leases lapse and jobs are re-delivered. That
 lease-ack is the pull transport's delivery guarantee, predates this requirement, and is out of
 scope. What §4a and `amqp.go:191-194` actually require is that the **`Dispatcher` interface** expose
@@ -2266,7 +2568,7 @@ phase, and §16 already gives B2 the payload and the ledger atomically, so 10i m
 | Mutation B2's gate must carry | Why it is the one that matters |
 | --- | --- |
 | Treat the missing field as a rolling-upgrade case and probe anyway | The plausible mistake: the code already tolerates absent identity on OLDER carriers, and the tolerant branch is one `if` away from covering V4 too. The test must distinguish carrier from payload |
-| Drop the delivery silently instead of dead-lettering | Passes any assertion that only checks "no probe ran", which is why the dead-letter arrival is asserted separately. `AMQP.deadLetter` (`internal/dispatch/amqp.go:499`) already forwards a poison body to the durable queue "so it survives for inspection instead of vanishing", and `amqp_test.go` already skips unless `CERBIX_TEST_RABBITMQ_URL` is set |
+| Drop the delivery silently instead of dead-lettering | Passes any assertion that only checks "no probe ran", which is why the dead-letter arrival is asserted separately. `AMQP.deadLetter` (`internal/dispatch/amqp.go`, at `:499`) already forwards a poison body to the durable queue "so it survives for inspection instead of vanishing", and `amqp_test.go` already skips unless `CERBIX_TEST_RABBITMQ_URL` is set |
 
 **Invariant 10j, added by that same rejection: the migration must fail closed on ROLLBACK.** None of
 the previous 66 invariants said anything about rolling back, which is how a migration that widens a
@@ -2286,7 +2588,7 @@ the migration refuses rather than performing it silently.
 transports read the generation the producer stamped — AMQP from the queue it published to, pull from
 the row's column, in-process from the job's own field — so one assertion covers all three, and three
 consumer-side assertions would still miss the producer. The assertion sits on **`lead()`'s resolved
-map**: the three `carrierGeneration[region] = …` branches at `scheduler.go:1514`, `:1529` and `:1552`
+map**: the three `carrierGeneration[region] = …` branches in `lead()`
 all write one map built at `:1500` inside that function, so the gate reads its OUTPUT rather than any
 branch. A branch-level assertion is precisely what lets one branch drift.
 
@@ -2615,7 +2917,7 @@ is why this section cites nine files.
 - **The leader** — `TestTheAdvancePersistsTheInstantTheLeaderAlreadyComputed`,
   `TestAMonitorWithNoStandingExpectationStaysBelowTheLedgerCarrier`,
   `TestALedgerReadFailureCostsNoProbe`,
-  `TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoRecordsNothing`,
+  `TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoWithholds`,
   `TestTheFlagOnRaisesTheInProcessRegionAndNeverItsPullRegions`,
   `TestTheEffectiveIntervalHasExactlyOneOwner`,
   `TestConfirmAccelerationWritesNoLedgerStatement` and
@@ -2879,6 +3181,345 @@ both were obvious within thirty seconds of a running leader.
 panel draws NO stroke while still showing the expectation ruler. That is the honest picture of an
 instance that records what was expected and cannot yet correlate answers to it — and it is the
 state most installations will be in on the day they upgrade.
+
+### 17.12 The post-implementation audit — what a full read of the tree and a running stack found
+
+Every phase was implemented, every invariant marked DISCHARGED, the whole suite green and the E2E
+gate passing when the arc was read end to end against the code and against a live instance. It found
+**sixteen** things. Five were defects in the requirement's own subject, five were narrower, and six
+were the documents disagreeing with the tree. They are recorded here in the order of what they cost,
+because the pattern across them is more useful than any one of them.
+
+**Two of the five were verified by MEASUREMENT on a running instance, not by reading**, and the
+fifth was found only by re-reading the audit's OWN changes — which is why it is numbered with them
+rather than filed as a separate round. That is the
+same lesson §17.11 recorded one round earlier, arriving again: the unit suites supply their own
+expectations, so a defect in what the system does to ITSELF is invisible to them.
+
+#### 1. A window ANSWERED EARLY could never be answered
+
+`correlateExpectedRun` refused any result whose `DueAt` postdated its own `IssuedAt`, under the rule
+"an expectation cannot postdate its own dispatch". That rule is false about this system. The leader
+dispatches from its in-memory `nextRun`, not from `monitor_schedule.next_due_at`, and two ordinary
+states put the first earlier than the second:
+
+- **leadership acquisition** — the map is created empty, so `dueForDispatch` is true for every
+  monitor at once while its standing expectation may still be in the future;
+- **confirm acceleration** — rule 5 pulls `nextRun` in and, by §7.3, writes nothing to the schedule.
+
+Both mint a job whose `DueAt` postdates its `IssuedAt`, from ONE statement in the core. The advance
+then writes the window at that instant, and the run that answered it was refused correlation — so
+the window read `issued_never_claimed` forever although the probe ran and its heartbeat landed. That
+is exactly what invariant 25 says a result must never produce, broken by the core's own mint rather
+than by a bad result. Measured on a running instance: **twelve windows carried `issued_at < due_at`
+and all twelve were unanswered.**
+
+The refusal is withdrawn and what it actually protected is moved to where it belongs. An early
+window may be **FILLED and never INVENTED**: §8.3's orphan insert now requires the row to exist, so
+an executor-supplied instant in the future can annotate a window the core wrote and can never create
+one. `Verdict()` needed no change — it already measures lateness as `issued_at - due_at` and reads a
+negative one as `covered`.
+
+#### 2. The claim event was lost almost every time in the most common topology
+
+§7.1 flushes the advance once per tick, AFTER the publishes in it. The executor emits its claim the
+instant it takes the job off the transport. On the in-process transport the claim therefore reaches
+ingest before the window row exists, and the claim statement is an UPDATE that may not create one —
+so it matched nothing and was dropped. Measured on a running `role=all` instance with the carrier
+on: **one claim landed across sixty-two generation-4 windows.**
+
+No verdict was wrong — a terminal outranks a missing claim — but `issued_never_claimed` came to mean
+"the claim raced the advance" far more often than the executor loss §8.5 says it exposes, and
+`claimed_never_finished` was effectively unreachable. The consumer now parks an unmatched claim and
+re-offers it a bounded number of times at the tick's own scale, with the claim's INSTANT untouched.
+
+**The code CALLED this the crash-after-publish case, and it is the common case.** A comment that
+names a state's rare cause is a comment that stops anyone measuring how often the state occurs.
+
+#### 3. §11's measurement gate reached no binary
+
+`WithLedgerMetrics` and `WithExpectedRunRetention` were defined, documented in the runbook,
+described in `config.example.yaml` — and called from nowhere. Nothing wired the HOT sampler, so
+`cerbix_expected_runs_hot_update_ratio` and its two inputs were exported by NO process; and the
+leader's purge fell back to the built-in fourteen days whatever `ledger.expected_run_retention_days`
+said, so one setting produced two retentions. Verified on a live `/metrics`: ninety-one `cerbix_*`
+series, none of them the ledger's.
+
+Invariants 22 and 23 were marked DISCHARGED by tests that exercise the sampler and the registry
+SEPARATELY. Both were true. Neither could see the wire between them, which is
+[[evidence-reaches-mechanism]] at the wiring boundary: **a builder that is never called is a
+capability that does not exist, and the compiler cannot see it.** The guard is now a source scan
+over every `scheduler.New(...)` in `cli.go`.
+
+#### 4. The E2E gate asserted the feature switched OFF, and failed when it was on
+
+`expected-runs.spec.ts` hard-coded "no window may record carrier 4" with a message naming the
+carrier as off. Turning FR-032 on therefore made `make dev-test` fail, and fail with a message
+pointing at the opposite of the truth. The deeper cost is what it implies: **the whole generation-4
+path had never been exercised against a live instance** — not the v4 queue, not `agentJobsV4`, not a
+`covered` verdict, not the stroke. The spec now derives the expectation from `CERBIX_LEDGER_CARRIER`
+and asserts the CARRIER-ON half too: with the carrier on the panel must actually draw.
+
+#### 5. An executor could promote a late window to a covered one
+
+Invariant 20e says "no executor-supplied value can move a window from `covered_late` to `covered`",
+and invariant 7 says "no event reads or writes another event's column". §8.3's upsert broke both in
+one expression: `issued_at = LEAST(COALESCE(expected_runs.issued_at, $n), $n)`, where `$n` is the
+executor's echo of `JobIssuedAt`. The terminal event was therefore writing the ISSUE event's column,
+and writing it with the only argument in that statement the core does not own — so a result naming
+an earlier instant shrank `issued_at - due_at` and moved the verdict toward `covered`. A window five
+minutes late read `covered` when its result claimed to have been issued at the due instant.
+
+It was reachable without malice, too: the honest echo is the instant `LoadDueExpectations` minted in
+the tick's pre-pass, while the advance writes the leader's own `now` from a different clock at the
+end of the tick, so `LEAST` picked whichever of two clocks ran slower and the column drifted in the
+direction of understating lateness.
+
+`COALESCE(existing, $n)` is first-writer-wins, which is what the two lines above it already do for
+`job_id` and `carrier_generation` and for the same reason. The ORPHAN path still supplies it,
+because there the core never wrote one and §8.3 states that trust boundary explicitly — but that is
+adoption of a window the ledger missed, not overwriting one it recorded.
+
+**This one is not a defect the audit's fixes introduced; it shipped with B2 and survived every
+review, including the audit's own first pass.** It was found only on a re-read of the changes the
+audit had just made, by asking of each merge expression "whose value is this, and who may lower
+it" — which is a question worth asking of every `LEAST` and `GREATEST` in the file.
+
+#### The five narrower findings
+
+| # | Finding | Disposition |
+| --- | --- | --- |
+| 5 | The AMQP v4 queue is bound on the LEDGER capability, but a generation-4 job may carry an envelope, so in a region whose workers do not share one `secrets.dispatch_envelope` setting an envelope-bearing delivery can reach a worker that declared no envelope capability. Invariant 10g's "physical isolation" does not extend to it | The seam enforces what the queue cannot: the AMQP consumer dead-letters a delivery whose envelope version exceeds its own capability. The ANNOUNCEMENT stays uncoupled — tying it to secrets is the [450] defect |
+| 6 | `fillExpectedRunTerminalTx` was the only ledger write without a `revision >= 1` guard. Under `result.revision_mode: observe` a result carrying `execution_revision: 0` would create an orphan window stamped with a generation no timeline row can describe | Guarded at the one place, beside the two siblings that already had it |
+| 7 | The read API bounded a range by `domain.DefaultExpectedRunRetentionDays` rather than the configured retention, so a ninety-day instance refused a thirty-day range for rows it held | The store owns the number and the handler asks. `retention_days` now travels on every page, because a client cannot form a valid query without it |
+| 8 | The panel asked for one page of 200 windows and ignored `next_cursor`, so `strokeSegments` decided "every window here is `covered`" over a set that could be missing members; and a span wider than retention got `range_too_wide`, which dropped the whole answer and silently removed the ruler | The panel pages to a bound and abandons the answer rather than truncating it, and clamps its range to the retention the server reports |
+| 9 | `expected_run_gap_windows_max` bounded the rows INSERTED and not the statement's work: the series and the window function still materialized every window back to the retention floor. Separately, a clipped series started at the floor, so gap windows landed off the monitor's own grid | The series is over step INDICES: the grid is structural and the cap bounds the series |
+
+#### The six documentation findings
+
+The largest was **line citations**: thirty-three `file.go:NNN` references across the living
+documents, of which **thirteen pointed at whitespace, a closing brace or an unrelated statement** —
+including every line in §7.2's advance-rule audit, the `nextRun` map §5.1 is built on, the ingest
+gate §7.1 fences against, `(*Config).Validate`, `scheduler.New`'s `case "all"`, the agent's ack and
+`AMQP.deadLetter`. `make docs-check` passed throughout, because it validated that a cited PATH
+exists and never that a cited LINE says anything.
+
+The durable fix is not better line numbers. Where the document names a function, the function is
+now the anchor and cannot drift; where a line citation remains, `check_line_citations` fails the
+build when it lands on nothing. That guard is WEAK by construction — it cannot tell a citation that
+moved onto the wrong statement from one that did not move — and it says so, because a guard that
+implies more than it checks is worse than none.
+
+The other five: invariant 26b promised `unknown` windows for a range before `ledger_from` that the
+handler never returned and `openapi.yaml` never described (the invariant is corrected, not the
+code); §6.1 and §6.2's DDL omitted both `CHECK`s and the DEFAULT partition the migration adds, and
+§6.1 still carried the parent `fillfactor` §11 itself calls ineffective; invariant 20d claimed the
+effective interval is "passed into `materialize.go`", which neither computes nor receives it; the
+§11 metric table called two `pg_stat`-derived values monotonic `_total` counters when they fall
+whenever retention drops a partition; and four Go doc comments had been captured by functions
+inserted into the middle of them, leaving `WithCredentialEnvelopes`, `LiveCredentialV3JobRegions`,
+`LiveCredentialReadyAgentRegions` undocumented and `ClaimPullJobsV4` documented as `ClaimPullJobsV3`.
+
+#### What this round says about the arc
+
+Seven of the ten code findings are the same shape as the ten before them: **prose that promises what
+the mechanism beside it does not do** — invariant 20e's own second sentence among them. The claim "the crash-after-publish case", the cap that
+"bounds one statement's work", the counters that are "monotonic", the gauge the runbook says to
+watch — each was a true-sounding sentence next to code that did something else, and each survived
+every review because reading the sentence is not reading the mechanism.
+
+The two that a live stack found are the two nobody could have read their way to. That is now twice
+in one arc, and it is the strongest argument in it for a rule: **a phase is not closed until the
+thing it built has been observed doing its job on a running instance, in the configuration it ships
+in AND in the configuration it is for.**
+
+### 17.13 The review of revision 31 — the SPA's retention bootstrap
+
+Two findings from the reviewer of revision 31, in the CLIENT half of §13a. The second arrived only
+because the first fix treated the path it was found on rather than the property behind it.
+
+The panel does not know `ledger.expected_run_retention_days`. It opens at the documented default of
+fourteen days, clamps every request to it, and the value that corrects the assumption travels only
+on a SUCCESSFUL answer — which is the answer that was already clamped:
+
+| The instance | What happens | What the panel then held |
+| --- | --- | --- |
+| keeps **90** days | the 14-day question is ANSWERED and teaches 90 | the newest 14 days of a wider panel |
+| keeps **7** days | the 14-day question is REFUSED with no body; the retry at the enforced minimum of 2 is answered and teaches 7 | the newest 2 days of a wider panel |
+
+Neither draws a false stroke: `coversInterval` needs a window before it will defend an interval, so
+unfetched time gets no stroke and no cell. It is the other error, and it is the one this requirement
+exists to prevent — the older part of the span renders exactly as "no run was due here" while
+`ledger_from` in the SAME answer says the ledger speaks for that time. It is also the rule §13a
+already applies one level down, where hitting the page bound abandons the answer rather than
+returning a truncated set.
+
+The fix is ONE comparison rather than a case per path: after any successful answer, if the bound now
+held would start the request earlier than the request that produced it did, ask once more under the
+learned bound. `expectedRunFromMs` owns that arithmetic for the request and for the test alike. The
+first fix compared `learned > assumed`, which is a PROXY for it: true in cases needing no refetch,
+and false in the minimum-fallback case that needed one.
+
+**The same assumption, in the file that explains why it is wrong.** Reading `expected-runs.spec.ts`
+to check whether a stale row could reach it — it cannot; the spec is monitor-scoped — found the
+range-contract loop asserting `range_too_wide` from a **hard-coded forty days**. That is a client
+assuming the bound rather than reading the one the endpoint publishes, so on an instance keeping
+forty days or more the handler correctly answers 200 and the LIVE gate fails, naming a contract
+violation that did not happen. It is derived now, `now - (retention_days + 1) days`, which is too
+wide everywhere. `retention_days` itself was asserted on no live surface at all — the spec checked
+`ledger_from`, `gap_truncated_before` and `next_cursor` and skipped the third bound, the one §13a
+says a caller needs before it can form a valid query — and it is asserted now, its 2..90 range
+included.
+
+**What this says about the arc.** The defect is in the FETCH. Every library test over
+`strokeSegments` supplies its own answer, so none of them could see it, and the panel's surface
+tests supply theirs directly — so the retention-learning path added by revision 31's own audit had
+no test of any kind. `frontend/src/views/ExpectedRunRetentionBootstrap.spec.ts` covers it with four
+cases against the real component and a server that refuses a too-wide range the way
+`handlers_expectedruns.go` does, killing three distinct mutations: never refetch (two cases fail),
+always refetch (the other two fail), and dropping the minimum fallback (one fails). That is the same
+shape as §17.12's third finding one layer up — both sides tested, the wire between them tested by
+nothing.
+
+### 17.14 Phase F's entry gate — the publish boundary, specified before its code
+
+§17.2's ENTRY rule applies: every row phase F owns becomes a named test with a killed mutation
+BEFORE the code is written.
+
+**The test names below were written in BOLD while they did not exist**, because `make docs-check`
+fails a backticked `Test*` name the tree does not hold and an entry gate must be allowed to name
+tests that intentionally do not exist yet; an `ALLOWED` entry would have bought the citation form at
+the price of an allowlist that outlives the phase and then hides a deletion. **They are citations
+now**, which is the same commit's job: every one of them exists, runs, and kills the mutation named
+beside it. The reviewer set five proof obligations at party [16], seven required
+scenarios at [18] and the identity binding at [20]; all three are discharged by the rows below, and
+each scenario asserts the EXACT rendered verdict and that no later tick, gap, retry or handover
+republishes the same `due_at` under a new `job_id`.
+
+| # | Obligation or scenario | The test that must exist | The mutation it must kill |
+| --- | --- | --- | --- |
+| 27 | After any successful publish, its `(monitor_id, due_at, job_id, carrier)` is already durable | `TestNoJobIsPublishedBeforeItsWindowIsRecorded` — a fake transport asserting the row exists at publish time | today's order: publish, then advance |
+| 27a | No gap may cover an instant a job was published for | `TestAGapNeverCoversAnInstantAJobWasPublishedFor` — force a failed reserve, then a successful one, and assert the instant is either reserved or absent, never `expected_never_issued` | letting the gap CTE run over an instant with a reserved row |
+| 27b | A failed reserve defers the dispatch and moves nothing | `TestAFailedReserveDefersTheDispatchAndMovesNothing` | publishing anyway after the failure — the shipped behaviour |
+| 27c | The retry uses the SAME immutable payload and is idempotent, and no re-materialization may change the bound identity | `TestTheReserveRetryIsIdempotentUnderTheSamePayload` — apply twice, assert one window, one instant and one `job_id`; a second materialization for the same `(monitor_id, due_at)` is refused rather than producing a new identity | re-minting the payload (new `job_id`, new `now`) between attempts, which is the stale-identity defect on this side |
+| 27d | A forced 40P01 cycle leaves no false absence | `TestATwoTransactionLockCycleLeavesNoFalseNeverIssued` — two transactions taking the advance's and the fill's rows in opposite order, one killed by the deadlock detector, with a delivered heartbeat beside the window | log-and-discard: the shipped path |
+| 27e | A reserved window renders as `reserved` and never as either absence | `TestAReservedWindowIsNeitherMissedNorIssued` (domain), covering process death before publish and publish failure | mapping `reserved` onto `issued_never_claimed` or `expected_never_issued` |
+| 27f | Leader handover cannot republish a reserved instant, nor mint a second identity for it | `TestANewLeaderNeverRepublishesAReservedWindow` — the window stays `reserved` and no second `job_id` exists for that key, whatever the new leader's snapshot says | letting a new leader mint from an unmoved `next_due_at`, and — separately — letting it re-materialize a payload for a reserved key |
+| 27i | A PARTIALLY reserved batch publishes only what it reserved | `TestAPartiallyReservedBatchPublishesOnlyWhatItReserved` — two ledgered items, exactly one reservation committed, and the other job never published or confirmed | aggregate the result: publish on `err == nil` and log the short count, which is what the first implementation did |
+| 27j | A FENCED payload is dropped, and the monitor is decided again at the standing instant | `TestAFencedPayloadIsDroppedAndTheMonitorIsDecidedAgain` — a configuration write crosses the dispatch through the real config signal; the stale payload is never published, and the next decision reserves and publishes exactly ONE new identity at the same due instant | hold the fenced payload: it names a revision the fence has already refused, so it is refused every tick and the monitor is never probed again |
+| 27h | The fill may not write `issued_at` on a reserved row, structurally | `TestTheFillCannotWriteIssuedAtOnAReservedRow` — an early terminal on a reserved window leaves `issued_at` NULL and reads `covered`; the ownership lives in the statement, not in a caller's discipline | restoring `COALESCE(expected_runs.issued_at, $6)` for a row carrying `reserved_at`, which makes the instant executor-owned again |
+| 27k | The panel's verdict→cell map is EXHAUSTIVE, and no verdict falls to a default | `frontend/src/views/ResponseTimePanel.spec.ts` — all seven verdicts asserted as a SET, plus an unrecognised name landing on the hatch, plus `reserved` drawn as a neutral outline and never a fill, plus the readout naming `reserved_at` and `withheld_reason`. Completeness for THIS build is the TYPE-CHECK: the map `satisfies Record<ExpectedRunVerdict, ExpectationCellKind>` against the generated union | restore the default arm (three verdicts become missed runs again); give `reserved` the failure hue; send `unknown` back to the missed-run cell; and delete a key from the map, which fails `npm run type-check` with `TS1360` — four mutations, four different failures |
+| 27g | The live gate cross-checks negative claims against the facts beside them | `e2e/tests/expected-runs.spec.ts`: at or after `ledger_from`, the number of RUNS recorded may not exceed the number of windows saying a job was dispatched | the suite as it stands, which passed 68 and skipped 1 with two false facts in the table |
+
+Scenario coverage, so the mapping is checkable rather than asserted: reserve-then-death is 27e;
+publish success with a lost confirm is 27 plus the terminal case of §7.4's table; an in-process claim
+or terminal racing the confirm is 27 (the row exists before the job leaves the process); publish
+failure is 27e; handover is 27f; deadlock and retry exhaustion are 27b, 27c and 27d; old-carrier
+semantics are unchanged and belong to invariant 10c, already discharged, with a regression added to
+27e's file so the ordering of `Verdict()`'s tests is pinned by something that fails when it changes.
+
+**What this gate does NOT claim.** The live cross-check is supplementary, exactly as required: it is
+the last line of the matrix, not its oracle. Every row above it is a deterministic test, and 27d is
+deterministic in the strong sense — it forces the lock cycle rather than waiting for load to produce
+one.
+
+**27g was written the wrong way first, and the wrong way is worth recording.** Its first form was
+"no `expected_never_issued` window may have a heartbeat inside its own interval" — which is TIME
+PROXIMITY, the exact heuristic FR-031 and FR-032 exist to abolish, written into the gate meant to
+defend them. It failed on a freshly created monitor whose first run answered the STANDING window
+late: the heartbeat landed inside the next window's interval, and that window's absence was true.
+Correlation is by identity and a live surface cannot see identity, so the check compares POPULATIONS
+instead, which needs neither: if the ledger holds fewer dispatched windows than there are runs, some
+run answered no window at all. That is the silent half of §7.4's defect, and the fabricated absence
+is what follows it. Validated in both directions rather than assumed — it fires on the recorded
+defect (4 runs, 3 dispatched windows on the instance the amendment was written from) and passes
+repeatedly on the phase-F build.
+
+### 17.15 Phase F's render — and the defect drawing it found
+
+The mock is `docs/design/mock-expected-run-reserved.html`, **approved by the owner on 2026-09-05**
+after the reviewer recommended its candidate B. It decides one cell and repairs three.
+
+**What it decides.** A `reserved` window is drawn as an OUTLINE in `--ink-3`: the geometry of the
+missed-run cell in a hue that is not failure. The alternatives are drawn beside it at the width the
+panel really uses — about 2.4 pixels at sixty checks — because that is where they differ: a dash
+pattern does not survive it, and a second hatch collides with "the ledger holds nothing here", which
+is a different statement. Before `ledger_from` there is no row at all; a reserved window is a row
+that exists and says the dispatch is unproven.
+
+**What it repairs, and this is the larger half.** `expectationCells` mapped `covered`,
+`covered_late` and pre-`ledger_from` time, and sent EVERYTHING ELSE to the `--down` outline whose
+meaning is "a run was due here and nothing ran". Three verdicts were therefore drawn as missed runs —
+`unknown`, `issued_never_claimed` and `claimed_never_finished` — and the phase-E mock this panel was
+approved against had already assigned `unknown` the HATCH. The implementation diverged from its own
+approved drawing, in the direction of over-claiming, and no test noticed because the panel's surface
+cases only ever supplied the three verdicts the chain handled.
+
+**On the shipped default the consequence is total.** With `ledger.carrier_enabled` off every window
+reads `unknown`, so the expectation ruler drew a full row of missed runs on an instance where nothing
+was missed. That is the loudest false claim this panel can make, and it was on by default from the
+moment phase E landed.
+
+The replacement is a MAP with no default arm — `CELL_FOR_VERDICT` — and an unrecognised verdict
+lands on the hatch rather than on an accusation: not knowing what a name means is exactly the case
+where the panel cannot say what happened. Three verdicts still share the outline, because they say
+the same thing about the WINDOW and differ only in what happened to the run, which the readout names.
+
+**"No default arm" had to be made true rather than said.** The map was typed `Record<string, string>`
+first, which permits deleting `reserved` or `unknown` and still compiles — so the comment claiming a
+compile-time hole was prose the mechanism did not back, which is this arc's dominant defect class
+appearing inside the fix for it (reviewer P1 at [38]). It is bound to the GENERATED verdict union
+now, `satisfies Record<ExpectedRunVerdict, ExpectationCellKind>`, and the evidence is the type-check
+itself: removing `reserved` from the map fails the build with `TS1360`, naming every key the union
+requires. The incoming wire value stays a plain `string` with the hatch fallback, because
+completeness for THIS build's contract and tolerance of a future server are different questions and
+both have to be answered.
+
+**The words.** Each cell has a hit area — two pixels cannot be hovered — and its own readout, which
+names the verdict as the API spells it rather than paraphrasing, so a reader can find it in
+`openapi.yaml` and in §14. A reserved window's readout names `reserved_at`, because that is the only
+instant it has, and appends `withheld_reason` when the transport is what refused the job.
+
+### 17.16 The final-tree audit — the ledger's write and read paths, read as production code
+
+Asked for by the owner after phase F was approved, and accepted by the reviewer at party [62] as a
+FRESH audit of the final tree rather than a retroactive disposition of any phase. The unit is the
+code that will run, not the history: the intermediate states are uncommitted and phase F superseded
+part of what B2 built, so there is nothing there to read. The surfaces are `internal/store`'s ledger
+statements and both migrations, the ingest claim and terminal fill, the read API and its contract,
+`domain`'s verdict function, and the render.
+
+**1. A vocabulary closed in prose and open at both write boundaries.** `withheld_reason` was
+described as closed in three places — the `WithheldPublishFailed` constant, `openapi.yaml`'s enum and
+the runbook — while migration `00103` checked only that a reason implies a reservation and
+`ConfirmExpectations` accepted any non-empty string. An internal caller could persist a value the API
+contract does not define and no reader could interpret. Both boundaries enforce it now, and they
+answer different questions: the database refuses the value whatever wrote it, and the method refuses
+it before any SQL runs and NAMES the offending item instead of aborting a batch. Three mutations,
+each killed by a different assertion.
+
+**2. `ledger_from` outranked every verdict in the fill and not in the words.** The cell geometry was
+always right — the kind is decided by `ms < ledgerFrom` before the map is consulted — but `cellLabel`
+carried an exception for `unknown`, so a window BEHIND the fence whose stored verdict happened to be
+`unknown` was described as "dispatched on a carrier that carries no job identity". That is a claim
+about a dispatch, made about time the ledger says it cannot answer for, and it is reachable whenever
+a truncation fence moves `ledger_from` past a row that still exists. The cell now carries WHY it is
+`notStored`, because that kind has two causes and using the kind alone would have made a
+post-`ledger_from` `unknown` say "before the ledger begins" — the same overclaim pointing the other
+way.
+
+**3. A count that named one thing and measured another, found by writing the test for the first
+finding.** `ConfirmExpectations` returned `RowsAffected` from its final `UPDATE monitor_schedule`, so
+a withheld confirm — which deliberately does not move the schedule — reported ZERO for work it had
+done, and a successful one reported a number about a different table. Nothing read it, which is why
+it survived every review: `publishPending` discards the count. The statement now carries the schedule
+update as its own data-modifying CTE and ends with `SELECT count(*) FROM confirmed`.
+
+**What the three have in common** is the arc's standing lesson, which has now produced a defect in
+every layer it could: a sentence that describes a mechanism, and a mechanism that does something
+else. Two of the three were found by the reviewer reading the code against its own claims; the third
+was found by a test written for the first, which is the argument for writing the test even when the
+fix looks obvious.
 
 ## 18. Open items
 

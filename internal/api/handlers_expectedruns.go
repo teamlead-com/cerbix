@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/authz"
-	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
 )
 
@@ -49,12 +48,18 @@ type expectedRunWindow struct {
 	// convention.
 	IntervalAssumed bool       `json:"interval_assumed"`
 	IssuedAt        *time.Time `json:"issued_at,omitempty"`
-	ClaimedAt       *time.Time `json:"claimed_at,omitempty"`
-	TerminalAt      *time.Time `json:"terminal_at,omitempty"`
-	Outcome         string     `json:"outcome,omitempty"`
-	RefusedAt       *time.Time `json:"refused_at,omitempty"`
-	RefusedReason   string     `json:"refused_reason,omitempty"`
-	SkipReason      string     `json:"skip_reason,omitempty"`
+	// ReservedAt is when the core MINTED this window's identity and committed it, before the job
+	// reached any transport (§7.4). A window carrying it with no `issued_at` reads `reserved`: the
+	// dispatch is not recorded, which is neither "no run was due" nor "a job was published".
+	// WithheldReason says why, when the transport is what refused it.
+	ReservedAt     *time.Time `json:"reserved_at,omitempty"`
+	WithheldReason string     `json:"withheld_reason,omitempty"`
+	ClaimedAt      *time.Time `json:"claimed_at,omitempty"`
+	TerminalAt     *time.Time `json:"terminal_at,omitempty"`
+	Outcome        string     `json:"outcome,omitempty"`
+	RefusedAt      *time.Time `json:"refused_at,omitempty"`
+	RefusedReason  string     `json:"refused_reason,omitempty"`
+	SkipReason     string     `json:"skip_reason,omitempty"`
 }
 
 // listExpectedRuns answers GET /api/v1/projects/{projectID}/monitors/{monitorID}/expected-runs.
@@ -99,7 +104,12 @@ func (h *Handler) listExpectedRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	// At most the retention window. A wider range cannot be answered anyway — the windows are
 	// gone — and refusing it is better than returning a page that silently begins later.
-	if to.Sub(from) > time.Duration(domain.DefaultExpectedRunRetentionDays)*24*time.Hour {
+	//
+	// The CONFIGURED window, not the built-in default. `ledger.expected_run_retention_days` is
+	// bounded 2..90, and reading the default here made the bound a constant fourteen: an instance
+	// keeping ninety days of windows refused a thirty-day range for rows it still held, and one
+	// configured to keep two days accepted a fourteen-day one it could not answer.
+	if to.Sub(from) > time.Duration(h.store.ExpectedRunRetentionDays())*24*time.Hour {
 		writeError(w, http.StatusBadRequest, "range_too_wide")
 		return
 	}
@@ -142,7 +152,8 @@ func (h *Handler) listExpectedRuns(w http.ResponseWriter, r *http.Request) {
 			DueAt: w.DueAt, Verdict: string(w.Verdict()), JobID: w.JobID,
 			CarrierGeneration: w.CarrierGeneration, ExecutionRevision: w.ExecutionRevision,
 			Region: w.Region, IntervalSeconds: w.IntervalSeconds, IntervalAssumed: w.IntervalAssumed,
-			IssuedAt: w.IssuedAt, ClaimedAt: w.ClaimedAt, TerminalAt: w.TerminalAt,
+			IssuedAt: w.IssuedAt, ReservedAt: w.ReservedAt, WithheldReason: w.WithheldReason,
+			ClaimedAt: w.ClaimedAt, TerminalAt: w.TerminalAt,
 			Outcome: w.Outcome, RefusedAt: w.RefusedAt, RefusedReason: w.RefusedReason,
 			SkipReason: w.SkipReason,
 		})
@@ -155,7 +166,13 @@ func (h *Handler) listExpectedRuns(w http.ResponseWriter, r *http.Request) {
 		// prevent.
 		"ledger_from":          nil,
 		"gap_truncated_before": page.GapTruncatedBefore,
-		"next_cursor":          nil,
+		// The THIRD bound, and the one a caller needs before it can ask a valid question at all:
+		// the widest range this endpoint will answer. It is configuration (2..90), so a client
+		// that assumed the default asked a range that came back 400 `range_too_wide` — and the
+		// whole answer, bounds included, was then dropped. Publishing it makes the bound the
+		// SERVER's fact rather than a number typed into both sides.
+		"retention_days": h.store.ExpectedRunRetentionDays(),
+		"next_cursor":    nil,
 	}
 	if page.HasLedgerFrom {
 		body["ledger_from"] = page.LedgerFrom

@@ -8649,10 +8649,10 @@ export interface components {
             next_cursor: string | null;
         };
         /**
-         * @description FR-032. The reading of one due window, COMPUTED from its timestamps and never stored. `covered` is the ONLY verdict that may license a stroke on the Response time panel; `covered_late` means a run happened and produced an admissible outcome but was issued later than the interval that spaced the window, so the observation is too far from it to prove it — it licenses no stroke and is excluded from the coverage numerator while still counting in the denominator. `expected_never_issued` covers both a window nothing ran in and one cerbix deliberately skipped, with `skip_reason` telling them apart. `unknown` means the window was dispatched on a carrier that does not carry job identity, so no result could ever correlate to it.
+         * @description FR-032. The reading of one due window, COMPUTED from its timestamps and never stored. `covered` is the ONLY verdict that may license a stroke on the Response time panel; `covered_late` means a run happened and produced an admissible outcome but was issued later than the interval that spaced the window, so the observation is too far from it to prove it — it licenses no stroke and is excluded from the coverage numerator while still counting in the denominator. `expected_never_issued` covers both a window nothing ran in and one cerbix deliberately skipped, with `skip_reason` telling them apart. `unknown` means the window was dispatched on a carrier that does not carry job identity, so no result could ever correlate to it. `reserved` means the core minted this window''s identity and committed it and NO dispatch is recorded for it — the process died between the reserve and the publish, or the transport refused the job (§7.4, phase F). It is deliberately neither absence verdict: `expected_never_issued` asserts that no run happened, which is the opposite of what is known, and `issued_never_claimed` asserts that a job was published, which is exactly what a reserved window cannot say. It licenses no stroke and is excluded from the coverage numerator while counting in the denominator.
          * @enum {string}
          */
-        ExpectedRunVerdict: "covered" | "covered_late" | "expected_never_issued" | "issued_never_claimed" | "claimed_never_finished" | "unknown";
+        ExpectedRunVerdict: "covered" | "covered_late" | "expected_never_issued" | "issued_never_claimed" | "claimed_never_finished" | "unknown" | "reserved";
         /** @description One due window (FR-032 §6.1). Every verdict is computed; none is stored. */
         ExpectedRunWindow: {
             /**
@@ -8675,8 +8675,21 @@ export interface components {
             interval_seconds: number;
             /** @description The threshold above was ASSUMED rather than observed (§14.2). EXPLANATORY ONLY: it may never be read as licence to promote a `covered_late` window to `covered`. */
             interval_assumed: boolean;
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description The instant the PUBLISH returned success. Written by the core''s confirm and by nothing else: an executor''s echo may never set or lower it (§7.4, invariants 20e and 27h).
+             */
             issued_at?: string;
+            /**
+             * Format: date-time
+             * @description The instant the core minted this window''s identity and committed it, BEFORE the job reached any transport. It is also the instant the job carries on the wire, so an executor echoes a value the core already owned. Present with no `issued_at` is the `reserved` verdict.
+             */
+            reserved_at?: string;
+            /**
+             * @description Why a reserved window never became a published one. Absent unless the verdict is `reserved` and the cause is known — a process that died between the two steps leaves the window reserved with no reason, because nothing was there to record one.
+             * @enum {string}
+             */
+            withheld_reason?: "publish_failed";
             /**
              * Format: date-time
              * @description An executor reported taking the job off the transport.
@@ -8696,7 +8709,7 @@ export interface components {
             refused_at?: string;
             refused_reason?: string;
             /**
-             * @description cerbix chose not to run this window, and why.
+             * @description cerbix chose not to run this window, and why. `transport_backoff` is no longer written (§7.4): a publish failure now annotates a RESERVED window with `withheld_reason`, because the window is recorded before the publish is attempted and a skip would say cerbix chose not to run what it had just chosen to run. The value stays so rows written before phase F still read.
              * @enum {string}
              */
             skip_reason?: "no_capable_runner" | "no_inflight_slot" | "credential_unresolved" | "no_capable_executor" | "transport_backoff";
@@ -8714,6 +8727,8 @@ export interface components {
              * @description Windows before this instant were advanced past and NOT materialized, because a cap or the retention clip stopped the leader writing them. The span is claimable as nothing.
              */
             gap_truncated_before: string | null;
+            /** @description The widest range this endpoint will answer, in days — `ledger.expected_run_retention_days` (2..90). A caller needs it BEFORE it can ask a valid question: a range wider than this is 400 `range_too_wide`, and a client that assumed the default asked one the server refused. It travels with every page for the same reason the other two bounds do. */
+            retention_days: number;
             next_cursor: string | null;
         };
         /**

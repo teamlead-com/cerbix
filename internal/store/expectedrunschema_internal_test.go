@@ -85,7 +85,13 @@ func TestNoVerdictIsStoredOnAWindow(t *testing.T) {
 	want := []string{
 		"carrier_generation", "claimed_at", "due_at", "execution_revision", "interval_assumed",
 		"interval_seconds", "issued_at", "job_id", "monitor_id", "outcome", "project_id",
-		"refused_at", "refused_reason", "region", "skip_reason", "terminal_at",
+		"refused_at", "refused_reason", "region",
+		// Phase F (§7.4). Two facts, not a verdict: WHEN the core minted this window's identity
+		// and committed it, and — if the transport then refused the job — why the dispatch never
+		// happened. The verdict `reserved` is COMPUTED from the first exactly as every other
+		// verdict is computed, which is what keeps invariant 19 true through this phase.
+		"reserved_at", "withheld_reason",
+		"skip_reason", "terminal_at",
 	}
 	sort.Strings(want)
 	if strings.Join(got, ",") != strings.Join(want, ",") {

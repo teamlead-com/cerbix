@@ -142,11 +142,46 @@ func readSchedule(t *testing.T, st *Store, ctx context.Context, monitorID string
 	return s
 }
 
+// mustAdvance RESERVES (§7.4). The name is kept because every caller of it is asserting what the
+// statement writes rather than when it runs, and because the phase-F cases that care about the
+// ordering call the store directly.
+//
+// An item carrying a job gets `ReservedAt` defaulted to the tick's own instant, which is what the
+// scheduler passes when the mint and the tick are the same moment. A case that needs the two to
+// DIFFER — an identity minted before the instant the reserve commits — sets the field itself.
 func mustAdvance(t *testing.T, st *Store, ctx context.Context, now time.Time, items ...ExpectationAdvance) int {
 	t.Helper()
-	n, err := st.AdvanceExpectations(ctx, now, items)
+	for i := range items {
+		if items[i].JobID != "" && items[i].ReservedAt.IsZero() {
+			items[i].ReservedAt = now
+		}
+	}
+	reserved, err := st.ReserveExpectations(ctx, now, items)
 	if err != nil {
-		t.Fatalf("advance: %v", err)
+		t.Fatalf("reserve: %v", err)
+	}
+	return len(reserved)
+}
+
+// mustDispatch is the WHOLE tick for one window: reserve, then confirm, which is what a successful
+// publish looks like from the ledger's side (§7.4). Fixtures whose subject is an ISSUED window use
+// it, so the two statements are not repeated at every site and — more importantly — so a fixture
+// that deliberately stops at the reserve is visible as a different call.
+func mustDispatch(t *testing.T, st *Store, ctx context.Context, now time.Time, item ExpectationAdvance) {
+	t.Helper()
+	mustAdvance(t, st, ctx, now, item)
+	mustConfirm(t, st, ctx, now, ExpectationConfirm{
+		MonitorID: item.MonitorID, DueAt: item.ExpectedDue, JobID: item.JobID})
+}
+
+// mustConfirm is the second half of the tick: the publish returned, so the window becomes an issued
+// one. Tests that assert on `issued_at` go through here, because after phase F the reserve alone
+// never writes it.
+func mustConfirm(t *testing.T, st *Store, ctx context.Context, now time.Time, items ...ExpectationConfirm) int {
+	t.Helper()
+	n, err := st.ConfirmExpectations(ctx, now, items)
+	if err != nil {
+		t.Fatalf("confirm: %v", err)
 	}
 	return n
 }
@@ -472,14 +507,14 @@ func TestTheWindowsTheFenceAndTheAdvanceShareOneTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if _, err := tx.Exec(ctx, advanceExpectationsSQL,
+	if _, err := tx.Exec(ctx, reserveExpectationsSQL,
 		[]string{m.ID}, []*string{&[]string{ledgerJobA}[0]}, []*string{nil},
 		[]time.Time{now.Add(time.Minute)}, []int32{60},
 		now, 3, now.Add(-14*24*time.Hour), []*int32{&[]int32{domain.LedgerMinCarrier}[0]},
 		[]time.Time{expectation}, []int64{m.ExecutionRevision}, []string{m.Region},
-		[]bool{false}); err != nil {
+		[]bool{false}, []*time.Time{&now}); err != nil {
 		_ = tx.Rollback(ctx)
-		t.Fatalf("advance in tx: %v", err)
+		t.Fatalf("reserve in tx: %v", err)
 	}
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatalf("rollback: %v", err)
@@ -558,11 +593,16 @@ func TestAnUnrepresentableAdvanceIsRefusedByName(t *testing.T) {
 		{"a non-positive interval", func(a *ExpectationAdvance) { a.IntervalInForce = 0 }},
 		{"no region", func(a *ExpectationAdvance) { a.Region = "" }},
 		{"no expected revision", func(a *ExpectationAdvance) { a.ExpectedRevision = 0 }},
+		// Phase F: a job whose identity carries no minted instant would be reserved at NULL, which
+		// §6.1 cannot express and which would hand the one instant the core owns back to the
+		// executor's echo (§7.4).
+		{"a job with no minted instant", func(a *ExpectationAdvance) { a.ReservedAt = time.Time{} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			item := base
+			item.ReservedAt = now
 			tc.mutate(&item)
-			_, err := st.AdvanceExpectations(ctx, now, []ExpectationAdvance{item})
+			_, err := st.ReserveExpectations(ctx, now, []ExpectationAdvance{item})
 			if err == nil {
 				t.Fatalf("%s was accepted", tc.name)
 			}

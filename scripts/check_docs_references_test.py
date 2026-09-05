@@ -1051,5 +1051,154 @@ class FR032CarrierGateContract(unittest.TestCase):
             cdr.read("docs/specs/func-expected-run-ledger.md")), [])
 
 
+class LineCitationsLandOnSomething(unittest.TestCase):
+    """The `file.go:NNN` guard, tested on the shapes the drift it was written for actually took.
+
+    FR-032's spec cited thirty-three exact lines; by the time its last phase landed, thirteen of
+    them pointed at whitespace, a closing brace or an unrelated statement, and this checker passed
+    the whole time because it validated the PATH and never the LINE. The guard is deliberately weak
+    — it cannot tell a citation that landed on the WRONG statement from one that landed on the right
+    one — so its two positive cases and its two negative ones are asserted separately, or "weak"
+    would quietly become "does nothing".
+    """
+
+    def run_guard(self, doc_text, code_text):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "internal" / "store").mkdir(parents=True)
+            (root / "internal" / "store" / "sample.go").write_text(code_text, encoding="utf-8")
+            doc = root / "docs"
+            doc.mkdir()
+            (doc / "runbook.md").write_text(doc_text, encoding="utf-8")
+            cwd = os.getcwd()
+            living = cdr.LIVING
+            try:
+                os.chdir(root)
+                cdr.LIVING = ["docs/runbook.md"]
+                return [m for (_, _, _, m) in cdr.check_line_citations()]
+            finally:
+                cdr.LIVING = living
+                os.chdir(cwd)
+
+    CODE = "package store\n\nfunc Thing() {\n\treturn\n}\n"
+
+    def test_a_citation_on_a_real_statement_passes(self):
+        self.assertEqual(
+            self.run_guard("See `internal/store/sample.go:3`.\n", self.CODE), [])
+
+    def test_a_citation_on_a_bare_closing_brace_is_flagged(self):
+        found = self.run_guard("See `internal/store/sample.go:5`.\n", self.CODE)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("bare delimiter", found[0])
+
+    def test_a_citation_on_a_blank_line_is_flagged(self):
+        found = self.run_guard("See `internal/store/sample.go:2`.\n", self.CODE)
+        self.assertEqual(len(found), 1, found)
+
+    def test_a_citation_past_end_of_file_is_flagged(self):
+        found = self.run_guard("See `internal/store/sample.go:900`.\n", self.CODE)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("past end of file", found[0])
+
+    def test_a_span_citation_checks_its_first_line(self):
+        self.assertEqual(
+            self.run_guard("See `internal/store/sample.go:3-5`.\n", self.CODE), [])
+        self.assertEqual(
+            len(self.run_guard("See `internal/store/sample.go:5-9`.\n", self.CODE)), 1)
+
+    def test_a_path_that_does_not_exist_is_left_to_the_path_guard(self):
+        # Two guards reporting one defect is two lines an operator has to reconcile; the path
+        # check above already names a missing file, so this one stays silent about it.
+        self.assertEqual(
+            self.run_guard("See `internal/store/gone.go:3`.\n", self.CODE), [])
+
+
+class TheLivingSpecCitesNoDeadLine(unittest.TestCase):
+    """The guard applied to the tree, so a future edit that reintroduces the drift fails here."""
+
+    def test_every_line_citation_in_the_living_documents_resolves(self):
+        self.assertEqual([m for (_, _, _, m) in cdr.check_line_citations()], [])
+
+
+
+class IterationFindingCountTest(unittest.TestCase):
+    """`check_iteration_finding_counts` — an iteration's count, derived from its own table.
+
+    The guard exists because `iter-0177`'s count drifted three times in one evening, always in a
+    document and never in code: the line that opened the iteration said three, the line that closed
+    it said four while leaving the opening clause standing, and the traceability head said three —
+    written while the fourth finding was being fixed. `docs-check` was green over all of it, because
+    a citation guard validates that what IS written resolves and cannot see a number that has
+    stopped agreeing with its table.
+
+    The third case below is the one that keeps the guard usable: a document may quote "three
+    findings" about something ELSE — an older iteration, a decision record's history — and the guard
+    must not fire on a sentence that does not name this iteration. A guard that cannot be lived with
+    gets disabled, which is the failure mode worse than the drift.
+    """
+
+    TABLE = (
+        "# iter-0177\n\n"
+        "| # | Finding | Class | State |\n"
+        "| --- | --- | --- | --- |\n"
+        "| 0 | the mapping stopped where the work continued | docs | fixed |\n"
+        "| 1 | a vocabulary closed in prose and open at the write boundary | prose vs mechanism | fixed |\n"
+        "| 2 | ledger_from outranked the verdict in the fill and not the words | prose vs mechanism | fixed |\n"
+        "| 3 | a count that named one thing and measured another | naming | fixed |\n"
+    )
+
+    def run_guard(self, reader_text, table=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "docs" / "iterations").mkdir(parents=True)
+            iteration = root / "docs" / "iterations" / "iter-0177.md"
+            iteration.write_text(table if table is not None else self.TABLE, encoding="utf-8")
+            reader = root / "docs" / "status.md"
+            reader.write_text(reader_text, encoding="utf-8")
+            cwd = os.getcwd()
+            try:
+                os.chdir(root)
+                return cdr.check_iteration_finding_counts(
+                    "docs/iterations/iter-0177.md", ("docs/status.md",))
+            finally:
+                os.chdir(cwd)
+
+    def test_a_reader_that_agrees_with_the_table_passes(self):
+        self.assertEqual(
+            self.run_guard("See [iter-0177](iterations/iter-0177.md): four findings, all fixed.\n"),
+            [])
+
+    def test_the_digit_form_agrees_too(self):
+        self.assertEqual(self.run_guard("iter-0177 — 4 findings, all fixed.\n"), [])
+
+    def test_a_reader_stating_the_stale_count_is_flagged(self):
+        found = self.run_guard("iter-0177 / D-0245, three findings, all fixed.\n")
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("says three findings", found[0])
+        self.assertIn("holds 4", found[0])
+
+    def test_the_digit_form_drifts_too(self):
+        found = self.run_guard("iter-0177 — 3 findings.\n")
+        self.assertEqual(len(found), 1, found)
+
+    def test_a_count_about_something_else_is_left_alone(self):
+        # The line does not name this iteration, so it is none of the guard's business: a decision
+        # record quoting an older arc, or iter-0165's own sentence about three findings.
+        self.assertEqual(
+            self.run_guard("another argument for the shared owner these three findings kept "
+                           "pointing at.\n"), [])
+
+    def test_the_iterations_own_line_is_checked_as_well(self):
+        # The first drift was INSIDE the iteration document, so the guard reads it too rather than
+        # trusting the file it derives from.
+        table = self.TABLE.replace("# iter-0177\n", "# iter-0177 — three findings\n")
+        found = self.run_guard("iter-0177: four findings.\n", table=table)
+        self.assertTrue(any("iter-0177.md says three findings" in m for m in found), found)
+
+    def test_a_table_with_no_rows_is_reported_rather_than_passing_silently(self):
+        found = self.run_guard("iter-0177: four findings.\n", table="# iter-0177\n\nno table here\n")
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("no numbered findings table", found[0])
+
 if __name__ == "__main__":
     unittest.main()

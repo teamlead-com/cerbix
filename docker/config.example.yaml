@@ -273,4 +273,10 @@ ledger:
   #
   # Watch `cerbix_expected_runs_hot_update_ratio`. It is unpublished until something has updated,
   # because an undefined ratio has no honest value; sustained below 0.90 past a thousand updates it
-  # says the storage shape needs the append-only variant rather than a tuning change.
+  # says the storage shape needs the append-only variant rather than a tuning change. Its two
+  # inputs, `cerbix_expected_runs_updates` and `cerbix_expected_runs_hot_updates`, are GAUGES:
+  # they are pg_stat sums over the retained partitions, so dropping a partition makes them fall.
+  #
+  # All three are published by the process holding the SCHEDULER LEADER lock, because the
+  # maintenance pass that samples them is the leader's. Their absence on an api-only or worker
+  # process is correct, not a fault.

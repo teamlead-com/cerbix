@@ -67,6 +67,11 @@ type Store interface {
 	// above it, which is invariant 26a: a handler check alone is one refactor away from being
 	// bypassed, and a query that is safe only because of its caller is not safe.
 	ListExpectedRuns(ctx context.Context, q store.ExpectedRunQuery) (store.ExpectedRunPage, error)
+	// ExpectedRunRetentionDays bounds the range §13a will answer. It is ASKED rather than
+	// re-derived from `domain`'s default: the store is where `ledger.expected_run_retention_days`
+	// lands, and a handler holding its own copy refused a thirty-day range on an instance
+	// configured to keep ninety days of windows.
+	ExpectedRunRetentionDays() int
 	PasswordHashByID(ctx context.Context, id string) (string, error)
 	SetPassword(ctx context.Context, id, passwordHash string) error
 	DeleteSessionsByUser(ctx context.Context, userID, exceptToken string) (int64, error)

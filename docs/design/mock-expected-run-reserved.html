@@ -1,0 +1,286 @@
+<title>The Window Cerbix Reserved</title>
+
+<style>
+/* Tokens VERBATIM from frontend/src/style.css, and from mock-truthful-rendering.html which this
+   mock continues. This change adds NO new colour and NO new status vocabulary. It reuses:
+     · the HATCH mock-truthful-rendering introduced for `not-stored` — because time before
+       `ledger_from` is exactly that, and absence is not a verdict;
+     · --degraded for `covered_late`, the hue this product already spends on "answered, but not
+       well enough";
+     · --down as an OUTLINE (never a fill) for a window nothing ran in — a missing run is a fact
+       about emptiness, and filling it would read as a recorded failure.
+   Spec: docs/specs/func-expected-run-ledger.md (FR-032) §14, §17.10. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --focus:#7d79ff;
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+
+.page{max-width:1180px; margin:0 auto; padding:28px 22px 80px; display:flex; flex-direction:column; gap:40px}
+.head h1{font-size:21px; letter-spacing:-.01em}
+.head p{margin-top:8px; color:var(--ink-2); font-size:13.5px; max-width:900px}
+.note{
+  border:1px solid var(--note-border); background:var(--note-bg); color:var(--ink-2);
+  border-radius:6px; padding:11px 13px; font-size:12.5px; line-height:1.55;
+}
+.note b{color:var(--note)}
+.sec{display:flex; flex-direction:column; gap:14px}
+.sec>h2{font-size:15px; letter-spacing:-.005em}
+.sec>h2 small{font-weight:400; color:var(--ink-3); font-size:12px; margin-left:8px}
+.card{border:1px solid var(--border); background:var(--surface); border-radius:6px; box-shadow:var(--shadow)}
+.card-h{display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid var(--border)}
+.card-h h3{font-size:13px; font-weight:600}
+.card-b{padding:16px; overflow-x:auto}
+.stateline{display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--ink-3); margin-bottom:6px}
+.stateline .pill{
+  border:1px solid var(--border-strong); border-radius:3px; padding:1px 7px;
+  font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-2);
+}
+.legend{display:flex; flex-wrap:wrap; gap:6px 18px; margin-top:12px; font-size:11.5px; color:var(--ink-3)}
+.legend i{display:inline-block; width:12px; height:12px; border-radius:2px; vertical-align:-2px; margin-right:6px}
+.grow{flex:1}
+.chip{border:1px solid var(--border-strong); border-radius:3px; padding:1px 7px; font-size:11px; color:var(--ink-3)}
+.chip.warn{border-color:color-mix(in srgb, var(--degraded) 50%, transparent); color:var(--degraded)}
+.chip.acc{border-color:color-mix(in srgb, var(--accent) 50%, transparent); color:var(--accent)}
+.tbl{width:100%; border-collapse:collapse; font-size:13px}
+.tbl th{text-align:left; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); border-bottom:1px solid var(--border); padding:9px 14px; font-weight:600}
+.tbl td{border-bottom:1px solid var(--border); padding:9px 14px}
+.tbl td.n{text-align:right; font-variant-numeric:tabular-nums}
+.q{display:grid; grid-template-columns:auto 1fr; gap:10px 14px; align-items:start; font-size:12.5px; color:var(--ink-2)}
+.q dt{font-weight:600; color:var(--ink); white-space:nowrap}
+.q dd{margin:0}
+@media (max-width:860px){.q{grid-template-columns:1fr}}
+</style>
+<div class="page">
+
+<div class="head">
+  <h1>The window cerbix reserved</h1>
+  <p>Mock for <b>FR-032 phase F</b> — <span class="mono">docs/specs/func-expected-run-ledger.md</span>
+  §7.4, §17.14, spec revision 33. The ledger gained one state: a window whose identity the core
+  minted and committed, and for which no dispatch is recorded. It is deliberately NEITHER absence
+  verdict, so it cannot borrow either one's cell. This page decides what it looks like — and it
+  also carries a defect it found on the way in, which is the larger of the two changes.</p>
+</div>
+
+<div class="note">
+  <b>The panel currently renders three different verdicts as a missed run.</b>
+  <span class="mono">expectationCells</span> maps <span class="mono">covered</span>,
+  <span class="mono">covered_late</span> and time before <span class="mono">ledger_from</span>, and
+  sends <i>everything else</i> to one cell — the <span class="mono">--down</span> outline whose whole
+  meaning is "a run was due here and nothing ran". So <span class="mono">unknown</span>,
+  <span class="mono">issued_never_claimed</span> and <span class="mono">claimed_never_finished</span>
+  are drawn as missed runs today. The APPROVED phase-E mock already said otherwise — its verdict
+  table gives <span class="mono">unknown</span> the hatch — so the implementation diverged from the
+  drawing it was approved against, in the direction of over-claiming. With the ledger carrier OFF,
+  which is the shipped default, EVERY window reads <span class="mono">unknown</span>: the panel draws
+  a full row of missed runs on an instance where nothing was missed at all.
+</div>
+
+<!-- ════════════════ 1 · The vocabulary ════════════════ -->
+<div class="sec">
+  <h2>1 · One cell per thing the ledger can say <small>§14, and what phase F adds to it</small></h2>
+  <p style="color:var(--ink-2);font-size:13px;max-width:74ch">
+    Seven verdicts, five cells. The rule the map has to keep is the one this requirement exists for:
+    a cell may never claim more than the verdict behind it. Two verdicts share the outline because
+    they say the same thing about the window — nothing ran in it — and the rest are distinct because
+    they are.
+  </p>
+  <table class="tbl" style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr>
+      <td style="width:190px"><b>verdict</b></td><td style="width:120px"><b>cell</b></td>
+      <td style="width:96px"><b>at 2.4px</b></td><td><b>why that one</b></td>
+    </tr></thead>
+    <tbody id="vocab"></tbody>
+  </table>
+</div>
+
+<!-- ════════════════ 2 · The choice ════════════════ -->
+<div class="sec">
+  <h2>2 · Three candidates for <span class="mono">reserved</span> <small>drawn at the width the panel really uses</small></h2>
+  <p style="color:var(--ink-2);font-size:13px;max-width:74ch">
+    The same twelve windows in each row: nine covered, one late, one that nothing ran in, and one
+    RESERVED. The cells are ~2.4px wide, which is what sixty checks across a panel gives — a
+    candidate that only reads at four times that size is not a candidate.
+  </p>
+  <div class="card" style="padding:16px 14px">
+    <div id="candidates"></div>
+  </div>
+  <div class="note" style="margin-top:14px">
+    <b>Recommended: B, the neutral outline.</b> It is the same geometry as the missed-run cell and a
+    different HUE, which is the one difference that survives at 2.4 pixels — a dash pattern does not
+    (A), and a second hatch collides with "the ledger holds nothing here" (C), which is a different
+    statement: before <span class="mono">ledger_from</span> the ledger has no row at all, while a
+    reserved window is a row that exists and says the dispatch is unproven. Neutral because the state
+    is not a failure: nothing says the run did not happen, only that the core cannot prove it did.
+  </div>
+</div>
+
+<!-- ════════════════ 3 · The defect, before and after ════════════════ -->
+<div class="sec">
+  <h2>3 · The carrier-off panel, as it draws today and as it should <small>the divergence above</small></h2>
+  <div class="card" style="padding:16px 14px">
+    <div id="carrieroff"></div>
+  </div>
+  <div class="note" style="margin-top:14px">
+    Same data, same instant, one map changed. The row on top is what an operator sees on a default
+    installation today: eleven missed runs that never happened. The row below is what the ledger
+    actually says — it was dispatched on a carrier that carries no identity, so nothing can be
+    correlated and the honest cell is the one that claims nothing.
+  </div>
+</div>
+
+<!-- ════════════════ 4 · The words ════════════════ -->
+<div class="sec">
+  <h2>4 · What the readout and the legend say</h2>
+  <dl class="q">
+    <dt>legend</dt>
+    <dd><span id="lg-reserved"></span> <span class="mono">reserved</span> — the core recorded this
+      window before dispatching it and no dispatch is recorded. Neither a missed run nor a covered one.</dd>
+    <dt>hover</dt>
+    <dd>"reserved at 14:13:50 · no dispatch recorded" — and, when the transport is what refused the
+      job, "· publish failed" from <span class="mono">withheld_reason</span>. The instant named is
+      <span class="mono">reserved_at</span>, because that is the only instant this window has.</dd>
+    <dt>never</dt>
+    <dd>the word "missed", the word "late", and any count that adds reserved windows to either. A
+      surface that totals them has decided what happened, which is the decision the state exists to
+      refuse.</dd>
+  </dl>
+</div>
+
+<div class="sec">
+  <h2>5 · What this mock does not change</h2>
+  <p style="color:var(--ink-2);font-size:13px;max-width:74ch">
+    The stroke. <span class="mono">strokeSegments</span> licenses a line only across
+    <span class="mono">covered</span> windows and phase F adds no verdict that changes it — a
+    reserved window breaks the stroke exactly as every non-covered verdict does. The observation
+    ruler is untouched: it answers what cerbix SAW, and this band answers what it EXPECTED.
+  </p>
+</div>
+
+</div>
+
+<script>
+/* One map, and every swatch and every ruler on this page is drawn from it. A mock whose table and
+   whose picture can disagree is a mock that has already lost the argument it exists to settle. */
+const CELL = {
+  covered:      {fill:"var(--ink-3)", opacity:.5,  stroke:"none",              inset:false, dash:""},
+  late:         {fill:"var(--degraded)", opacity:1, stroke:"none",             inset:false, dash:""},
+  missed:       {fill:"none", opacity:1, stroke:"var(--down)",                 inset:true,  dash:""},
+  notStored:    {fill:"url(#m-hatch)", opacity:1, stroke:"none",               inset:false, dash:""},
+  reservedA:    {fill:"none", opacity:1, stroke:"var(--ink-3)",                inset:true,  dash:"2 1.6"},
+  reservedB:    {fill:"none", opacity:1, stroke:"var(--ink-3)",                inset:true,  dash:""},
+  reservedC:    {fill:"url(#m-hatch2)", opacity:1, stroke:"none",              inset:false, dash:""},
+};
+const VOCAB = [
+  ["covered", "covered", "A terminal outcome answered the window inside the interval that spaced it. The only verdict that licenses a stroke."],
+  ["covered_late", "late", "A run happened and produced an admissible outcome, later than the window's own interval. Not a failure — the observation is too far from the window to prove it."],
+  ["expected_never_issued", "missed", "A window was due and nothing was dispatched, or cerbix deliberately skipped it. Outlined, never filled: a fill would read as a recorded failure."],
+  ["issued_never_claimed", "missed", "A job was published and no executor reported taking it. The same statement about the WINDOW — nothing ran in it — so the same cell, with the verdict on the hover."],
+  ["claimed_never_finished", "missed", "An executor started and no admissible outcome arrived. Again: nothing completed in this window."],
+  ["unknown", "notStored", "Dispatched on a carrier that carries no job identity, so no result could ever correlate. The ledger CANNOT SAY, and the hatch is the cell that claims nothing. Today the panel draws this as a missed run."],
+  ["reserved", "reservedB", "Phase F. The core minted this window's identity and committed it; no dispatch is recorded. Neither absence verdict may be borrowed: one asserts nothing ran, the other asserts a publish."],
+];
+
+function cell(kind, w, h) {
+  const c = CELL[kind];
+  const x = c.inset ? 0.6 : 0, y = c.inset ? 0.6 : 0;
+  const width = c.inset ? Math.max(0.4, w - 1.2) : w, height = c.inset ? h - 1.2 : h;
+  return `<rect x="${x}" y="${y}" width="${width}" height="${height}" rx="1.2" fill="${c.fill}" ` +
+    `opacity="${c.opacity}" stroke="${c.stroke}" stroke-width="${c.stroke === "none" ? 0 : 1.2}" ` +
+    (c.dash ? `stroke-dasharray="${c.dash}" ` : "") + `/>`;
+}
+const DEFS = `<defs>
+  <pattern id="m-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+    <rect width="6" height="6" fill="var(--inset)"/><rect width="2" height="6" fill="var(--border-strong)"/>
+  </pattern>
+  <pattern id="m-hatch2" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+    <rect width="5" height="5" fill="var(--inset)"/><rect width="1.6" height="5" fill="var(--ink-3)"/>
+  </pattern>
+</defs>`;
+
+function swatch(kind, w) {
+  return `<svg width="${w}" height="12" viewBox="0 0 ${w} 12">${DEFS}${cell(kind, w, 12)}</svg>`;
+}
+
+document.getElementById("vocab").innerHTML = VOCAB.map(([v, kind, why]) =>
+  `<tr><td class="mono" style="font-size:12px">${v}</td>` +
+  `<td>${swatch(kind, 26)}</td>` +
+  `<td style="text-align:center">${swatch(kind, 2.4)}</td>` +
+  `<td style="color:var(--ink-2);font-size:12.5px">${why}</td></tr>`).join("");
+
+/* twelve windows, one of them reserved, drawn at the real cell width */
+function ruler(kinds, label) {
+  const W = 520, step = W / kinds.length, cw = 2.4;
+  const cells = kinds.map((k, i) =>
+    `<g transform="translate(${(i + 0.5) * step - cw / 2},2)">${cell(k, cw, 10)}</g>`).join("");
+  return `<div style="display:flex;align-items:center;gap:14px;margin:10px 0">` +
+    `<div style="width:132px;font-size:12.5px;color:var(--ink-2)">${label}</div>` +
+    `<svg width="${W}" height="14" viewBox="0 0 ${W} 14" style="flex:none">${DEFS}` +
+    `<line x1="4" y1="7" x2="${W - 4}" y2="7" stroke="var(--border)" stroke-width="1"/>${cells}</svg></div>`;
+}
+const TWELVE = ["covered","covered","covered","late","covered","covered","reservedB","covered","missed","covered","covered","covered"];
+const swap = (k, to) => TWELVE.map(x => x === "reservedB" ? to : x);
+document.getElementById("candidates").innerHTML =
+  ruler(swap("reservedB", "reservedA"), "A · dashed neutral") +
+  ruler(TWELVE, "B · neutral outline") +
+  ruler(swap("reservedB", "reservedC"), "C · second hatch");
+
+document.getElementById("carrieroff").innerHTML =
+  ruler(Array(12).fill("missed"), "today — carrier off") +
+  ruler(Array(12).fill("notStored"), "as the ledger says");
+
+document.getElementById("lg-reserved").innerHTML = swatch("reservedB", 14);
+</script>

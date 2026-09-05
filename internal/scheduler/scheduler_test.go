@@ -53,7 +53,26 @@ type fakeStore struct {
 	advances         []store.ExpectationAdvance
 	advanceNow       time.Time
 	advanceErr       error
-	pullV4Payloads   [][]byte
+	// §7.4's second statement, and the two knobs its cases need: a short return (the fence refused
+	// an item) and a failure.
+	// The shared sequence phase F's ordering case compares against: the store stamps its position
+	// on the same counter the dispatcher does, so "recorded before published" is ONE comparison
+	// rather than two clocks.
+	// §13.2's optimistic fence, expressed as the real statement expresses it: an item is written
+	// only if the revision it names is still current. A fake that fenced unconditionally can prove
+	// "do not publish what was not reserved" and CANNOT prove why a fenced payload is dropped
+	// rather than held — the reviewer's point at party [30].
+	fenceBelowRevision int64
+	// Whether LoadDueExpectations mints a fresh identity per call, as the real statement does.
+	mintFresh      bool
+	mintCounter    int
+	reserveSeq     *int64
+	reserveAt      []int64
+	confirms       []store.ExpectationConfirm
+	confirmNow     time.Time
+	confirmErr     error
+	reserveShort   int
+	pullV4Payloads [][]byte
 	// FR-032 phase D recordings.
 	expectedRunCutoffs []time.Time
 	hotSamples         int
@@ -134,7 +153,17 @@ func (s staticCredentialRegions) LiveCanaryJobRegions(context.Context) (map[stri
 
 func (f *fakeStore) ListEnabledMonitors(context.Context) ([]domain.Monitor, error) {
 	atomic.AddInt32(&f.listCalls, 1)
-	return f.monitors, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]domain.Monitor(nil), f.monitors...), nil
+}
+
+// setMonitors replaces the snapshot mid-run, which is how a case makes a configuration write cross
+// a dispatch — the state §13.2's fence exists for.
+func (f *fakeStore) setMonitors(monitors ...domain.Monitor) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.monitors = monitors
 }
 
 func (f *fakeStore) ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.Monitor, error) {
@@ -406,19 +435,58 @@ func (f *fakeStore) LoadDueExpectations(_ context.Context, monitorIDs []string) 
 	out := map[string]store.DueExpectation{}
 	for _, id := range monitorIDs {
 		if exp, ok := f.expectations[id]; ok {
+			// The real statement mints a FRESH identity on every call (`gen_random_uuid()`), and a
+			// fake that hands back the same one cannot see a re-mint at all: phase F's held-payload
+			// mutation survived this fake until the flag existed. Off by default, because the
+			// cases written before phase F assert on a known job id.
+			if f.mintFresh {
+				f.mintCounter++
+				exp.JobID = fmt.Sprintf("55555555-5555-4555-8555-%012d", f.mintCounter)
+			}
 			out[id] = exp
 		}
 	}
 	return out, nil
 }
 
-func (f *fakeStore) AdvanceExpectations(_ context.Context, now time.Time, items []store.ExpectationAdvance) (int, error) {
+func (f *fakeStore) ReserveExpectations(_ context.Context, now time.Time, items []store.ExpectationAdvance) ([]store.ExpectationReservation, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.advanceNow = now
 	f.advances = append(f.advances, items...)
+	if f.reserveSeq != nil {
+		f.reserveAt = append(f.reserveAt, atomic.AddInt64(f.reserveSeq, 1))
+	}
 	if f.advanceErr != nil {
-		return 0, f.advanceErr
+		return nil, f.advanceErr
+	}
+	// The real statement returns WHAT IT WROTE, so the fake must be able to write less than it was
+	// given: `reserveShort` drops that many items from the END of the batch, which is what a fence
+	// refusal looks like to the caller. A fake that always returned the whole batch could not
+	// exercise the partial path at all — and the partial path is where the P0 lived.
+	out := make([]store.ExpectationReservation, 0, len(items))
+	for i, it := range items {
+		if f.reserveShort > 0 && i >= len(items)-f.reserveShort {
+			continue
+		}
+		if f.fenceBelowRevision > 0 && it.ExpectedRevision < f.fenceBelowRevision {
+			continue
+		}
+		out = append(out, store.ExpectationReservation{MonitorID: it.MonitorID, DueAt: it.ExpectedDue})
+	}
+	return out, nil
+}
+
+// The CONFIRM half of §7.4. The fake records what the tick said the transport did, because that is
+// the half the SCHEDULER owns: what a confirm means once given belongs to the store and is tested
+// there.
+func (f *fakeStore) ConfirmExpectations(_ context.Context, now time.Time, items []store.ExpectationConfirm) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.confirmNow = now
+	f.confirms = append(f.confirms, items...)
+	if f.confirmErr != nil {
+		return 0, f.confirmErr
 	}
 	return len(items), nil
 }

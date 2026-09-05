@@ -28,7 +28,11 @@ type fakeStore struct {
 	forceReason string               // if set, RecordScheduledResult returns this non-applied outcome
 	claims      []domain.Heartbeat   // FR-032 phase C: every claim the consumer routed to the store
 	claimErr    error                // if set, RecordRunClaim fails
-	nextInc     int
+	// claimUnmatched counts how many further calls report "no window took it" — the state a
+	// claim that overtook §7.1's advance is in. It counts DOWN, so a test can say "the window
+	// appears on the third offer" and assert the retry actually got there.
+	claimUnmatched int
+	nextInc        int
 	// createErrs is a queue of errors CreateIncident returns on successive calls
 	// (nil = success); createCalls counts how many times it was invoked.
 	createErrs  []error
@@ -125,11 +129,18 @@ func (f *fakeStore) RecordProbeError(_ context.Context, hb domain.Heartbeat) (st
 
 // FR-032 phase C. The fake RECORDS rather than executes, which is what lets an ingest test assert
 // that a claim reached the store and that it reached it INSTEAD of the result pipeline.
-func (f *fakeStore) RecordRunClaim(_ context.Context, hb domain.Heartbeat) error {
+func (f *fakeStore) RecordRunClaim(_ context.Context, hb domain.Heartbeat) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.claims = append(f.claims, hb)
-	return f.claimErr
+	if f.claimErr != nil {
+		return false, f.claimErr
+	}
+	if f.claimUnmatched > 0 {
+		f.claimUnmatched--
+		return false, nil
+	}
+	return true, nil
 }
 
 func (f *fakeStore) GetMonitor(_ context.Context, id string) (domain.Monitor, error) {
@@ -650,6 +661,99 @@ func TestAClaimIsRecordedAndNeverEntersTheResultPipeline(t *testing.T) {
 	}
 	if opened != 0 {
 		t.Errorf("the claim opened %d incident(s)", opened)
+	}
+}
+
+// FR-032 §8.4 — a claim that OVERTOOK its own window is held and re-offered.
+//
+// This is the ordinary case and not an edge one: §7.1 flushes the advance once per tick, after the
+// publishes in it, so on a fast transport the executor's claim reaches the core before the row
+// exists. A running `role=all` instance recorded ONE claim across sixty-two generation-4 windows;
+// the other sixty-one were dropped, which left `issued_never_claimed` describing "the claim raced
+// the advance" far more often than the executor loss §8.5 says the state is for.
+//
+// Driven through the two methods rather than through `Run`, with an injected clock, so the schedule
+// is asserted rather than waited out — a test that slept for the real interval would be either
+// flaky or slow, and would prove nothing about WHEN the retry happens.
+func TestAClaimThatOvertookItsWindowIsRetriedUntilTheWindowExists(t *testing.T) {
+	fs := newFakeStore()
+	fs.claimUnmatched = 2 // unmatched twice, then the advance has committed the window
+	fs.monitors["m1"] = domain.Monitor{ID: "m1", ExecutionRevision: 3}
+	c := New(fs, dispatch.NewInProc(1), &fakeRecorder{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	base := time.Now().UTC()
+	clock := base
+	c.now = func() time.Time { return clock }
+	ctx := context.Background()
+
+	at := base.Add(-time.Second)
+	c.handleClaim(ctx, domain.Heartbeat{
+		MonitorID: "m1", ExecutionRevision: 3, JobID: "11111111-1111-4111-8111-111111111111",
+		JobIssuedAt: at, DueAt: at.Add(-time.Minute), Claim: &domain.RunClaim{At: at},
+	})
+	if len(fs.claims) != 1 || len(c.claimRetry) != 1 {
+		t.Fatalf("an unmatched claim was not parked: offers=%d parked=%d", len(fs.claims), len(c.claimRetry))
+	}
+
+	// Before the interval elapses nothing is re-offered: the retry waits for the leader's tick,
+	// and a sweep that ignored its own schedule would hammer the store.
+	c.retryRunClaims(ctx)
+	if len(fs.claims) != 1 {
+		t.Fatalf("the claim was re-offered %d times before its wait elapsed", len(fs.claims)-1)
+	}
+
+	clock = base.Add(runClaimRetryEvery)
+	c.retryRunClaims(ctx)
+	if len(fs.claims) != 2 || len(c.claimRetry) != 1 {
+		t.Fatalf("after one interval: offers=%d parked=%d, want 2 and 1", len(fs.claims), len(c.claimRetry))
+	}
+
+	clock = base.Add(2 * runClaimRetryEvery)
+	c.retryRunClaims(ctx)
+	if len(fs.claims) != 3 {
+		t.Fatalf("the claim was offered %d times, want 3", len(fs.claims))
+	}
+	if len(c.claimRetry) != 0 {
+		t.Errorf("a claim a window TOOK is still parked (%d): a matched claim is done", len(c.claimRetry))
+	}
+	// The instant is the executor's, not the retry's. `claimed_at` records when the run STARTED,
+	// and the merge rule is earliest-wins, so a claim landing two intervals late must still write
+	// the instant it was taken at — otherwise the retry would trade a missing diagnostic for a
+	// wrong one.
+	for i, c := range fs.claims {
+		if c.Claim == nil || !c.Claim.At.Equal(at) {
+			t.Fatalf("offer %d carries %v, want the executor's own instant %v", i, c.Claim, at)
+		}
+	}
+}
+
+// The retry is BOUNDED. A claim that correlates to no window at all — invariant 25's shapes — is
+// unmatched forever, and it must stop being offered rather than accumulate.
+func TestAClaimThatNoWindowEverTakesStopsBeingRetried(t *testing.T) {
+	fs := newFakeStore()
+	fs.claimUnmatched = 1 << 30 // never matches
+	fs.monitors["m1"] = domain.Monitor{ID: "m1", ExecutionRevision: 3}
+	c := New(fs, dispatch.NewInProc(1), &fakeRecorder{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	base := time.Now().UTC()
+	clock := base
+	c.now = func() time.Time { return clock }
+	ctx := context.Background()
+
+	c.handleClaim(ctx, domain.Heartbeat{
+		MonitorID: "m1", ExecutionRevision: 3, JobID: "11111111-1111-4111-8111-111111111111",
+		JobIssuedAt: base, DueAt: base.Add(-time.Minute), Claim: &domain.RunClaim{At: base},
+	})
+	for i := 1; i <= runClaimRetryLimit+3; i++ {
+		clock = base.Add(time.Duration(i) * runClaimRetryEvery)
+		c.retryRunClaims(ctx)
+	}
+	if len(c.claimRetry) != 0 {
+		t.Errorf("%d claim(s) still parked past the attempt bound", len(c.claimRetry))
+	}
+	if want := 1 + runClaimRetryLimit; len(fs.claims) != want {
+		t.Errorf("the claim was offered %d times, want %d — one first offer plus its re-offers",
+			len(fs.claims), want)
 	}
 }
 

@@ -7394,3 +7394,306 @@ the result path compares `observed_at` against `job_issued_at` with them.
 one recorded withdrawal, and the gates are green: the store suite under `-race` (ok 713s, isolated
 database), 620 frontend tests, and `make dev-test` at **68 passed** on a live stack. Everything is a
 LOCAL commit. **Push, tag and release remain unauthorized.**
+
+## D-0242 — the post-implementation audit: a window answered early, a claim that lost its race, and a gauge wired to nothing (FR-032)
+
+**Date.** 2026-09-05. **Iteration.** iter-0175. **Requirement.** FR-032.
+**Spec.** `docs/specs/func-expected-run-ledger.md` revision 31, §17.12.
+
+**Context.** The arc closed with every phase implemented, every invariant DISCHARGED, the full
+`-race` suite green and `make dev-test` passing. It was then read end to end — every file of the
+chain against the tree, and the whole feature against a running instance with the carrier turned
+on. That found sixteen things. Five are in the requirement's own subject, five are narrower, six
+are the documents disagreeing with the tree. This record is the five, and the rule the shape of
+them argues for.
+
+**Decision 1: an expectation MAY postdate its own dispatch, and the protection moves to the orphan
+insert.** `correlateExpectedRun` refused any result whose `DueAt` was after its `IssuedAt`. The rule
+is false about this system: the leader dispatches from its in-memory `nextRun`, not from
+`monitor_schedule.next_due_at`, and two ordinary states put the first earlier — leadership
+acquisition, where the map is created empty so every monitor is due at once, and confirm
+acceleration, which by §7.3 writes nothing to the schedule. Both mint the job and the window from
+ONE core statement, and the refusal then made the window unanswerable by the run it was written for:
+a false `issued_never_claimed` forever, which invariant 25 explicitly forbids. Twelve such windows
+on a running instance, twelve unanswered.
+
+What the refusal actually protected is the ORPHAN insert — an executor-supplied instant in the
+future creating a window for time nothing was dispatched for — so that is where it now lives: an
+early window may be **FILLED and never INVENTED**. `Verdict()` needed no change; it already reads a
+negative `issued_at - due_at` as `covered`. Invariant 25's postdating clause is WITHDRAWN, in the
+list, with the reason.
+
+**Decision 2: an unmatched claim is HELD and re-offered, not dropped.** §7.1 flushes the advance
+once per tick, after the publishes in it, so on a fast transport the executor's claim reaches ingest
+before the row exists — measured at one landing in sixty-two on `role=all`. No verdict was wrong,
+but `issued_never_claimed` came to mean "the claim raced the advance" rather than the executor loss
+§8.5 says it exposes, and `claimed_never_finished` was unreachable. The consumer parks the claim and
+re-offers it a bounded number of times at the tick's scale, with the claim's INSTANT untouched
+because `claimed_at` records when the run started and the merge rule is earliest-wins. Rejected:
+letting a claim CREATE its row, which would invent an issued run whose only evidence is that
+somebody started it (§8.1), and writing the advance before the publish, which would move this
+design's residual from withholding to over-claiming.
+
+**Decision 3: a builder that is never called is a capability that does not exist.**
+`WithLedgerMetrics` and `WithExpectedRunRetention` were defined, documented in the runbook,
+described in `config.example.yaml` — and wired nowhere. So `cerbix_expected_runs_hot_update_ratio`
+was exported by no binary, which is the whole of §11's measurement gate, and the leader purged at
+the built-in fourteen days whatever `ledger.expected_run_retention_days` said. Invariants 22 and 23
+were DISCHARGED by tests that exercise the sampler and the registry separately; both were true, and
+neither could see the missing wire between them. A source scan over every `scheduler.New(...)` in
+`cli.go` now holds it, in the shape phase A's timeline guard already uses for the same reason: the
+compiler cannot see a missing statement.
+
+**Decision 4: a test may not hard-code the configuration of the stack it runs against.**
+`expected-runs.spec.ts` asserted "no window records carrier 4" with a message naming the carrier as
+off, so enabling FR-032 made `make dev-test` fail and point at the opposite of the truth. The cost
+underneath it is the real finding: the entire generation-4 path had never been exercised live — not
+the v4 queue, not `agentJobsV4`, not a `covered` verdict, not the stroke. The spec now reads
+`CERBIX_LEDGER_CARRIER` and asserts the carrier-ON half as well, so the feature has a live gate in
+the state it is FOR and not only in the state it ships in.
+
+**Decision 5: `issued_at` has one writer, and it is the core.** §8.3's upsert took
+`issued_at = LEAST(COALESCE(existing, $n), $n)` where `$n` is the executor's echo of `JobIssuedAt`,
+so a result naming an earlier instant lowered the core's own value, shrank `issued_at - due_at` and
+promoted `covered_late` to `covered`. That is the terminal event writing the ISSUE event's column
+(invariant 7) with the one argument in the statement the core does not own (invariant 20e) — both
+invariants stated the property and neither was carried by the SQL. `COALESCE(existing, $n)` is
+first-writer-wins, matching the two lines above it for `job_id` and `carrier_generation`; the orphan
+path still supplies it, because there the core never wrote one.
+
+Two things make this one worth its own decision rather than a line in a list. It **shipped with B2
+and survived every review including this audit's own first pass** — it was found by re-reading the
+audit's changes and asking of each merge expression "whose value is this, and who may lower it".
+And it needed no malice: the honest echo is the instant minted in the tick's pre-pass while the
+advance writes the leader's `now` from a different clock, so `LEAST` picked whichever clock ran
+slower and the column drifted toward understating lateness on every window.
+
+**The rule this argues for, stated once.** Six of the nine code findings are the class this arc has
+now hit sixteen times: prose promising what the mechanism beside it does not do — "the
+crash-after-publish case", a cap that "bounds one statement's work", counters that are "monotonic",
+a gauge the runbook says to watch. Reading the sentence is not reading the mechanism. And the two
+that only a live stack could find are the second such pair in this arc, which is enough to make it a
+rule rather than an anecdote: **a phase is not closed until the thing it built has been observed
+doing its job on a running instance, in the configuration it ships in AND in the configuration it is
+for.**
+
+**Consequences.** Spec revision 31 (§17.12, and corrections to §6.1, §6.2, §7.2, §8.4, §9.3, §11,
+§13.1, §13a, invariants 20d, 25, 26b). `retention_days` joins the read API's bounds, because a
+client cannot form a valid query without it. `check_line_citations` joins `make docs-check`: thirteen
+of thirty-three `file.go:NNN` citations pointed at whitespace or an unrelated statement — including
+every line in §7.2's advance-rule audit — while the checker passed, because it validated the PATH
+and never the LINE. The durable fix is naming functions instead of lines; the guard catches what
+remains, and is documented as weak rather than implying more than it checks.
+
+## D-0243 — the ledger records the window BEFORE the job leaves the process (FR-032 phase F)
+
+**Date.** 2026-09-05. **Iteration.** iter-0176. **Requirement.** FR-032.
+**Spec.** `docs/specs/func-expected-run-ledger.md` revision 33, §7.4, §17.14, §17.15.
+
+**Context.** FR-032 closed at iter-0175 with every invariant discharged, the full `-race` suite green
+and `make dev-test` passing, and then a post-implementation audit (`D-0242`) fixed sixteen more
+things. What none of that could see, a running instance showed: `AdvanceExpectations` deadlocked
+against §8.3's own fill — six times in seven minutes of ordinary browser-suite load — and the
+scheduler logged the error and discarded the batch's payload, including the identity of jobs it had
+already published. **Every window on that instance claiming `expected_never_issued` was false**, two
+of two, each contradicted by a heartbeat inside its own window. `make dev-test` passed 68 tests and
+skipped 1 with both facts in the table.
+
+**Decision 1: the advance moves BEFORE the dispatch.** The tick is RESERVE → PUBLISH → CONFIRM.
+§7.1's statement runs ahead of the transport and writes the window with its minted identity; the job
+is published only after that; a third statement records what the transport did. An instant is now
+either recorded or the schedule never passed it, so a gap cannot cover an instant a job was published
+for — the publish cannot precede the row. A reserve that fails publishes nothing and moves nothing.
+
+Why not the alternatives, both of which were proposed and rejected: a bounded RETRY narrows the
+window in which the deadlock is observed and changes nothing after exhaustion, so it is a smaller
+version of the same defect; a PREDICATE forbidding a gap to swallow a dispatched window needs to know
+which instants were dispatched, and after a lost payload nothing durable knows — an in-memory
+"unsettled" flag fails leadership handover, where a new leader reads the unmoved `next_due_at` and
+reproduces the whole chain.
+
+**Decision 2: the model gains a state, because neither absence verdict may be borrowed.** A window
+whose identity was minted and committed with no dispatch recorded reads `reserved`. It may not read
+`expected_never_issued`, which asserts that no run happened — the opposite of what is known — and it
+may not read `issued_never_claimed`, which asserts that a job was PUBLISHED. Hence `reserved_at`,
+`withheld_reason`, and a verdict that licenses no stroke, is excluded from the coverage numerator and
+counts in its denominator. `Verdict()`'s order is part of the specification: `unknown` first, then a
+terminal outcome, then `reserved`, then the absence tests — and a CLAIM overrides `reserved`, because
+an executor that took the job off the transport proves the publish happened.
+
+**Decision 3: one materialization, one identity.** The `CheckJob` is materialized once, by the
+reserve, and the wire carries `reserved_at` as its `JobIssuedAt` — so an executor echoes an instant
+the core already made durable, which is invariant 20e held structurally rather than by a merge
+expression. No publish, confirm, retry or handover may mint a second `job_id` for a reserved window.
+A new leader does NOT republish one: it holds no payload for it and will not build one, at the
+accepted cost of one lost probe per reserved window across a handover. Required by the reviewer at
+party [20]: a durable row whose job identity is not durable recreates the stale-identity defect in a
+new form.
+
+**Decision 4: the batch is not the unit — the window is.** `ReserveExpectations` returns the windows
+it wrote rather than a count, and a dispatch leaves the process only when its own `(monitor, due_at)`
+is in that set. The first implementation published whenever the call returned without an error and
+merely logged a short result, so a fenced item's job went out with no window behind it — the ordering
+invariant broken on the one path that looks like success (reviewer P0 at [28]). The two failure
+shapes are then separated by KNOWLEDGE: an ERROR leaves commit status unknown, so the payload is held
+unchanged; a SHORT result means the missing items were written nowhere and name a revision the fence
+has already rejected, so the payload is dropped and the monitor is decided again from its current
+configuration. Holding a fenced payload cannot terminate; dropping it terminates by construction
+(reviewer ruling at [30]).
+
+**Decision 5: advance rule 2 is amended, and the cost is stated.** Rule 2 said a failed dispatch
+records nothing, which is unreachable once the window is written first. It also left `nextRun`
+untouched so the next tick retried at once — correct while nothing was recorded, and a defect
+generator afterwards: the expectation has already moved, so the monitor would be due every tick and
+reserve a window per tick for the whole of an outage. The in-memory instant now follows the durable
+one, and **a failed publish costs one interval instead of one tick**. `transport_backoff` is written
+by nothing any more: a publish failure annotates a reserved window rather than claiming cerbix chose
+not to run it.
+
+**Decision 6: the panel's verdict vocabulary gets ONE exhaustive owner, and an older defect is
+repaired with it.** Drawing the mock for `reserved` found that `expectationCells` mapped three
+verdicts and sent everything else to the outline meaning "a run was due here and nothing ran" — so
+`unknown`, `issued_never_claimed` and `claimed_never_finished` were all drawn as missed runs, while
+the phase-E mock this panel was approved against had assigned `unknown` the HATCH. On the shipped
+default (`ledger.carrier_enabled` off) every window reads `unknown`, so the ruler drew a full row of
+missed runs on an instance where nothing was missed. `CELL_FOR_VERDICT` replaces the chain and
+`satisfies Record<ExpectedRunVerdict, ExpectationCellKind>` against the GENERATED union, so a missing
+key fails the build with `TS1360`; the wire value stays a string and an unrecognised verdict lands on
+the hatch, because completeness for this build and tolerance of a future server are different
+questions. `reserved` is a neutral outline — the missed-run geometry in a hue that is not failure.
+
+**Approvals.** Revision 33 was ACCEPTED as a design amendment and phase-F entry gate at party [20],
+explicitly not as approval to commit. The reviewer stated he had no authority to authorize
+implementation; **the OWNER authorized it on 2026-09-05**, in the order the reviewer confirmed —
+entry tests and the backend contract and migration first, the panel only after an approved mock. The
+mock, `docs/design/mock-expected-run-reserved.html`, was recommended by the reviewer at [34] and
+**APPROVED BY THE OWNER on 2026-09-05 as candidate B**: the neutral solid outline for `reserved`,
+`unknown` hatched, and the three "nothing ran in this window" verdicts keeping the `--down` outline.
+
+**Gates, on the tree approved at party [50].** The full `-race` suite: **exit 0, 33 packages, 0 failures**, `internal/store` 739.585s and
+`internal/scheduler` 69.109s, on an isolated database with the preconditions checked before the run —
+no test process alive and zero connections to it. `make dev-test` on a stack REBUILT from this tree
+with the carrier on: **68 passed and 1 skipped** (`file-providers.spec.ts:23`, no file-managed monitor
+in that stack), 7.1 minutes. Frontend: 51 files, 629 tests. `go vet`, `make docs-check` and
+`git diff --check` clean. A previous `-race` run failed with 108 fixture conflicts and is recorded in
+`iter-0176` §8 as INVALID rather than counted: three suites were sharing one database because of a
+mistake of mine, and an invalid run that disappears is a gate nobody can audit.
+
+These numbers describe THAT tree and are kept as the evidence this decision rested on. The audit that
+followed changed the tree and re-ran them — 632 frontend tests, `internal/store` at 741.613s — and
+those are in `iter-0177` §4. Two counts with no rule for choosing between them is what this paragraph
+looked like before the qualifier.
+
+**Approval.** Phase F's implementation was APPROVED by the independent reviewer at party [50], on
+the reviewed uncommitted tree, with the scope stated in the same message: "this accepts Phase F /
+revision-33 implementation only. It does not authorize commit, push, tag, or release." Nothing is
+committed.
+
+**What this decision says about the arc.** Four defects were found here, and three of them were found
+by reading a mechanism next to a sentence that described it wrongly: `lead()`'s "the residual points
+at withholding" over a discarded payload, a comment claiming nothing is published over a path that
+published everything, and a comment claiming a compile-time hole over a `Record<string, string>`. Two
+of those three were written INSIDE the fix for that same class. The fourth was found only by a
+running instance, which is now the third time in this arc — and the strongest argument in it for the
+rule §17.12 already proposed: a phase is not closed until the thing it built has been observed doing
+its job on a running instance, in the configuration it ships in AND in the configuration it is for.
+
+## D-0244 — the dev stack runs with the ledger carrier ON, and `make dev-test` learns that from the config (FR-032)
+
+**Date.** 2026-09-05. **Iteration.** iter-0176. **Requirement.** FR-032.
+
+**Context.** `D-0242`'s fourth finding was that `e2e/tests/expected-runs.spec.ts` asserted the
+feature switched OFF, so turning FR-032 on made `make dev-test` fail with a message naming the
+opposite of the truth. The stated deeper cost was that **the whole generation-4 path had never been
+exercised against a live instance.** The audit fixed the assertion — it derives the expectation from
+`CERBIX_LEDGER_CARRIER` now — and did not touch the CAUSE: the only stack that runs the browser
+suite has `ledger.carrier_enabled` absent, so nothing exercises the path by accident. The reviewer
+asked at party [16] that this be recorded separately from the phase-F amendment, which is what this
+record is.
+
+**Decision 1: `docker/config.dev.yaml` enables the carrier.** The argument is already written in
+that file for FR-020 and applies unchanged: *a feature that only ever runs in a bespoke smoke is a
+feature nobody exercises by accident.* The dev stack is where the browser suite runs, so it is the
+stack that should carry the feature the product ships.
+
+**Decision 2: `make dev-test` DERIVES the flag from the mounted config rather than restating it.**
+`DEV_LEDGER_CARRIER` is read out of `docker/config.dev.yaml` — the file the stack actually mounts at
+`/etc/cerbix/config.yaml` — by a narrow `awk` over the `carrier_enabled` line of the top-level
+`ledger:` block. Restating `true` in the Makefile would put ONE fact in two places, which is the
+defect class this arc has produced most often; anything but that exact shape yields the empty string,
+and `e2e/run.sh` already treats empty as off. Verified in both directions: `true` against
+`config.dev.yaml` as it now stands, empty against `config.example.yaml`, where the key is `false`.
+
+**What it costs, measured rather than assumed.** `make dev-test` on the flipped stack: **68 passed
+and 1 skipped**, the skip being `file-providers.spec.ts:23`, which has no file-managed monitor in
+that stack. No other spec depended on the panel drawing nothing, which was the open question when the
+flip was proposed.
+
+**What it does NOT change.** `docker/config.example.yaml` still ships `carrier_enabled: false`: the
+product's default is unchanged and this decision is about the development stack only. An operator who
+wants the ledger's truth still turns it on deliberately, and §13.0's announcement rule still governs
+whether a region is emitted at generation 4 at all.
+
+## D-0245 — a vocabulary is closed at its write boundaries or it is not closed (FR-032, the final-tree audit)
+
+**Date.** 2026-09-05. **Iteration.** iter-0177. **Requirement.** FR-032.
+**Spec.** `docs/specs/func-expected-run-ledger.md` §17.16.
+
+**Context.** Phase F was approved and the arc's review record was complete. The owner asked whether
+the whole arc had been reviewed; it had not, in one specific sense — phases B2 through E had been
+read closely by one person only, in the audit that produced `D-0242`. Rather than replay the phases,
+which are uncommitted and partly superseded, the reviewer was asked to read the ledger's write and
+read paths as PRODUCTION CODE. He accepted that framing at party [62]. Three things came out of it.
+
+**Decision 1: `withheld_reason`'s vocabulary is enforced at BOTH write boundaries, not described in
+three documents.** It was closed in the `WithheldPublishFailed` constant, in `openapi.yaml`'s enum
+and in the runbook, while migration `00103` checked only that a reason implies a reservation and
+`ConfirmExpectations` accepted any non-empty string — so an internal caller could persist a value
+the API contract does not define and no reader could interpret. The CHECK now admits `''` and
+`publish_failed` only, and the method refuses anything else before it reaches SQL.
+
+Both boundaries, because they answer different questions and the arc has been bitten by conflating
+them: the database refuses the value **whatever wrote it**, which is the property that survives a
+future caller; the method refuses it **before any SQL runs and names the offending item**, which is
+what keeps a batch from aborting on one bad element. `skip_reason` has had the same shape since
+`00102`, and this column's own comment invoked that precedent while not following it.
+
+**Decision 2: `ledger_from` outranks every verdict in the WORDS as well as in the fill.** The cell's
+geometry was always right, and `cellLabel` carried an exception for `unknown` — so a window behind
+the truncation fence whose stored verdict happened to be `unknown` was described as "dispatched on a
+carrier that carries no job identity": a claim about a dispatch, about time the ledger says it cannot
+answer for. The cell now carries WHY it is `notStored`, because that kind has two causes and testing
+the kind alone would make a post-`ledger_from` `unknown` say "before the ledger begins" — the same
+overclaim in the other direction.
+
+**Decision 3: a count is named for what it measures.** `ConfirmExpectations` returned the row count
+of its final `UPDATE monitor_schedule`, so a withheld confirm — which deliberately does not move the
+schedule — reported ZERO for work it had done, and a successful one reported a number about another
+table. The statement now ends with `SELECT count(*) FROM confirmed`, with the schedule update as its
+own data-modifying CTE.
+
+**How it was found is the part worth keeping.** Nothing reads that count: `publishPending` discards
+it. It survived every review, including this audit's own first pass, and surfaced only because the
+reviewer required a test for decision 1 that asserted the ADMISSIBLE case as well as the refused
+ones. A value nobody consumes is a value nobody checks, and the way it becomes a defect is that
+somebody eventually quotes it.
+
+**What all three have in common.** A sentence describing a mechanism, and a mechanism doing something
+else — in the schema, in the render's words, and in a return value. That class has now produced a
+defect in every layer of this requirement, which is the strongest argument the arc has for reading
+code against its own claims rather than against its tests.
+
+**A fourth, in the documents, and the guard could not see it.** `docs/traceability.md`'s FR-032 row
+ended at phase F: no `iter-0177`, no `D-0245`, none of the new tests, and `00103` described as
+carrying one rule after it had been given two. `make docs-check` was green over it throughout, and
+that is not a failure of the guard — it validates that a citation RESOLVES and cannot know what was
+never written. **A green guard is evidence about what is present and says nothing about what is
+missing**, which is worth stating in a repository whose guards are this good, because their quality
+is exactly what makes them tempting to quote as completeness.
+
+**The audit's result, with its boundary.** "No open functional P0/P1 found in the requested write→read
+scope" (party [81]). The scope is the one accepted at [62] and nothing outside it was read;
+`internal/ingest`'s parked-claim re-offer and `ledger_from` were read on their semantics and found
+CLEAN; the frontend suite and the full `-race` remain developer-provided evidence rather than the
+reviewer's own runs, because his workspace has no local `npm`; `make docs-check` and
+`git diff --check` he ran himself. No VCS or release authority follows from any of it.

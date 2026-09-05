@@ -84,3 +84,10 @@ services:
   max_services_per_project: 50
   max_members_per_revision: 50
   max_services_per_monitor: 10
+
+# FR-032 is ON in the dev stack for the same reason FR-020 is: the audit of revision 31 found that
+# the whole generation-4 path had never been exercised against a live instance, because the only
+# stack that runs the browser suite had the carrier off. A feature nobody exercises by accident is
+# a feature whose first real run happens in production.
+ledger:
+  carrier_enabled: true

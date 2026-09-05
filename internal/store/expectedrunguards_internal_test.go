@@ -40,7 +40,7 @@ func TestExactlyOneStatementAdvancesTheExpectation(t *testing.T) {
 		}
 	}
 	sort.Strings(advancers)
-	want := []string{"expectedruns.go:advanceExpectationsSQL"}
+	want := []string{"expectedruns.go:reserveExpectationsSQL"}
 	if strings.Join(advancers, ",") != strings.Join(want, ",") {
 		t.Fatalf("the statements that move next_due_at are %v, want exactly %v (§7.1).\n"+
 			"Two statements sharing the gap-and-fence obligation will diverge on it, and did — "+
@@ -88,7 +88,7 @@ func TestEveryWindowInsertNamesTheColumnsThatCannotBeDefaulted(t *testing.T) {
 			"guard that stopped seeing its own subject reports green forever", inserts)
 	}
 	sort.Strings(withCarrier)
-	want := []string{"advanceExpectationsSQL", "fillExpectedRunTerminalSQL"}
+	want := []string{"fillExpectedRunTerminalSQL", "reserveExpectationsSQL"}
 	if strings.Join(withCarrier, ",") != strings.Join(want, ",") {
 		t.Fatalf("the inserts naming carrier_generation are %v, want exactly %v.\n"+
 			"A new write that can carry a job must name the carrier or it fails §6.1's CHECK on "+

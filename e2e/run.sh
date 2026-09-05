@@ -2,6 +2,9 @@
 # Runs the E2E suite in the official Playwright container against a live stack.
 #   ./e2e/run.sh                          # http://localhost:8080
 #   CERBIX_URL=http://host:8080 ./e2e/run.sh tests/monitors.spec.ts
+# CERBIX_LEDGER_CARRIER=true says the stack has `ledger.carrier_enabled` on (FR-032), which
+# changes what expected-runs.spec.ts may assert: with it off no window may record carrier 4,
+# with it on the panel must actually draw a stroke.
 # The suite creates e2e-prefixed entities and cleans them up — dev stacks only.
 set -e
 cd "$(dirname "$0")"
@@ -11,6 +14,7 @@ docker run --rm --network host \
   -e CERBIX_URL="${CERBIX_URL:-http://localhost:8080}" \
   -e CERBIX_TOPOLOGY="${CERBIX_TOPOLOGY:-single}" \
   -e CERBIX_ADMIN_EMAIL -e CERBIX_ADMIN_PASSWORD \
+  -e CERBIX_LEDGER_CARRIER="${CERBIX_LEDGER_CARRIER:-false}" \
   --tmpfs /e2e/node_modules:rw,mode=1777 \
   --tmpfs /e2e/.auth:rw,mode=1777 \
   -v "$PWD":/e2e -w /e2e mcr.microsoft.com/playwright:v1.49.0-noble \

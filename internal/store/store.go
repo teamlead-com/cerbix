@@ -223,16 +223,25 @@ func (s *Store) WithExpectedRunPolicy(retentionDays, gapWindowsMax int) *Store {
 	return s
 }
 
-// expectedRunRetentionDaysOrDefault is the retention window in DAYS, defaulted for a store nobody
-// wired. Days rather than a duration because §10's segment close derives its floor inside SQL from
-// the same `statement_timestamp()` that bounds it, so the value has to cross the boundary in the
-// unit `make_interval` takes.
-func (s *Store) expectedRunRetentionDaysOrDefault() int {
+// ExpectedRunRetentionDays is the retention window in DAYS, defaulted for a store nobody wired.
+// Days rather than a duration because §10's segment close derives its floor inside SQL from the
+// same `statement_timestamp()` that bounds it, so the value has to cross the boundary in the unit
+// `make_interval` takes.
+//
+// Exported because the read API needs it: §13a bounds a query's range at "the retention window",
+// and the handler had that as the built-in default rather than as the configured value — so an
+// instance keeping ninety days of windows refused any range wider than fourteen. One owner for the
+// number, asked rather than re-derived.
+func (s *Store) ExpectedRunRetentionDays() int {
 	if s.expectedRunRetentionDays <= 0 {
 		return domain.DefaultExpectedRunRetentionDays
 	}
 	return s.expectedRunRetentionDays
 }
+
+// expectedRunRetentionDaysOrDefault is the internal spelling, kept so the store's own call sites
+// read as store internals rather than as calls into its public surface.
+func (s *Store) expectedRunRetentionDaysOrDefault() int { return s.ExpectedRunRetentionDays() }
 
 // expectedRunRetention is the same window as a duration, for the callers that compute the floor in
 // Go — §7.1's advance, whose upper bound is the leader's own instant, and the ingest correlation.

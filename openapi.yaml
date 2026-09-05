@@ -5301,8 +5301,14 @@ components:
         the denominator. `expected_never_issued` covers both a window nothing ran in and one cerbix
         deliberately skipped, with `skip_reason` telling them apart. `unknown` means the window was
         dispatched on a carrier that does not carry job identity, so no result could ever correlate
-        to it.
-      enum: [covered, covered_late, expected_never_issued, issued_never_claimed, claimed_never_finished, unknown]
+        to it. `reserved` means the core minted this window''s identity and committed it and NO
+        dispatch is recorded for it — the process died between the reserve and the publish, or the
+        transport refused the job (§7.4, phase F). It is deliberately neither absence verdict:
+        `expected_never_issued` asserts that no run happened, which is the opposite of what is
+        known, and `issued_never_claimed` asserts that a job was published, which is exactly what a
+        reserved window cannot say. It licenses no stroke and is excluded from the coverage
+        numerator while counting in the denominator.
+      enum: [covered, covered_late, expected_never_issued, issued_never_claimed, claimed_never_finished, unknown, reserved]
     ExpectedRunWindow:
       type: object
       description: One due window (FR-032 §6.1). Every verdict is computed; none is stored.
@@ -5330,7 +5336,27 @@ components:
           description: >
             The threshold above was ASSUMED rather than observed (§14.2). EXPLANATORY ONLY: it may
             never be read as licence to promote a `covered_late` window to `covered`.
-        issued_at: { type: string, format: date-time }
+        issued_at:
+          type: string
+          format: date-time
+          description: >
+            The instant the PUBLISH returned success. Written by the core''s confirm and by nothing
+            else: an executor''s echo may never set or lower it (§7.4, invariants 20e and 27h).
+        reserved_at:
+          type: string
+          format: date-time
+          description: >
+            The instant the core minted this window''s identity and committed it, BEFORE the job
+            reached any transport. It is also the instant the job carries on the wire, so an
+            executor echoes a value the core already owned. Present with no `issued_at` is the
+            `reserved` verdict.
+        withheld_reason:
+          type: string
+          enum: [publish_failed]
+          description: >
+            Why a reserved window never became a published one. Absent unless the verdict is
+            `reserved` and the cause is known — a process that died between the two steps leaves
+            the window reserved with no reason, because nothing was there to record one.
         claimed_at: { type: string, format: date-time, description: An executor reported taking the job off the transport. }
         terminal_at: { type: string, format: date-time, description: An ADMISSIBLE outcome exists. Coverage is exactly this being present. }
         outcome: { type: string, enum: [result, probe_error] }
@@ -5339,13 +5365,18 @@ components:
         skip_reason:
           type: string
           enum: [no_capable_runner, no_inflight_slot, credential_unresolved, no_capable_executor, transport_backoff]
-          description: cerbix chose not to run this window, and why.
+          description: >
+            cerbix chose not to run this window, and why. `transport_backoff` is no longer written
+            (§7.4): a publish failure now annotates a RESERVED window with `withheld_reason`,
+            because the window is recorded before the publish is attempted and a skip would say
+            cerbix chose not to run what it had just chosen to run. The value stays so rows written
+            before phase F still read.
     ExpectedRunList:
       type: object
       description: >
         One page of a monitor''s windows (FR-032 §13a), newest first, with the two facts that bound
         what the answer MEANS. `next_cursor` is null on the last page.
-      required: [windows, ledger_from, gap_truncated_before, next_cursor]
+      required: [windows, ledger_from, gap_truncated_before, retention_days, next_cursor]
       additionalProperties: false
       properties:
         windows:
@@ -5366,6 +5397,13 @@ components:
           description: >
             Windows before this instant were advanced past and NOT materialized, because a cap or
             the retention clip stopped the leader writing them. The span is claimable as nothing.
+        retention_days:
+          type: integer
+          description: >
+            The widest range this endpoint will answer, in days — `ledger.expected_run_retention_days`
+            (2..90). A caller needs it BEFORE it can ask a valid question: a range wider than this is
+            400 `range_too_wide`, and a client that assumed the default asked one the server refused.
+            It travels with every page for the same reason the other two bounds do.
         next_cursor: { type: string, nullable: true }
     ChangeKind:
       type: string

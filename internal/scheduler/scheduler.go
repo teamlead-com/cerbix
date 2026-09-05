@@ -83,7 +83,7 @@ type Store interface {
 	// hands back the standing expectation the job will answer — from monitor_schedule and NOT
 	// from the 15-second snapshot, which is stale by design (invariant 25a).
 	//
-	// AdvanceExpectations is the ONE statement that moves an expectation forward, writing the
+	// ReserveExpectations is the ONE statement that moves an expectation forward, writing the
 	// window it answers, the windows it skipped past and the truncation fence with it. Advance
 	// rules 1, 3 and 4 are all callers of it, on BOTH the plain and the credentialed branch:
 	// FR-029 shipped an in-flight claim on one branch only, and this structure exists so that
@@ -95,7 +95,11 @@ type Store interface {
 	// the instant it describes, so the pair cannot come to describe different instants (§7.3 as
 	// amended, invariants 2c and 2d).
 	LoadDueExpectations(ctx context.Context, monitorIDs []string) (map[string]store.DueExpectation, error)
-	AdvanceExpectations(ctx context.Context, now time.Time, items []store.ExpectationAdvance) (int, error)
+	ReserveExpectations(ctx context.Context, now time.Time, items []store.ExpectationAdvance) ([]store.ExpectationReservation, error)
+	// ConfirmExpectations settles what the transport did with each reserved window (§7.4's third
+	// step). It is a SECOND method rather than a flag on the first because the two run either side
+	// of the dispatch, which is the whole content of phase F.
+	ConfirmExpectations(ctx context.Context, now time.Time, items []store.ExpectationConfirm) (int, error)
 	EnsureExpectedRunPartitions(ctx context.Context, ahead int) error
 	// FR-032 phase D. Retention drops a dated partition only once its WHOLE range is past the
 	// cutoff, and deletes rows that leaked into the DEFAULT partition — which the gate ledger's
@@ -645,9 +649,6 @@ func (s *Scheduler) WithChangeRetentionMetrics(sink ChangeRetentionSink) *Schedu
 	return s
 }
 
-// WithCredentialEnvelopes switches the scheduler to the decrypt-free snapshot plus
-// authoritative materialization path. Config validation guarantees this is enabled before
-// any *_ref write surface is exposed.
 // WithLedgerCarrier gates FR-032's generation-4 selection. It is the ONE place the decision
 // enters the leader: a config field validated in `(*Config).Validate` and handed in at
 // construction, never read from the environment, never decided inside `lead()`, and never
@@ -658,6 +659,9 @@ func (s *Scheduler) WithLedgerCarrier(enabled bool) *Scheduler {
 	return s
 }
 
+// WithCredentialEnvelopes switches the scheduler to the decrypt-free snapshot plus
+// authoritative materialization path. Config validation guarantees this is enabled before
+// any *_ref write surface is exposed.
 func (s *Scheduler) WithCredentialEnvelopes(enabled bool) *Scheduler {
 	s.credentialEnvelopes = enabled
 	return s
@@ -1222,6 +1226,11 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 	// failures so the two causes back off independently (§4.4.5).
 	publishFailures := map[string]int{}
 	credentialLastLog := map[string]time.Time{}
+	// FR-032 phase F (§7.4). A dispatch whose RESERVE failed is HELD here with its payload, and
+	// the next tick re-submits it unchanged. Holding it is not an optimization: re-deciding the
+	// monitor would mint a second identity for an instant the schedule has not moved past, which
+	// is the stale-identity half of the defect this phase exists to remove (invariants 27c, 27f).
+	deferredDispatch := map[string]pendingDispatch{}
 	var monitors []domain.Monitor
 	byID := map[string]domain.Monitor{}
 	// confirmFast holds monitors currently probed at their confirm interval,
@@ -1627,24 +1636,50 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 			// count one per tick instead of one per monitor (§7.1), and it is also what lets
 			// rules 1, 3 and 4 share a single code path on both branches.
 			ledgerAdvances := make([]store.ExpectationAdvance, 0, len(dueIDs))
+			// FR-032 phase F (§7.4). Nothing is published from inside the loops below any more:
+			// they DECIDE, and the tick publishes only after the ledger has recorded what it is
+			// about to publish. A failed reserve therefore leaves an instant that is either
+			// recorded or never passed by the schedule, which is what makes a later gap TRUE
+			// instead of fabricated.
+			pending := make([]pendingDispatch, 0, len(dueIDs))
+			// A monitor whose reserve failed keeps its dispatch HELD, payload and all, and the
+			// next tick re-submits it unchanged rather than minting a second identity for an
+			// instant that may already have been dispatched (invariants 27c, 27f).
+			for _, held := range deferredDispatch {
+				pending = append(pending, held)
+				ledgerAdvances = append(ledgerAdvances, held.advance)
+			}
 			// recordAdvance builds one item of that batch. Every caller passes the interval that
 			// SPACED the window and its own next-due instant, separately and deliberately: for a
 			// backoff they differ, and deriving one from the other is invariant 2b's defect.
-			recordAdvance := func(m domain.Monitor, exp store.DueExpectation, ok bool, jobID, skipReason string, carrier int, nextDue time.Time, interval time.Duration, confirming bool) {
+			recordAdvance := func(m domain.Monitor, exp store.DueExpectation, ok bool, jobID, skipReason string, carrier int, nextDue time.Time, interval time.Duration, confirming bool) store.ExpectationAdvance {
 				if !ok {
-					return
+					return store.ExpectationAdvance{}
 				}
-				ledgerAdvances = append(ledgerAdvances, store.ExpectationAdvance{
+				item := store.ExpectationAdvance{
 					MonitorID: m.ID, JobID: jobID, SkipReason: skipReason,
 					NextDue: nextDue, IntervalInForce: int(interval / time.Second),
 					Confirming:        confirming,
 					CarrierGeneration: carrier,
 					ExpectedDue:       exp.DueAt, ExpectedRevision: m.ExecutionRevision,
 					Region: m.Region,
-				})
+				}
+				if jobID != "" {
+					// The instant the identity was MINTED, which is the value the job carries on
+					// the wire. Writing the tick's own clock here instead would put two readings
+					// of two clocks on one object (§7.4's identity table).
+					item.ReservedAt = exp.IssuedAt
+				}
+				ledgerAdvances = append(ledgerAdvances, item)
+				return item
 			}
 			for _, m := range monitors {
 				if !dueForDispatch(m, nextRun, now) {
+					continue
+				}
+				// Its identity is already minted and its payload already built; re-deciding it
+				// here would mint a second one for the same instant (§7.4).
+				if _, held := deferredDispatch[m.ID]; held {
 					continue
 				}
 				if s.credentialEnvelopes && domain.CredentialedType(m.Type) {
@@ -1703,27 +1738,16 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 				// plain path used to inline its own pull enqueue and its own PublishJob call, so
 				// generation 4 would have had to be taught to a third site — and a carrier taught
 				// at three sites is the shape §13.0's table warns about.
-				if err := s.publishScheduledJob(ctx, job, iv); err != nil {
-					if ctx.Err() != nil {
-						return false
-					}
-					// Advance rule 2: dispatch FAILED, so the expectation is unchanged and there
-					// is nothing to preserve. nextRun is left alone too, so the next tick retries
-					// promptly rather than skipping a whole interval — which is also why this
-					// path writes no ledger row: the window has not been answered OR abandoned.
-					//
-					// During a broker outage every due monitor fails — aggregate into one line
-					// per tick instead of a line per monitor.
-					s.releaseCanarySlot(ctx, m) // nothing was published: the slot is not in flight
-					publishFailed++
-					publishErr = err.Error()
-					continue
-				}
-				nextRun[m.ID] = now.Add(iv)
-				// Advance rule 1: the window was ANSWERED by a real dispatch. Every run fact on
-				// the row comes from the job that was published — its carrier, its region, its
-				// revision — never re-read from the schedule at write time (invariant 25d).
-				recordAdvance(m, expect, expectOK, job.JobID, "", job.ProtocolVersion, now.Add(iv), iv, confirming)
+				// Advance rule 1: the window is about to be ANSWERED by a real dispatch. Every
+				// run fact on the row comes from the job that will be published — its carrier,
+				// its region, its revision — never re-read from the schedule at write time
+				// (invariant 25d). The publish itself happens after the reserve; `nextRun` moves
+				// with it, so a tick that records nothing also skips nothing.
+				pending = append(pending, pendingDispatch{
+					monitor: m, job: job, interval: iv, nextRun: now.Add(iv),
+					ledgered: expectOK,
+					advance:  recordAdvance(m, expect, expectOK, job.JobID, "", job.ProtocolVersion, now.Add(iv), iv, confirming),
+				})
 			}
 			regions := make([]string, 0, len(credentialByRegion))
 			for region := range credentialByRegion {
@@ -1926,73 +1950,77 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 							recordAdvance(m, expect, expectOK, "", store.SkipNoInflightSlot, 0, now.Add(iv), iv, confirming)
 							continue
 						}
-						if err := s.publishScheduledJob(ctx, item.Job, iv); err != nil {
-							if ctx.Err() != nil {
-								return false
-							}
-							s.releaseCanarySlot(ctx, m) // nothing was published: not in flight
-							publishFailed++
-							publishErr = err.Error()
-							// Retry eligibility is STATE, not a rate (§4.4.5, D-0160): the
-							// failure counter grows, next-eligible moves to now+backoff, and
-							// the probe is not marked sent. Leaving nextRun untouched — as
-							// this path did — is not the same as "not sent": it makes the
-							// monitor due again on the very next tick, so the one fault
-							// guaranteed to hit every credentialed monitor at once, a broker
-							// outage, turned each tick into a full authoritative-read +
-							// decrypt + seal storm across the whole due set. That is the
-							// failure mode the floor exists to prevent, reached through the
-							// door it did not cover. The counter is separate from the
-							// credential one so a transport fault and a secret-resolution
-							// fault back off independently and neither masks the other.
-							if s.secretResolution != nil {
-								s.secretResolution.RecordDispatchTransportFailure("publish_failed")
-							}
-							publishFailures[m.ID]++
-							delay := credentialFailureRetry(iv, publishFailures[m.ID])
-							nextRun[m.ID] = now.Add(delay)
-							// Advance rule 4 on the credentialed branch. It differs from the
-							// plain branch's rule 2 deliberately and that asymmetry is
-							// pre-existing: this path treats a publish failure as retry STATE
-							// (§4.4.5, D-0160) rather than as "not sent", because leaving nextRun
-							// untouched turned a broker outage into a full decrypt-and-seal storm
-							// every tick. Since the instant DOES move here, the window it moved
-							// past must be recorded.
-							recordAdvance(m, expect, expectOK, "", store.SkipTransportBackoff, 0, now.Add(delay), iv, confirming)
-							continue
-						}
-						delete(credentialFailures, m.ID)
-						delete(credentialLastLog, m.ID)
-						delete(publishFailures, m.ID)
-						nextRun[m.ID] = now.Add(iv)
-						recordAdvance(m, expect, expectOK, item.Job.JobID, "", item.Job.ProtocolVersion, now.Add(iv), iv, confirming)
+						// The publish is DEFERRED past the reserve exactly as the plain branch's
+						// is (§7.4). A transport failure is no longer a skip recorded in the same
+						// statement as the window — the window is already reserved by then — so it
+						// becomes a WITHHOLDING reason on the confirm, which is the state the row
+						// can express honestly. The backoff bookkeeping below is unchanged and
+						// still runs, in `publishPending`, because retry eligibility is STATE and
+						// not a rate (§4.4.5, D-0160).
+						pending = append(pending, pendingDispatch{
+							monitor: m, job: item.Job, interval: iv, nextRun: now.Add(iv),
+							ledgered: expectOK, credentialed: true,
+							advance: recordAdvance(m, expect, expectOK, item.Job.JobID, "", item.Job.ProtocolVersion, now.Add(iv), iv, confirming),
+						})
 					}
 				}
 			}
-			// FR-032 §7.1, ONE statement per tick. The windows, the missed windows, the
-			// truncation fence and the advance commit together or not at all — an advance that
-			// outruns its evidence is impossible rather than discouraged, and it is impossible
-			// for EVERY caller because there is only one place it could happen.
+			// FR-032 §7.1 and §7.4, ONE statement per tick and it runs BEFORE the dispatch. The
+			// windows, the missed windows, the truncation fence and the advance commit together
+			// or not at all — and now the jobs they describe have not left the process yet, so a
+			// failure here cannot leave a published run with no record of its window.
+			//
+			// What this replaced is the defect phase F exists for. The old order published first
+			// and recorded after; when the record failed the payload was DISCARDED, the next tick
+			// reloaded an unmoved `next_due_at` and republished a stale identity that §8.1 had to
+			// refuse, and the window the run really answered was materialized as a gap. On a live
+			// instance every `expected_never_issued` that produced was false.
+			reserveFailed := false
+			// The windows this tick PROVED durable, keyed by monitor. A ledgered dispatch may leave
+			// the process only if its own window is in here — not if the batch merely returned
+			// without an error. The first version of this code published on `err == nil` and logged
+			// a short result, so a fenced item's job went out with no window behind it: the
+			// ordering invariant broken on the one path that looks like success (reviewer P0 at
+			// party [28]).
+			reserved := map[string]time.Time{}
 			if len(ledgerAdvances) > 0 {
-				advanced, err := s.store.AdvanceExpectations(ctx, now, ledgerAdvances)
+				written, err := s.store.ReserveExpectations(ctx, now, ledgerAdvances)
 				if err != nil {
 					if ctx.Err() != nil {
 						return false
 					}
-					// Degrade in truth, never in delivery: every probe of this tick has already
-					// been published or deliberately skipped, and the schedule rows simply stay
-					// where they were — so the NEXT tick's advance materializes the windows this
-					// one failed to record. The residual points at withholding.
-					s.logger.Error("advance_expectations_failed", "count", len(ledgerAdvances), "error", err.Error())
-				} else if advanced < len(ledgerAdvances) {
-					// The optimistic fence refused an item: a configuration write crossed this
-					// dispatch, or the monitor has no schedule row. Nothing was written for it and
-					// nothing advanced, which leaves the monitor's expectation in the past — the
-					// next advance materializes the window as one nothing ran in, which is true.
-					s.logger.Debug("expectation_advances_fenced",
-						"submitted", len(ledgerAdvances), "advanced", advanced)
+					reserveFailed = true
+					// Degrade in TRUTH and in DELIVERY, for the ledgered monitors only. Deferring
+					// a probe by a tick is the accepted cost of never publishing a run whose
+					// evidence cannot be recorded (§7.4); a monitor with no expectation has no
+					// evidence to record and is published below regardless.
+					s.logger.Error("reserve_expectations_failed", "count", len(ledgerAdvances), "error", err.Error())
+				} else {
+					for _, w := range written {
+						reserved[w.MonitorID] = w.DueAt
+					}
+					if len(written) < len(ledgerAdvances) {
+						// The optimistic fence refused an item: a configuration write crossed this
+						// dispatch, or the monitor has no schedule row. Nothing was written for it
+						// anywhere, so its job is not published and its payload is DROPPED rather
+						// than held — the refusal means the payload is stale, and the monitor is
+						// decided again next tick from its current configuration. Holding a stale
+						// payload would re-submit a revision the fence has already rejected, once
+						// per tick, forever.
+						s.logger.Debug("expectation_advances_fenced",
+							"submitted", len(ledgerAdvances), "reserved", len(written))
+					}
 				}
 			}
+			// The publish, and then the confirm that says what the transport did with each
+			// reserved window. A window that reaches neither keeps its `reserved` verdict, which
+			// is neither absence verdict and is the honest deferred-loss record.
+			deferredDispatch = s.publishPending(ctx, publishState{
+				now: now, pending: pending, reserveFailed: reserveFailed, reserved: reserved,
+				nextRun: nextRun, publishFailures: publishFailures,
+				credentialFailures: credentialFailures, credentialLastLog: credentialLastLog,
+				publishFailed: &publishFailed, publishErr: &publishErr,
+			})
 			if publishFailed > 0 && now.Sub(lastPublishWarn) >= 10*time.Second {
 				lastPublishWarn = now
 				s.logger.Warn("jobs_publish_failed", "count", publishFailed, "error", publishErr)
@@ -2322,4 +2350,144 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// pendingDispatch is one job the tick has DECIDED to send and has not sent yet (§7.4).
+//
+// It exists because the ledger must record a window before the job that answers it leaves the
+// process. Everything the publish needs travels in it, so the tick can reserve first and dispatch
+// second without re-deriving anything — and so a dispatch whose reserve failed can be re-submitted
+// next tick with the SAME payload rather than minted again.
+type pendingDispatch struct {
+	monitor  domain.Monitor
+	job      dispatch.CheckJob
+	interval time.Duration
+	// nextRun is where the in-memory map moves when the publish succeeds. It moves THERE and not
+	// in the loop, so a tick that records nothing also skips nothing.
+	nextRun time.Time
+	// ledgered says a window was reserved for this dispatch. False for a monitor with no standing
+	// expectation, whose job rides the carrier it always did and whose publish is never deferred by
+	// a ledger failure — there is no evidence to lose.
+	ledgered bool
+	// credentialed selects the backoff bookkeeping a publish failure gets: the credentialed path
+	// treats it as retry STATE (§4.4.5, D-0160) and the plain path retries on the next tick.
+	credentialed bool
+	advance      store.ExpectationAdvance
+}
+
+// publishState is what publishPending needs from the tick. It is a struct rather than nine
+// parameters because every field is state the leader loop owns and mutates in place.
+type publishState struct {
+	now           time.Time
+	pending       []pendingDispatch
+	reserveFailed bool
+	// reserved holds the windows the store proved durable this tick, keyed by monitor. A ledgered
+	// dispatch whose own window is absent from it may not be published, whatever the batch as a
+	// whole returned.
+	reserved map[string]time.Time
+	nextRun  map[string]time.Time
+	// The three backoff maps, mutated in place exactly as the inline code did.
+	publishFailures    map[string]int
+	credentialFailures map[string]int
+	credentialLastLog  map[string]time.Time
+	publishFailed      *int
+	publishErr         *string
+}
+
+// publishPending is §7.4's second and third steps: PUBLISH, then CONFIRM.
+//
+// It returns the dispatches to HOLD for the next tick — those whose reserve failed, which were
+// therefore never published and whose windows were never recorded. Everything else is settled here:
+// a publish that returned success confirms the window into an issued one, and a publish that failed
+// confirms a WITHHOLDING reason instead, which keeps the window's `reserved` verdict rather than
+// claiming an issue that did not happen or an absence that is not known.
+//
+// A dispatch that reaches neither — this process dies in between, or the confirm itself fails —
+// leaves the window `reserved`, and that is the state's whole purpose (§7.4, invariant 27e).
+func (s *Scheduler) publishPending(ctx context.Context, st publishState) map[string]pendingDispatch {
+	held := map[string]pendingDispatch{}
+	confirms := make([]store.ExpectationConfirm, 0, len(st.pending))
+	for _, pd := range st.pending {
+		m := pd.monitor
+		if pd.ledgered {
+			// The gate: this dispatch's OWN window, proven durable by the statement that wrote it.
+			// A batch-level "no error" is not evidence about this item, and treating it as one is
+			// how a fenced payload's job left the process with nothing behind it.
+			due, ok := st.reserved[m.ID]
+			if !ok || !due.Equal(pd.advance.ExpectedDue) {
+				s.releaseCanarySlot(ctx, m) // nothing was published: the slot is not in flight
+				if st.reserveFailed {
+					// We do not know whether the statement committed, so the payload is HELD and
+					// re-submitted unchanged: minting a second identity for an instant that may
+					// already have been dispatched is the defect from the other side (27c, 27f).
+					held[m.ID] = pd
+				}
+				// A FENCED item is different and is dropped rather than held: the statement
+				// succeeded and wrote nothing for it, so the instant is definitely undispatched and
+				// the payload is definitely stale. The monitor is decided again next tick against
+				// its current configuration, with `nextRun` untouched so that happens at once.
+				continue
+			}
+		}
+		if err := s.publishScheduledJob(ctx, pd.job, pd.interval); err != nil {
+			if ctx.Err() != nil {
+				return held
+			}
+			s.releaseCanarySlot(ctx, m) // nothing was published: the slot is not in flight
+			*st.publishFailed++
+			*st.publishErr = err.Error()
+			if pd.credentialed {
+				// Retry eligibility is STATE, not a rate (§4.4.5, D-0160): the failure counter
+				// grows, next-eligible moves to now+backoff, and the probe is not marked sent.
+				// Leaving nextRun untouched is not the same as "not sent": it makes the monitor due
+				// again on the very next tick, so the one fault guaranteed to hit every
+				// credentialed monitor at once — a broker outage — turned each tick into a full
+				// authoritative-read + decrypt + seal storm across the whole due set.
+				if s.secretResolution != nil {
+					s.secretResolution.RecordDispatchTransportFailure("publish_failed")
+				}
+				st.publishFailures[m.ID]++
+				st.nextRun[m.ID] = st.now.Add(credentialFailureRetry(pd.interval, st.publishFailures[m.ID]))
+			} else {
+				// Rule 2, AMENDED by phase F and this is the amendment's whole content: the plain
+				// branch used to leave `nextRun` alone so the next tick retried within a second,
+				// which was correct while a failed publish recorded nothing. It no longer records
+				// nothing — the expectation has ALREADY moved, because the reserve ran first — so
+				// leaving the map behind it would make the monitor due every tick and mint one
+				// reserved window per tick for the whole of a broker outage. The map follows the
+				// instant the ledger already wrote, and the cost is stated rather than discovered:
+				// a failed publish now costs one interval instead of one tick.
+				st.nextRun[m.ID] = pd.nextRun
+			}
+			// The window is already reserved, so the failure is a WITHHOLDING and not a skip: a
+			// skip would say cerbix chose not to run this window, and it chose to run it.
+			if pd.ledgered {
+				confirms = append(confirms, store.ExpectationConfirm{
+					MonitorID: m.ID, DueAt: pd.advance.ExpectedDue, JobID: pd.job.JobID,
+					WithheldReason: store.WithheldPublishFailed,
+				})
+			}
+			continue
+		}
+		if pd.credentialed {
+			delete(st.credentialFailures, m.ID)
+			delete(st.credentialLastLog, m.ID)
+			delete(st.publishFailures, m.ID)
+		}
+		st.nextRun[m.ID] = pd.nextRun
+		if pd.ledgered {
+			confirms = append(confirms, store.ExpectationConfirm{
+				MonitorID: m.ID, DueAt: pd.advance.ExpectedDue, JobID: pd.job.JobID,
+			})
+		}
+	}
+	if len(confirms) > 0 {
+		if _, err := s.store.ConfirmExpectations(ctx, st.now, confirms); err != nil && ctx.Err() == nil {
+			// The publishes HAPPENED; only the record of them did not. Every affected window keeps
+			// its `reserved` verdict, which says exactly that and neither more nor less — and no
+			// later tick can turn it into a fabricated absence, because the row exists.
+			s.logger.Error("confirm_expectations_failed", "count", len(confirms), "error", err.Error())
+		}
+	}
+	return held
 }

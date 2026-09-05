@@ -73,6 +73,15 @@ const (
 	// honest verdict, and the reason a carrier rollback costs TRUTH rather than correctness
 	// (invariant 10c).
 	VerdictUnknown ExpectedRunVerdict = "unknown"
+	// VerdictReserved means the core minted this window's identity, made it durable, and no
+	// dispatch is recorded for it (§7.4, phase F). It is NEITHER absence verdict and that is the
+	// whole point: `expected_never_issued` asserts that no run happened, which is the opposite of
+	// what is known here, and `issued_never_claimed` asserts that a job was PUBLISHED, which is
+	// exactly what a reserved window cannot say. The state it describes is a process death or a
+	// transport failure between RESERVE and CONFIRM — the honest deferred-loss record. It licenses
+	// no stroke and is excluded from the coverage numerator while counting in its denominator: a
+	// window that was due was due (invariants 27e, 27f).
+	VerdictReserved ExpectedRunVerdict = "reserved"
 )
 
 // ExpectedRun is one stored due window. The zero value is not meaningful; every field is read from
@@ -95,13 +104,21 @@ type ExpectedRun struct {
 	// timeline minimum of §14.2, used only on an orphan row. EXPLANATORY ONLY — invariant 20g
 	// forbids reading it as licence to promote a `covered_late` window to `covered`.
 	IntervalAssumed bool
-	IssuedAt        *time.Time
-	ClaimedAt       *time.Time
-	TerminalAt      *time.Time
-	Outcome         string
-	RefusedAt       *time.Time
-	RefusedReason   string
-	SkipReason      string
+	// ReservedAt is when the core minted this window's identity and committed it, BEFORE the job
+	// was handed to any transport (§7.4). It is also the instant the job carries on the wire, so an
+	// executor's echo can never introduce a value the core did not already own — invariant 20e held
+	// structurally rather than by a merge expression. NULL on every row written before phase F and
+	// on every orphan row, which is why its absence is never read as evidence of anything.
+	ReservedAt *time.Time
+	// WithheldReason says why a reserved window never became a published one. Empty otherwise.
+	WithheldReason string
+	IssuedAt       *time.Time
+	ClaimedAt      *time.Time
+	TerminalAt     *time.Time
+	Outcome        string
+	RefusedAt      *time.Time
+	RefusedReason  string
+	SkipReason     string
 }
 
 // Verdict computes the window's reading. The order of the tests is the specification:
@@ -114,7 +131,12 @@ type ExpectedRun struct {
 //     against and the verdict is plain `covered`, which is what the discharge audit's row for
 //     invariant 10 states in words: "a terminal with no claim and no issued_at must still yield
 //     covered".
-//  3. Only then do absence tests run, from the outside in.
+//  3. A RESERVED window — identity minted and committed, no dispatch recorded — is `reserved`, and
+//     it is tested BEFORE the absence tests so a row the core never confirmed can never be read as
+//     a published job that vanished. A CLAIM overrides it: an executor that took the job off the
+//     transport proves the publish happened and only the confirmation was lost, so that row is
+//     `claimed_never_finished` and not `reserved` (§7.4, invariant 27e).
+//  4. Only then do absence tests run, from the outside in.
 func (r ExpectedRun) Verdict() ExpectedRunVerdict {
 	if r.JobID != "" && r.CarrierGeneration < LedgerMinCarrier {
 		return VerdictUnknown
@@ -127,6 +149,9 @@ func (r ExpectedRun) Verdict() ExpectedRunVerdict {
 			return VerdictCoveredLate
 		}
 		return VerdictCovered
+	}
+	if r.ReservedAt != nil && r.IssuedAt == nil && r.ClaimedAt == nil {
+		return VerdictReserved
 	}
 	if r.JobID == "" {
 		return VerdictExpectedNeverIssued

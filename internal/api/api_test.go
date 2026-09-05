@@ -52,6 +52,9 @@ type fakeStore struct {
 	expectedRunQueries []store.ExpectedRunQuery
 	expectedRunPage    store.ExpectedRunPage
 	expectedRunErr     error
+	// expectedRunRetentionDays is the CONFIGURED ledger window the handler bounds a range by.
+	// Zero takes the documented default.
+	expectedRunRetentionDays int
 
 	// announcedWorkflowKinds records what an agent's heartbeat claimed it can run (FR-029
 	// invariant 6). A fake that dropped it would let a receiver test pass while announcing
@@ -581,6 +584,15 @@ func (f *fakeStore) ListRecentHeartbeats(_ context.Context, _ string, _ int) ([]
 func (f *fakeStore) ListExpectedRuns(_ context.Context, q store.ExpectedRunQuery) (store.ExpectedRunPage, error) {
 	f.expectedRunQueries = append(f.expectedRunQueries, q)
 	return f.expectedRunPage, f.expectedRunErr
+}
+
+// FR-032 §13a. Zero means "nobody planted one", and the store's own default is then the honest
+// answer — the same rule `(*Store).ExpectedRunRetentionDays` applies to a store nobody wired.
+func (f *fakeStore) ExpectedRunRetentionDays() int {
+	if f.expectedRunRetentionDays <= 0 {
+		return domain.DefaultExpectedRunRetentionDays
+	}
+	return f.expectedRunRetentionDays
 }
 func (f *fakeStore) PasswordHashByID(_ context.Context, id string) (string, error) {
 	h, ok := f.passwords[id]

@@ -30,6 +30,10 @@ type ledgerRow struct {
 	RefusedReason   *string
 	SkipReason      *string
 	Revision        int64
+	// Phase F (§7.4). The row reader carries them because a test that cannot SEE the reserved
+	// state cannot tell it from an issue that vanished — which is the whole distinction.
+	ReservedAt     *time.Time
+	WithheldReason string
 }
 
 func readRow(t *testing.T, st *Store, ctx context.Context, monitorID string, dueAt time.Time) (ledgerRow, bool) {
@@ -38,11 +42,11 @@ func readRow(t *testing.T, st *Store, ctx context.Context, monitorID string, due
 	err := st.pool.QueryRow(ctx,
 		`SELECT due_at, job_id::text, carrier_generation, interval_seconds, interval_assumed,
 		        issued_at, claimed_at, terminal_at, outcome, refused_at, refused_reason,
-		        skip_reason, execution_revision
+		        skip_reason, execution_revision, reserved_at, withheld_reason
 		   FROM expected_runs WHERE monitor_id = $1 AND due_at = $2`, monitorID, dueAt).
 		Scan(&r.DueAt, &r.JobID, &r.Carrier, &r.Interval, &r.IntervalAssumed, &r.IssuedAt,
 			&r.ClaimedAt, &r.TerminalAt, &r.Outcome, &r.RefusedAt, &r.RefusedReason,
-			&r.SkipReason, &r.Revision)
+			&r.SkipReason, &r.Revision, &r.ReservedAt, &r.WithheldReason)
 	if noRows(err) {
 		return ledgerRow{}, false
 	}
@@ -57,6 +61,7 @@ func (r ledgerRow) asExpectedRun(monitorID string) domain.ExpectedRun {
 		MonitorID: monitorID, DueAt: r.DueAt, IntervalSeconds: r.Interval,
 		IntervalAssumed: r.IntervalAssumed, IssuedAt: r.IssuedAt, ClaimedAt: r.ClaimedAt,
 		TerminalAt: r.TerminalAt, ExecutionRevision: r.Revision,
+		ReservedAt: r.ReservedAt, WithheldReason: r.WithheldReason,
 	}
 	if r.JobID != nil {
 		out.JobID = *r.JobID
@@ -97,7 +102,7 @@ func TestATerminalOutcomeCoversTheWindowItAnswers(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	due := now.Add(-30 * time.Second)
 	backdateSchedule(t, st, ctx, m.ID, due)
-	mustAdvance(t, st, ctx, now, ExpectationAdvance{
+	mustDispatch(t, st, ctx, now, ExpectationAdvance{
 		MonitorID: m.ID, JobID: ledgerJobA, NextDue: now.Add(time.Minute), IntervalInForce: 60,
 		CarrierGeneration: domain.LedgerMinCarrier, ExpectedDue: due,
 		ExpectedRevision: m.ExecutionRevision, Region: m.Region})
@@ -473,7 +478,7 @@ func TestARefusedResultAnnotatesItsOwnRunAndNothingElse(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	due := now.Add(-30 * time.Second)
 	backdateSchedule(t, st, ctx, m.ID, due)
-	mustAdvance(t, st, ctx, now, ExpectationAdvance{
+	mustDispatch(t, st, ctx, now, ExpectationAdvance{
 		MonitorID: m.ID, JobID: ledgerJobA, NextDue: now.Add(time.Minute), IntervalInForce: 60,
 		CarrierGeneration: domain.LedgerMinCarrier, ExpectedDue: due,
 		ExpectedRevision: m.ExecutionRevision, Region: m.Region})

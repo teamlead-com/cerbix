@@ -16,6 +16,10 @@ override GEO_ENV_FILE := docker/.env.geo
 override GEO_ENV_EXAMPLE := docker/.env.geo.example
 override DEV_COMPOSE_FILE := docker/docker-compose.yml
 override GEO_COMPOSE_FILE := docker/docker-compose.geo.yml
+# The config every dev role mounts at /etc/cerbix/config.yaml. Named here because the E2E suite
+# must be told what the stack it tests was CONFIGURED with, and the only honest source of that is
+# the file the stack reads.
+override DEV_CONFIG_FILE := docker/config.dev.yaml
 override COMPOSE := docker compose
 # The selected broker image comes only from the persisted topology env file;
 # an exported shell value must never override the retained-volume pin. Explicit
@@ -25,6 +29,15 @@ override GEO_DC := env -u CERBIX_RABBITMQ_IMAGE $(COMPOSE) --project-name cerbix
 READY_IMAGE ?= alpine:3.22
 READY_RETRIES ?= 90
 DEV_E2E_ARGS ?=
+# `ledger.carrier_enabled` (FR-032 §13.0) DERIVED from the mounted config rather than restated
+# here. §17.12's fourth finding is why it must be passed at all: the expected-run spec asserted the
+# feature switched OFF, so turning it on made `make dev-test` fail with a message naming the
+# opposite of the truth — and the deeper cost was that the whole generation-4 path had never run
+# against a live instance. Restating `true` in this file would put one fact in two places, which is
+# the defect class that arc keeps producing; the awk below is narrow by construction — it reads the
+# `carrier_enabled` line of the top-level `ledger:` block of a file this repository owns, and any
+# other shape yields the empty string, which `run.sh` treats as off.
+override DEV_LEDGER_CARRIER := $(shell awk '/^ledger:[[:space:]]*$$/{f=1;next} f&&/^[^[:space:]#]/{f=0} f&&/^[[:space:]]+carrier_enabled:[[:space:]]*true[[:space:]]*$$/{print "true";exit}' $(DEV_CONFIG_FILE))
 DISTRIBUTED_E2E_ARGS ?= tests/file-providers.spec.ts tests/monitors.spec.ts tests/probers.spec.ts
 GEO_E2E_ARGS ?= tests/topology-geo.spec.ts tests/monitors.spec.ts tests/probers.spec.ts
 
@@ -302,10 +315,12 @@ geo-ready-all: geo-ready
 dev-test: dev-test-single
 
 dev-test-single: dev-ready-single
-	CERBIX_TOPOLOGY=single CERBIX_URL=http://localhost:8080 ./e2e/run.sh $(DEV_E2E_ARGS)
+	CERBIX_TOPOLOGY=single CERBIX_URL=http://localhost:8080 \
+		CERBIX_LEDGER_CARRIER=$(DEV_LEDGER_CARRIER) ./e2e/run.sh $(DEV_E2E_ARGS)
 
 dev-test-distributed: dev-ready-distributed
-	CERBIX_TOPOLOGY=distributed CERBIX_URL=http://localhost:8082 ./e2e/run.sh $(DISTRIBUTED_E2E_ARGS)
+	CERBIX_TOPOLOGY=distributed CERBIX_URL=http://localhost:8082 \
+		CERBIX_LEDGER_CARRIER=$(DEV_LEDGER_CARRIER) ./e2e/run.sh $(DISTRIBUTED_E2E_ARGS)
 
 geo-test: geo-ready-all
 	CERBIX_TOPOLOGY=geo CERBIX_URL=http://localhost:8082 ./e2e/run.sh $(GEO_E2E_ARGS)

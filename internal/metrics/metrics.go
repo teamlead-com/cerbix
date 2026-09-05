@@ -994,16 +994,22 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	out.println("# TYPE cerbix_ready gauge")
 	out.printf("cerbix_ready %d\n", b2i(ready))
 
-	// FR-032 §11. The counters are monotonic and always exported once the pass has sampled at all;
-	// the RATIO is exported only when it is defined, because an undefined ratio has no honest
-	// value (invariant 23).
+	// FR-032 §11. The two samples are exported once the pass has sampled at all; the RATIO is
+	// exported only when it is defined, because an undefined ratio has no honest value
+	// (invariant 23).
+	//
+	// GAUGES, not `_total` counters, and the rename went with the type. The values are
+	// `pg_stat_user_tables` sums across the RETAINED partitions, so retention dropping a partition
+	// subtracts its statistics and the series goes DOWN. Prometheus reads a decreasing counter as a
+	// process restart and `rate()` then invents traffic that never happened — a metric lying about
+	// the one table whose whole subject is not over-claiming.
 	if expectedRunHOT != nil {
-		out.println("# HELP cerbix_expected_runs_updates_total Updates to expected_runs rows across the retained partitions.")
-		out.println("# TYPE cerbix_expected_runs_updates_total counter")
-		out.printf("cerbix_expected_runs_updates_total %d\n", expectedRunHOT.Updates)
-		out.println("# HELP cerbix_expected_runs_hot_updates_total Updates to expected_runs rows that were HOT.")
-		out.println("# TYPE cerbix_expected_runs_hot_updates_total counter")
-		out.printf("cerbix_expected_runs_hot_updates_total %d\n", expectedRunHOT.HOTUpdates)
+		out.println("# HELP cerbix_expected_runs_updates Updates to expected_runs rows across the retained partitions. Falls when retention drops a partition, which is why it is a gauge.")
+		out.println("# TYPE cerbix_expected_runs_updates gauge")
+		out.printf("cerbix_expected_runs_updates %d\n", expectedRunHOT.Updates)
+		out.println("# HELP cerbix_expected_runs_hot_updates Updates to expected_runs rows that were HOT.")
+		out.println("# TYPE cerbix_expected_runs_hot_updates gauge")
+		out.printf("cerbix_expected_runs_hot_updates %d\n", expectedRunHOT.HOTUpdates)
 		if expectedRunHOT.Defined {
 			out.println("# HELP cerbix_expected_runs_hot_update_ratio Fraction of expected_runs updates that were HOT, over the current retention window. Unpublished while no update has been observed: the ratio is then undefined, and 0 or 1 would be a lie in whichever direction happened to be convenient.")
 			out.println("# TYPE cerbix_expected_runs_hot_update_ratio gauge")

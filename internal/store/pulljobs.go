@@ -103,14 +103,15 @@ func (s *Store) ClaimPullJobsV2(ctx context.Context, region string, max, leaseSe
 	return s.claimPullJobs(ctx, region, max, leaseSeconds, 2, workflowKinds)
 }
 
-// ClaimPullJobsV3 serves the capability-2 endpoint: every generation up to 3.
+// ClaimPullJobsV4 serves the ledger-capable endpoint: every generation up to 4.
 func (s *Store) ClaimPullJobsV4(ctx context.Context, region string, max, leaseSeconds int, workflowKinds []string) ([]PullJob, error) {
 	return s.claimPullJobs(ctx, region, max, leaseSeconds, 4, workflowKinds)
 }
 
-// ClaimPullJobsV3 leases generations 1..3. A generation-4 row is OUTSIDE its result set — the
-// predicate is `protocol_version <= $4` — rather than being filtered after selection, which is
-// what makes carrier isolation physical on this transport too (FR-032 invariant 10g).
+// ClaimPullJobsV3 serves the capability-2 endpoint and leases generations 1..3. A generation-4 row
+// is OUTSIDE its result set — the predicate is `protocol_version <= $4` — rather than being
+// filtered after selection, which is what makes carrier isolation physical on this transport too
+// (FR-032 invariant 10g).
 func (s *Store) ClaimPullJobsV3(ctx context.Context, region string, max, leaseSeconds int, workflowKinds []string) ([]PullJob, error) {
 	return s.claimPullJobs(ctx, region, max, leaseSeconds, 3, workflowKinds)
 }
@@ -267,11 +268,6 @@ func (s *Store) RecordAgentCapabilities(ctx context.Context, region, agentID str
 	return nil
 }
 
-// LiveCredentialReadyAgentRegions is existential and never vacuous: a region appears only
-// when at least one recent agent reasserted key readiness AND a credential-envelope
-// capability of at least minCapability. The floor is a parameter because capability is
-// GENERATIONAL: an executor that can only open envelope v1 is not evidence of readiness
-// for a region core is about to emit envelope v2 into (§4.7, D-0160).
 // LiveLedgerReadyAgentRegions returns the regions whose agents have announced that they read job
 // identity (FR-032). It reads its OWN capability key rather than the credential one: identity
 // applies to every monitor, so an agent with no secrets must still be able to announce it (§13.0).
@@ -300,6 +296,11 @@ func (s *Store) LiveLedgerReadyAgentRegions(ctx context.Context, within time.Dur
 	return out, rows.Err()
 }
 
+// LiveCredentialReadyAgentRegions is existential and never vacuous: a region appears only
+// when at least one recent agent reasserted key readiness AND a credential-envelope
+// capability of at least minCapability. The floor is a parameter because capability is
+// GENERATIONAL: an executor that can only open envelope v1 is not evidence of readiness
+// for a region core is about to emit envelope v2 into (§4.7, D-0160).
 func (s *Store) LiveCredentialReadyAgentRegions(ctx context.Context, within time.Duration, minCapability int) (map[string]bool, error) {
 	secs := int(within.Seconds())
 	if secs <= 0 {

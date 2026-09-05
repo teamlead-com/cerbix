@@ -51,10 +51,6 @@ type CredentialHealth interface {
 
 // Agent polls the central API for its region's jobs and posts back results.
 type Agent struct {
-	// mu guards ledgerAbsentUntil, the BOUNDED downgrade taken when a core predating the
-	// generation-4 claim endpoint answers 404. Bounded rather than permanent: a core upgraded
-	// underneath a running agent must be found again, and `now` is injectable so a test can
-	// observe the recovery without waiting for it.
 	// mu guards the generation-4 endpoint state, which is THREE positions and not two.
 	// `ledgerProven` is the only thing that permits an ANNOUNCEMENT: it is set by a v4 claim that
 	// actually returned 200. `ledgerAbsentUntil` bounds when the next ATTEMPT may be made. Being

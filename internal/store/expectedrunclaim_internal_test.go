@@ -49,7 +49,7 @@ func TestARepeatedClaimResolvesToTheEarliestObservation(t *testing.T) {
 				t.Fatalf("reset: %v", err)
 			}
 			for _, at := range []time.Time{order.first, order.second, order.second} {
-				if err := st.RecordRunClaim(ctx, claimHeartbeat(m, due, ledgerJobA, at)); err != nil {
+				if _, err := st.RecordRunClaim(ctx, claimHeartbeat(m, due, ledgerJobA, at)); err != nil {
 					t.Fatalf("record claim: %v", err)
 				}
 			}
@@ -85,14 +85,16 @@ func TestTheThreeRunStatesAreDistinguishableAndOrderIndependent(t *testing.T) {
 	backdateSchedule(t, st, ctx, m.ID, first)
 	for i, due := range []time.Time{first, second, third} {
 		jobID := []string{ledgerJobA, ledgerJobB, ledgerJobC}[i]
-		mustAdvance(t, st, ctx, due.Add(time.Second), ExpectationAdvance{
+		// Reserved AND confirmed: all three windows here are ones whose publish returned, which
+		// is what makes "issued and never claimed" a state they can be in at all (§7.4).
+		mustDispatch(t, st, ctx, due.Add(time.Second), ExpectationAdvance{
 			MonitorID: m.ID, JobID: jobID, NextDue: due.Add(time.Minute), IntervalInForce: 60,
 			CarrierGeneration: domain.LedgerMinCarrier, ExpectedDue: due,
 			ExpectedRevision: m.ExecutionRevision, Region: m.Region})
 	}
 	// Window 1: issued, never claimed. Window 2: claimed, never finished. Window 3: the terminal
 	// arrives BEFORE the claim.
-	if err := st.RecordRunClaim(ctx, claimHeartbeat(m, second, ledgerJobB, second.Add(time.Second))); err != nil {
+	if _, err := st.RecordRunClaim(ctx, claimHeartbeat(m, second, ledgerJobB, second.Add(time.Second))); err != nil {
 		t.Fatalf("claim second: %v", err)
 	}
 	inTx(t, st, ctx, func(tx pgx.Tx) error {
@@ -101,7 +103,7 @@ func TestTheThreeRunStatesAreDistinguishableAndOrderIndependent(t *testing.T) {
 			TerminalAt: third.Add(2 * time.Second), IssuedAt: third.Add(time.Second),
 			Outcome: ExpectedRunOutcomeResult})
 	})
-	if err := st.RecordRunClaim(ctx, claimHeartbeat(m, third, ledgerJobC, third.Add(time.Second))); err != nil {
+	if _, err := st.RecordRunClaim(ctx, claimHeartbeat(m, third, ledgerJobC, third.Add(time.Second))); err != nil {
 		t.Fatalf("claim third after its terminal: %v", err)
 	}
 
@@ -161,7 +163,7 @@ func TestAClaimIsRefusedByTheRevisionAndByADeliberateSkip(t *testing.T) {
 		Region: m.Region})
 
 	// A claim for the deliberately skipped window, however it is addressed.
-	if err := st.RecordRunClaim(ctx, claimHeartbeat(m, standing, ledgerJobA, now)); err != nil {
+	if _, err := st.RecordRunClaim(ctx, claimHeartbeat(m, standing, ledgerJobA, now)); err != nil {
 		t.Fatalf("record claim: %v", err)
 	}
 	skipped, _ := readRow(t, st, ctx, m.ID, standing)
@@ -177,7 +179,7 @@ func TestAClaimIsRefusedByTheRevisionAndByADeliberateSkip(t *testing.T) {
 	}
 	stale := claimHeartbeat(m, neverIssued, ledgerJobA, now)
 	stale.ExecutionRevision = m.ExecutionRevision + 5
-	if err := st.RecordRunClaim(ctx, stale); err != nil {
+	if _, err := st.RecordRunClaim(ctx, stale); err != nil {
 		t.Fatalf("record stale claim: %v", err)
 	}
 	if row, _ := readRow(t, st, ctx, m.ID, neverIssued); row.ClaimedAt != nil {
@@ -188,7 +190,7 @@ func TestAClaimIsRefusedByTheRevisionAndByADeliberateSkip(t *testing.T) {
 	// The CONVERSE, without which the two exclusions prove nothing: at the matching generation the
 	// same never-issued window accepts it. This is the narrow adoption §8.3 permits — a window the
 	// gap logic recorded, for which an executor now reports a run really did start.
-	if err := st.RecordRunClaim(ctx, claimHeartbeat(m, neverIssued, ledgerJobA, now)); err != nil {
+	if _, err := st.RecordRunClaim(ctx, claimHeartbeat(m, neverIssued, ledgerJobA, now)); err != nil {
 		t.Fatalf("record admissible claim: %v", err)
 	}
 	if row, _ := readRow(t, st, ctx, m.ID, neverIssued); row.ClaimedAt == nil {
@@ -211,7 +213,7 @@ func TestAClaimForAWindowTheLedgerNeverEnteredRecordsNothing(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	due := now.Add(-30 * time.Second)
 	before := len(readWindows(t, st, ctx, m.ID))
-	if err := st.RecordRunClaim(ctx, claimHeartbeat(m, due, ledgerJobA, due)); err != nil {
+	if _, err := st.RecordRunClaim(ctx, claimHeartbeat(m, due, ledgerJobA, due)); err != nil {
 		t.Fatalf("record claim: %v", err)
 	}
 	if got := len(readWindows(t, st, ctx, m.ID)); got != before {
@@ -264,7 +266,7 @@ func TestABadlyIdentifiedClaimCorrelatesToNoWindow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			hb := claimHeartbeat(m, due, ledgerJobA, now)
 			tc.mutate(&hb)
-			if err := st.RecordRunClaim(ctx, hb); err == nil {
+			if _, err := st.RecordRunClaim(ctx, hb); err == nil {
 				t.Fatalf("%s was accepted", tc.name)
 			}
 		})
@@ -281,7 +283,7 @@ func TestABadlyIdentifiedClaimCorrelatesToNoWindow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			hb := claimHeartbeat(m, due, ledgerJobA, now)
 			tc.mutate(&hb)
-			if err := st.RecordRunClaim(ctx, hb); err != nil {
+			if _, err := st.RecordRunClaim(ctx, hb); err != nil {
 				t.Fatalf("%s was an error; it is the ordinary case for an executor older than the "+
 					"ledger carrier: %v", tc.name, err)
 			}
@@ -326,8 +328,12 @@ func TestALateTerminalCompletesAnUnfinishedWindowRatherThanReplacingIt(t *testin
 		MonitorID: m.ID, JobID: ledgerJobA, NextDue: due.Add(time.Minute), IntervalInForce: 60,
 		CarrierGeneration: domain.LedgerMinCarrier, ExpectedDue: due,
 		ExpectedRevision: m.ExecutionRevision, Region: m.Region})
+	// The publish returned, so the window is an ISSUED one (§7.4). Without this it is `reserved`,
+	// and the lateness this test is about is measured from an instant that would not exist.
+	mustConfirm(t, st, ctx, due.Add(time.Second), ExpectationConfirm{
+		MonitorID: m.ID, DueAt: due, JobID: ledgerJobA})
 	claimedAt := due.Add(2 * time.Second)
-	if err := st.RecordRunClaim(ctx, claimHeartbeat(m, due, ledgerJobA, claimedAt)); err != nil {
+	if _, err := st.RecordRunClaim(ctx, claimHeartbeat(m, due, ledgerJobA, claimedAt)); err != nil {
 		t.Fatalf("record claim: %v", err)
 	}
 	unfinished, _ := readRow(t, st, ctx, m.ID, due)
@@ -387,11 +393,11 @@ func TestALateTerminalCompletesAnUnfinishedWindowRatherThanReplacingIt(t *testin
 	// survives the same way.
 	lateDue := now.Add(-20 * time.Minute)
 	backdateSchedule(t, st, ctx, m.ID, lateDue)
-	mustAdvance(t, st, ctx, now, ExpectationAdvance{
+	mustDispatch(t, st, ctx, now, ExpectationAdvance{
 		MonitorID: m.ID, JobID: ledgerJobB, NextDue: now.Add(time.Minute), IntervalInForce: 60,
 		CarrierGeneration: domain.LedgerMinCarrier, ExpectedDue: lateDue,
 		ExpectedRevision: m.ExecutionRevision, Region: m.Region})
-	if err := st.RecordRunClaim(ctx, claimHeartbeat(m, lateDue, ledgerJobB, now)); err != nil {
+	if _, err := st.RecordRunClaim(ctx, claimHeartbeat(m, lateDue, ledgerJobB, now)); err != nil {
 		t.Fatalf("claim the late window: %v", err)
 	}
 	if _, err := st.RecordScheduledResult(ctx, domain.Heartbeat{

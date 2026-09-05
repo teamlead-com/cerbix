@@ -737,6 +737,50 @@ windows it drops cannot be reconstructed.
 **Async canaries have no generation-4 carrier in this release**, so their windows read `unknown`
 permanently rather than transiently. That is a stated limitation, not a symptom.
 
+### A window that says `reserved`, and what an operator does about it
+
+FR-032 phase F (spec §7.4, `D-0243`) put the ledger's write BEFORE the dispatch: the core records the
+window with its minted identity, then hands the job to the transport, then records what the transport
+did. A window that reaches the second step and not the third reads **`reserved`** — the identity was
+minted and committed, and no dispatch is recorded for it.
+
+**It is neither absence verdict, and that is the point.** `expected_never_issued` asserts that no run
+happened, which is not what is known here; `issued_never_claimed` asserts that a job was PUBLISHED,
+which is exactly what a reserved window cannot say. On the panel it is a neutral outline — not the
+missed-run outline — and it licenses no stroke and is excluded from the coverage numerator while
+counting in its denominator.
+
+**Where it comes from, in decreasing order of how much you should care:**
+
+| Cause | What you see | What to do |
+| --- | --- | --- |
+| the publish failed | `withheld_reason = publish_failed` — the ONLY value this column takes besides empty, enforced by the CHECK and by the store method, so a reason you do not recognise cannot come from cerbix | the transport is the subject — check the broker or the region's executors. The ledger is telling you the truth about a run that did not go out |
+| the process died between the two steps | `reserved` with an empty `withheld_reason` | expected after a crash or a leadership handover; a NEW leader deliberately does not republish a reserved window, so exactly one probe is lost per reserved window |
+| a steady trickle on a healthy stack | many `reserved` with no reason | this is not normal. It means the confirm statement is failing — look for `confirm_expectations_failed` in the leader's log |
+
+```sql
+SELECT withheld_reason, count(*)
+  FROM expected_runs
+ WHERE reserved_at IS NOT NULL AND issued_at IS NULL AND terminal_at IS NULL AND claimed_at IS NULL
+ GROUP BY 1;
+```
+
+**A late-arriving result still completes a reserved window.** The terminal outranks the missing
+confirm, so a run whose result comes back before the confirm reads `covered`; `issued_at` stays NULL
+because it belongs to the confirm and to nothing else — an executor's echo may never set it.
+
+**One operational cost is stated rather than discovered: a failed publish now costs one INTERVAL,
+not one tick.** The expectation has already moved when the transport refuses the job, so the
+in-memory instant moves with it. Before phase F the monitor retried within a second; it now waits for
+its next window. During a broker outage that is the difference between one reserved window per
+interval and one per tick.
+
+**Migration `00103` and its rollback.** It adds `reserved_at` and `withheld_reason`. Its DOWN is
+deliberately not guarded the way `00101`'s is, and the reason is directional: rolling it back does
+not discard in-flight work, it makes every window currently between reserve and confirm
+indistinguishable from one that was published — the reading phase F exists to end. Rolling back past
+it means accepting the pre-phase-F reading of the ledger.
+
 ### The expected-run ledger: what to watch, and what a number there means
 
 `expected_run_retention_days` (14, bounds 2–90) is the ledger's own window and is deliberately below
@@ -750,8 +794,19 @@ precisely so an insert is never lost and having one means retention must reach i
 unlabelled gauge over the retention window — partition names are unbounded over time, so labelling
 by them would be a high-cardinality mistake — and it is **not published at all** while nothing has
 updated: the ratio is undefined then, and 0 or 1 would be a lie in whichever direction happened to
-be convenient. The counters `cerbix_expected_runs_updates_total` and
-`cerbix_expected_runs_hot_updates_total` are always exported once the pass has sampled.
+be convenient. Its two inputs, `cerbix_expected_runs_updates` and
+`cerbix_expected_runs_hot_updates`, are exported once the pass has sampled.
+
+**Both inputs are GAUGES and not `_total` counters, and the difference matters when you graph
+them.** They are `pg_stat_user_tables` sums across the RETAINED partitions, so when retention drops
+a partition the series falls by that partition's share. A `_total` counter that falls is read by
+Prometheus as a process restart, and `rate()` over it then reports traffic that never happened.
+Graph them as levels, or take the ratio, which is what the gate is about.
+
+**All three appear only while a LEADER is running**, because the maintenance pass that samples them
+is the leader's. On an `api`-only or `worker` process they are absent, and that absence is not a
+fault. If they are absent on the process holding the leader lock, the sampler is not wired — which
+is the shape this section documented for a release in which no binary exported them at all.
 
 **A ratio below 0.90, sustained past 1,000 updates, is a design signal rather than an incident.**
 It says HOT pruning is not reclaiming versions fast enough at this installation's arrival spread,

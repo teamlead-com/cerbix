@@ -232,6 +232,133 @@ func TestAGenerationFourDeliveryMissingItsIdentityIsDeadLettered(t *testing.T) {
 	}
 }
 
+// FR-032 §17.12 finding 5 — a generation-4 delivery carrying an envelope this executor cannot open.
+//
+// Generations 2 and 3 get their isolation from the QUEUE: a worker that cannot open envelope v1 is
+// not bound to `checks.jobs.v2.<region>` at all. Generation 4 cannot inherit that, and the gap is
+// not hypothetical. Its queue is bound on the LEDGER capability, which is deliberately independent
+// of the envelope one (§13.0) — job identity applies to every monitor, so tying it to secrets is
+// the coupling [450] rejected. But a generation-4 job MAY carry an envelope: `CarrierFor` returns 4
+// for a credentialed monitor in a ledger-ready region and `envelopeForCarrier(4)` is v2. So in a
+// region whose workers do not all run the same `secrets.dispatch_envelope` setting, an
+// envelope-bearing v4 delivery can reach a worker that declared no envelope capability — and the
+// publisher cannot rule it out, because its readiness check is EXISTENTIAL over the region.
+//
+// The seam therefore enforces what the queue no longer can. Dead-lettered rather than probed: the
+// body is intact for an operator, while running it would produce a credential failure attributed to
+// the monitor instead of to the fleet's configuration.
+func TestAGenerationFourDeliveryCarryingAnUnopenableEnvelopeIsDeadLettered(t *testing.T) {
+	url := os.Getenv("CERBIX_TEST_RABBITMQ_URL")
+	if url == "" {
+		t.Skip("set CERBIX_TEST_RABBITMQ_URL to run the live generation-4 envelope-seam test")
+	}
+	const region = "ledgerenvseam"
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	// The fleet member this finding is about: ledger-capable, so it binds and CAN receive the v4
+	// queue, and envelope-incapable, which before this seam meant it could receive a payload it had
+	// no business being handed.
+	consumer, err := dispatch.NewAMQP(url, logger)
+	if err != nil {
+		t.Fatalf("connect ledger consumer: %v", err)
+	}
+	consumer.WithJobRegion(region).WithCredentialCapability(0).WithLedgerCapability(1)
+	t.Cleanup(func() {
+		_ = consumer.Close()
+		for _, q := range []string{"checks.jobs." + region, "checks.jobs.v4." + region} {
+			deleteTestQueue(t, url, q)
+		}
+	})
+	jobs := consumer.Jobs()
+
+	publisher, err := dispatch.NewAMQP(url, logger)
+	if err != nil {
+		t.Fatalf("connect publisher: %v", err)
+	}
+	t.Cleanup(func() { _ = publisher.Close() })
+	drainDeadLetters(t, url)
+
+	const sealed = "00000000-0000-4000-8000-0000000e5ea1"
+	envelopeJob := dispatch.CheckJob{
+		Monitor:         domain.Monitor{ID: sealed, Region: region},
+		ProtocolVersion: dispatch.ProtocolV4,
+		JobID:           "22222222-2222-4222-8222-222222222222",
+		IssuedAt:        time.Now().UTC(),
+		DueAt:           time.Now().UTC().Add(-time.Minute),
+		// v2, which this consumer's declared capability of 0 cannot open. The envelope's CONTENT is
+		// irrelevant: the refusal is on the version, before any key is consulted, because the
+		// question is which executor should have been handed it.
+		CredentialEnvelope: &dispatch.CredentialEnvelope{
+			V: dispatch.EnvelopeV2, Region: region, KeyID: "k1",
+			JobID:  "22222222-2222-4222-8222-222222222222",
+			Fields: map[string]string{"password": "sealed"},
+		},
+	}
+	if err := publisher.PublishJob(ctx, envelopeJob); err != nil {
+		t.Fatalf("publish a generation-4 job carrying an envelope: %v", err)
+	}
+
+	select {
+	case got := <-jobs:
+		if got.Job.Monitor.ID == sealed {
+			t.Fatalf("an envelope-v%d delivery reached an executor declaring capability 0 on carrier "+
+				"%d. The v4 queue is bound on the LEDGER capability, so the queue cannot keep this "+
+				"out and the seam has to.", envelopeJob.CredentialEnvelope.V, got.CarrierGeneration)
+		}
+	case <-time.After(3 * time.Second):
+	}
+
+	body, source := awaitDeadLetter(t, url, sealed)
+	if body == "" {
+		t.Fatal("the delivery was dropped silently instead of dead-lettered: an operator whose " +
+			"fleet is half-configured has nothing to look at, and 'no probe ran' cannot tell a " +
+			"refusal from a loss")
+	}
+	if source != "jobs.v4" {
+		t.Errorf("the dead-lettered body is tagged source %q, want \"jobs.v4\"", source)
+	}
+
+	// The converse, so the seam is a CAPABILITY check and not a blanket refusal of envelopes on
+	// generation 4: a capable consumer receives the same body.
+	//
+	// Its own REGION, and that is not tidiness. Two consumers on one queue are round-robined by the
+	// broker, so a second consumer here would take roughly half the deliveries and the assertion
+	// would pass or fail by luck — which is the shape of a test that reports the opposite of what
+	// it checked. A separate region is a separate queue and a deterministic answer.
+	const capableRegion = "ledgerenvseamok"
+	capable, err := dispatch.NewAMQP(url, logger)
+	if err != nil {
+		t.Fatalf("connect capable consumer: %v", err)
+	}
+	capable.WithJobRegion(capableRegion).WithCredentialCapability(dispatch.EnvelopeV2).WithLedgerCapability(1)
+	t.Cleanup(func() {
+		_ = capable.Close()
+		for _, q := range []string{
+			"checks.jobs." + capableRegion, "checks.jobs.v2." + capableRegion,
+			"checks.jobs.v3." + capableRegion, "checks.jobs.v4." + capableRegion,
+		} {
+			deleteTestQueue(t, url, q)
+		}
+	})
+	capableJobs := capable.Jobs()
+
+	const allowed = "00000000-0000-4000-8000-0000000e5ea2"
+	ok := envelopeJob
+	ok.Monitor.ID = allowed
+	ok.Monitor.Region = capableRegion
+	if err := publisher.PublishJob(ctx, ok); err != nil {
+		t.Fatalf("publish to the capable consumer: %v", err)
+	}
+	delivered := awaitDelivered(t, capableJobs, allowed)
+	if delivered.CarrierGeneration != dispatch.ProtocolV4 {
+		t.Errorf("the capable delivery arrived on carrier %d, want 4", delivered.CarrierGeneration)
+	}
+	if delivered.Job.CredentialEnvelope == nil {
+		t.Error("the envelope was stripped from a delivery its consumer can open")
+	}
+}
+
 // drainDeadLetters empties the shared dead-letter queue.
 func drainDeadLetters(t *testing.T, url string) {
 	t.Helper()

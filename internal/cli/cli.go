@@ -1100,6 +1100,15 @@ func runServe(args []string) int {
 				// declared from the ROLE rather than from any capability — an envelope-disabled
 				// deployment is the default and must still reach the carrier.
 				WithLocalLedgerRegions(domain.DefaultRegion).
+				// FR-032 §11/§12.3. The gauge and the purge cutoff, wired at BOTH scheduler
+				// construction sites. Without these two calls the `cerbix_expected_runs_*` series
+				// were exported by no binary at all — §11's whole measurement gate — and the
+				// purge always cut at the default fourteen days whatever
+				// `ledger.expected_run_retention_days` said, so one setting produced two
+				// retentions. `TestEveryLeaderConstructionWiresTheLedgerPass` parses this file so
+				// a third construction site cannot ship without them.
+				WithLedgerMetrics(registry).
+				WithExpectedRunRetention(cfg.Ledger.ExpectedRunRetentionDays).
 				WithLocalCanaryRegions(localCanaryRegions...). // FR-029: the in-proc worker IS the announcement in role=all
 				WithPullRegions(cfg.Pull.Regions).             // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
 				WithPullMetrics(registry).
@@ -1132,6 +1141,9 @@ func runServe(args []string) int {
 				WithChangeRetentionMetrics(registry).                                              // FR-025 D15: cerbix_changes_retained, sampled by the pass
 				WithCredentialEnvelopes(cfg.Secrets.EnvelopeEnforced()).
 				WithSecretResolutionMetrics(registry).
+				// FR-032 §11/§12.3, the same pair as the role=all construction above.
+				WithLedgerMetrics(registry).
+				WithExpectedRunRetention(cfg.Ledger.ExpectedRunRetentionDays).
 				WithPullRegions(cfg.Pull.Regions). // pull-served regions get jobs via pull_jobs, not AMQP
 				WithPullMetrics(registry).
 				WithServiceMetrics(registry).                    // service repair queue/watermark gauges + slice outcomes                                          // per-region pull-queue depth/lag gauges

@@ -891,6 +891,56 @@ def check_fr032_discharge(body, test_source, spec='docs/specs/func-expected-run-
     return out
 
 
+def check_iteration_finding_counts(iteration='docs/iterations/iter-0177.md',
+                                   readers=('docs/status.md', 'docs/traceability.md',
+                                            'docs/decisions.md')):
+    """An iteration's finding count, DERIVED from its own findings table.
+
+    `iter-0177`'s count drifted three times in one evening. The line that opened the iteration said
+    three, the line that closed it said four, and both survived in the same sentence; then the
+    traceability head said three while the iteration, the status cell and the decision said four —
+    written, in that instance, at the very moment the fourth finding was being fixed. `docs-check`
+    was green over all of it, because a citation guard validates that what IS written resolves and
+    can say nothing about a number that stopped agreeing with its own table.
+
+    This is the same shape as `check_fr032_audit_totals` one level up: the number lives beside the
+    rows it summarises, so it is derived from them rather than compared between prose and prose. Any
+    document that states "<n> findings" in a sentence naming this iteration must agree with the
+    table, and a document that names the iteration without a count is fine — the guard is about
+    disagreement, not about mandatory phrasing.
+    """
+    out = []
+    if not os.path.exists(iteration):
+        return out
+    body = read(iteration)
+    # The findings table: rows whose first cell is a finding number, `| 0 |` through `| 9 |`.
+    rows = re.findall(r'^\| (\d+) \|', body, re.M)
+    if not rows:
+        out.append(f'{iteration} states findings but has no numbered findings table to derive the '
+                   f'count from; a total beside no rows is a number nobody can check')
+        return out
+    derived = len(rows)
+    words = {1: 'one', 2: 'two', 3: 'three', 4: 'four', 5: 'five', 6: 'six', 7: 'seven',
+             8: 'eight', 9: 'nine', 10: 'ten'}
+    name = os.path.basename(iteration).removesuffix('.md')
+    spelled = words.get(derived)
+    for doc in (iteration,) + tuple(readers):
+        if not os.path.exists(doc):
+            continue
+        for line in read(doc).split('\n'):
+            if name not in line:
+                continue
+            for stated in re.findall(r'\b(\d+|' + '|'.join(words.values()) + r')\s+findings\b',
+                                     line, re.I):
+                low = stated.lower()
+                value = int(low) if low.isdigit() else next(
+                    (n for n, w in words.items() if w == low), None)
+                if value is not None and value != derived:
+                    out.append(f'{doc} says {stated} findings for {name}; its findings table holds '
+                               f'{derived}{" (" + spelled + ")" if spelled else ""}. A count that '
+                               f'drifts from its own rows is the one number nobody re-derives')
+    return out
+
 def check_fr032_audit_totals(body, spec='docs/specs/func-expected-run-ledger.md'):
     """FR-032 §17.2's own totals, DERIVED from its discharge table instead of read beside it.
 
@@ -1313,6 +1363,8 @@ def check_enumerations():
     if os.path.exists(spec):
         for msg in check_fr032_audit_totals(read(spec), spec):
             bad.append((spec, 1, 'enum', msg))
+    for msg in check_iteration_finding_counts():
+        bad.append(('docs/iterations/iter-0177.md', 1, 'enum', msg))
         migs = {p: read(p) for p in sorted(glob.glob('internal/store/migrations/*.sql'))}
         stores = {p: read(p) for p in sorted(glob.glob('internal/store/*.go'))
                   if not p.endswith('_test.go')}
@@ -1350,6 +1402,53 @@ def check_enumerations():
     return bad
 
 
+# A `path.go:NNN` citation, the form a living document uses when it wants a reader to open one
+# exact line. The `:NNN-MMM` span form is accepted too; the first number is the one checked.
+LINE_CITE_RE = re.compile(
+    r'((?:internal|cmd|frontend|scripts|e2e|docker|deploy)/[A-Za-z0-9_./\-]+'
+    r'\.(?:go|ts|vue|sql|py|sh)):(\d+)(?:-\d+)?')
+
+# A line that carries no claim of its own. A citation landing on one of these is a citation whose
+# code has MOVED — it is the signature drift leaves, because a shifted anchor usually falls into
+# whitespace or a closing delimiter.
+_EMPTY_ANCHOR = {'', '}', ')', '{', '})', '},', '),', ');', '`', '`,', '],', ']'}
+
+
+def check_line_citations():
+    """A `file.go:NNN` citation must land on a line that says something.
+
+    This guard exists because FR-032's spec cited thirty-three exact lines and, by the time its
+    last phase landed, thirteen of them pointed at whitespace, a closing brace or an unrelated
+    statement — while this checker passed, because it validated that the PATH existed and never
+    that the LINE did. Section 7.2's whole advance-rule audit was keyed to line numbers that had
+    all moved.
+
+    It is a WEAK guard and says so rather than implying more: it cannot tell that a citation landed
+    on the wrong statement, only that it landed on nothing. The strong form is not to cite a line at
+    all — name the function — which is what FR-032's spec now does almost everywhere. A citation
+    past end-of-file is caught too, which no amount of drift makes acceptable.
+    """
+    bad = []
+    for doc in LIVING:
+        if not os.path.exists(doc):
+            continue
+        for n, line in enumerate(read(doc).splitlines(), 1):
+            for path, num in LINE_CITE_RE.findall(line):
+                if not os.path.exists(path):
+                    continue  # the path guard above already reports it
+                lines = read(path).splitlines()
+                num = int(num)
+                if num < 1 or num > len(lines):
+                    bad.append((doc, n, 'line-cite',
+                                '%s:%d is past end of file (%d lines)' % (path, num, len(lines))))
+                    continue
+                if lines[num - 1].strip() in _EMPTY_ANCHOR:
+                    bad.append((doc, n, 'line-cite',
+                                '%s:%d is blank or a bare delimiter — the code it named has moved'
+                                % (path, num)))
+    return bad
+
+
 def main():
     src = source_text()
     bad = []
@@ -1381,6 +1480,7 @@ def main():
     bad += check_customer_names()
     bad += check_enumerations()
     bad += check_partial_claims()
+    bad += check_line_citations()
     if not bad:
         print('docs references: OK — every path and Test* name in the living documents resolves, '
               'and every acceptance map is complete (FR-021 invariants compared as a SET against '
@@ -1400,7 +1500,9 @@ def main():
               '`ledger.carrier_enabled` phase contract naming what B1 does with `true` '
               '— the check types and the bundle types as SETS '
               'through an asserted label map, not by count alone; and no document announces a '
-              '`PARTIAL` residual its own discharge map does not have)')
+              '`PARTIAL` residual its own discharge map does not have; and every file.go:NNN '
+              'citation lands on a line that exists and is not bare whitespace or a '
+              'closing delimiter — the signature drift leaves when the code it named moved)')
         return 0
     print(f'docs references: {len(bad)} unresolved citation(s) in living documents\n')
     for doc, n, kind, tok in bad:

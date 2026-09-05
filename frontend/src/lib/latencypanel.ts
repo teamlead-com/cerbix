@@ -165,10 +165,19 @@ export function gapLabel(ms: number): string {
 // the flag as licence to promote it is how this gate would be widened without anyone deciding to
 // widen it.
 
-/** One window as the API renders it — the fields this decision needs, and no others. */
+/**
+ * One window as the API renders it — the fields the panel needs, and no others.
+ *
+ * `strokeSegments` below reads only `due_at` and `verdict`, and that is deliberate: the stroke is
+ * decided by the verdict alone. The two phase-F fields are optional and exist for the CELL, which
+ * has to say in words what a reserved window is — the instant its identity was minted, and the
+ * reason the dispatch never happened when there is one (§7.4).
+ */
 export type ExpectedRunWindowLike = {
   due_at: string;
   verdict: string;
+  reserved_at?: string | null;
+  withheld_reason?: string;
 };
 
 /** What the API returns for one monitor's windows, plus the bound that says what it means. */

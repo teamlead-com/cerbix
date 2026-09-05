@@ -110,10 +110,6 @@ func (c *Client) LiveCredentialJobRegions(ctx context.Context) (map[string]bool,
 	return live, nil
 }
 
-// LiveCredentialV3JobRegions is the same existential check one generation further on: a
-// region qualifies only when something is consuming the generation-3 carrier. A consumer
-// on the older envelope queue is not evidence of readiness for the newer one — that is the
-// whole reason capability is generational rather than boolean (§4.7, D-0160).
 // LiveLedgerJobRegions is the AMQP half of FR-032's capability question: a region qualifies only
 // when something is CONSUMING the generation-4 queue. Consuming it is the announcement, exactly as
 // for generation 3 — a worker that cannot read job identity is not subscribed here at all.
@@ -131,6 +127,10 @@ func (c *Client) LiveLedgerJobRegions(ctx context.Context) (map[string]bool, err
 	return live, nil
 }
 
+// LiveCredentialV3JobRegions is the same existential check one generation further on: a
+// region qualifies only when something is consuming the generation-3 carrier. A consumer
+// on the older envelope queue is not evidence of readiness for the newer one — that is the
+// whole reason capability is generational rather than boolean (§4.7, D-0160).
 func (c *Client) LiveCredentialV3JobRegions(ctx context.Context) (map[string]bool, error) {
 	queues, err := c.liveQueues(ctx)
 	if err != nil {

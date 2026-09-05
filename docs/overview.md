@@ -124,7 +124,7 @@ flowchart LR
 | `store` | pgx + goose migrations; repositories; encryption of secret fields. |
 | `domain` | Models and invariants (`Validate()`), rules without I/O. |
 | `dispatch` | `Dispatcher` interface + `inproc`/`amqp` implementations. |
-| `scheduler` | Leader (advisory lock), min-heap `next_run`, job publishing; rollup, retention, renotify, burn-eval, SLA reports; the gate ledger's partition maintenance under its own session lock (FR-024); the daily purge of change groups by whole identity (FR-025). |
+| `scheduler` | Leader (advisory lock), min-heap `next_run`, job publishing; rollup, retention, renotify, burn-eval, SLA reports; the gate ledger's partition maintenance under its own session lock (FR-024); the daily purge of change groups by whole identity (FR-025). **The tick RESERVES before it publishes** (FR-032 phase F): the expected-run window and its minted job identity are committed BEFORE the job reaches a transport, and a third statement records what the transport did. A job is never published for a window the ledger has not already recorded, so an instant is either recorded or the schedule never passed it — the ordering that makes a fabricated "no run happened here" unreachable. A reserve that fails publishes nothing and moves nothing. |
 | `worker` | Goroutine pool, probe execution with `context.WithTimeout`. |
 | `prober` | `Prober` registry by monitor type + conditions engine; SSRF guard. |
 | `ingest` | The CHECK-RESULT consumer — heartbeats, status flip (atomic), auto-incidents, transitions into the outbox. The package name is historical: cerbix ingests its OWN probe results and no external telemetry, which is why the product is not an observability backend. |
@@ -528,7 +528,10 @@ flowchart TB
   `expected_runs` (FR-032) is declaratively partitioned by `due_at` in BOTH storage modes —
   TimescaleDB never owns it — plus a DEFAULT partition, so an insert is never lost to a missing
   partition: a row there is evidence that a run did not complete, and losing it would erase exactly
-  the fact the ledger exists to keep. Every partition carries `fillfactor = 70`, set on the
+  the fact the ledger exists to keep. A window carries `reserved_at` — the instant its identity was
+  minted and committed, which is also the instant the job carries on the wire — and `issued_at`,
+  written only once the publish has returned; a row with the first and not the second reads
+  `reserved`, which is neither "nothing ran here" nor "a job was published". Every partition carries `fillfactor = 70`, set on the
   PARTITION because storage parameters are not inherited from a partitioned parent. Its retention is
   its own (14 days by default, against the heartbeats' 30), and the pass purges the DEFAULT
   partition as well as dropping dated ones — a table that has a default partition so inserts are
@@ -547,7 +550,13 @@ flowchart TB
   per-capability `checks.canary.[v3.]<kind>@<version>.<region>` (FR-029) plus shared
   `checks.results` / `checks.dead` and auto-delete regional test queues. A queue per carrier and per
   capability is deliberate: an executor that cannot open or cannot run a payload must be unable to
-  RECEIVE it, because a capability check does not stop a consumer from consuming.
+  RECEIVE it, because a capability check does not stop a consumer from consuming. **Generation 4 is
+  the one place that property is not complete**, and it is stated rather than implied: its queue is
+  bound on the LEDGER capability, which is deliberately independent of the envelope one, while a
+  generation-4 job may still carry an envelope — so in a region whose workers do not share one
+  `secrets.dispatch_envelope` setting a delivery can reach a worker that declared no envelope
+  capability. The consumer therefore dead-letters a delivery whose envelope version exceeds its own,
+  enforcing one layer later what the queue enforces for the others.
 - **Keycloak** — OIDC IdP (realm/client `cerbix`). Local login remains as a lockout fallback.
 - **Secrets** — `security.encryption_key` from a secret manager/environment variable; rotation via
   `cerbix reencrypt`.

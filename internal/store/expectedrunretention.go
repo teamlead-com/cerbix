@@ -262,7 +262,13 @@ func (s *Store) ListExpectedRuns(ctx context.Context, q ExpectedRunQuery) (Expec
 	rows, err := s.pool.Query(ctx, `
 		SELECT due_at, job_id::text, carrier_generation, execution_revision, region,
 		       interval_seconds, interval_assumed, issued_at, claimed_at, terminal_at,
-		       outcome, refused_at, refused_reason, skip_reason
+		       outcome, refused_at, refused_reason, skip_reason,
+		       -- Phase F (§7.4). Without these two the read path can never produce the RESERVED
+		       -- verdict at all: the verdict function would see a job, no issue instant and no
+		       -- claim, and answer issued_never_claimed — a publish this window cannot prove. A
+		       -- state the store writes and the reader cannot see is the wiring boundary §17.12's
+		       -- third finding was made of.
+		       reserved_at, withheld_reason
 		  FROM expected_runs
 		 WHERE monitor_id = $1 AND project_id = $2
 		   AND due_at >= $3 AND due_at < $4
@@ -286,7 +292,7 @@ func (s *Store) ListExpectedRuns(ctx context.Context, q ExpectedRunQuery) (Expec
 		)
 		if err := rows.Scan(&w.DueAt, &jobID, &carrier, &w.ExecutionRevision, &w.Region,
 			&w.IntervalSeconds, &w.IntervalAssumed, &w.IssuedAt, &w.ClaimedAt, &w.TerminalAt,
-			&outcome, &w.RefusedAt, &reason, &skip); err != nil {
+			&outcome, &w.RefusedAt, &reason, &skip, &w.ReservedAt, &w.WithheldReason); err != nil {
 			return ExpectedRunPage{}, fmt.Errorf("store: scan expected run: %w", err)
 		}
 		w.MonitorID = q.MonitorID

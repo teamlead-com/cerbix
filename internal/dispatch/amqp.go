@@ -663,6 +663,31 @@ func (d *AMQP) Jobs() <-chan DeliveredJob {
 						return true
 					}
 				}
+				// Generations 2 and 3 get their isolation from the QUEUE: an executor that cannot
+				// open envelope v1 is not bound to `checks.jobs.v2.<region>` at all, so it cannot
+				// receive one. Generation 4 cannot inherit that, and the gap is not hypothetical.
+				//
+				// The v4 queue is bound on the LEDGER capability, which is deliberately independent
+				// of the envelope one (§13.0) — job identity applies to every monitor, so tying it
+				// to secrets would make an ordinary HTTP monitor's eligibility depend on something
+				// its dispatch never needs. But a generation-4 job MAY carry an envelope:
+				// `CarrierFor` returns 4 for a credentialed monitor in a ledger-ready region and
+				// `envelopeForCarrier(4)` is v2. So in a region whose workers do NOT all run the
+				// same `secrets.dispatch_envelope` setting, an envelope-bearing v4 delivery can
+				// reach a worker that declared no envelope capability — which the publisher cannot
+				// rule out, because its readiness check is EXISTENTIAL over the region.
+				//
+				// So the seam enforces what the queue no longer can. Dead-lettered rather than
+				// probed: the message is intact and another worker in the region can be given it by
+				// an operator, while running it would produce a credential failure attributed to
+				// the monitor instead of to the fleet's configuration.
+				if job.CredentialEnvelope != nil && d.credentialCapability < job.CredentialEnvelope.V {
+					d.logger.Error("dispatch_job_envelope_above_capability",
+						"monitor_id", job.Monitor.ID, "carrier", generation,
+						"envelope", job.CredentialEnvelope.V, "capability", d.credentialCapability)
+					d.deadLetter(source, body)
+					return true
+				}
 				select {
 				case d.jobsCh <- DeliveredJob{Job: job, CarrierGeneration: generation}:
 					return true

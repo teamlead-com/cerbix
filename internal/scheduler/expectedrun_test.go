@@ -39,6 +39,13 @@ func advancesFrom(fs *fakeStore) []store.ExpectationAdvance {
 	return append([]store.ExpectationAdvance(nil), fs.advances...)
 }
 
+// The CONFIRM half of the tick (§7.4): what the transport did with each reserved window.
+func confirmsFrom(fs *fakeStore) []store.ExpectationConfirm {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return append([]store.ExpectationConfirm(nil), fs.confirms...)
+}
+
 // Invariant 1 — the persisted expectation is the instant the leader ALREADY computes, and the job
 // carries the WINDOW it answers rather than an instant of the ledger's own.
 //
@@ -199,7 +206,7 @@ func TestALedgerReadFailureCostsNoProbe(t *testing.T) {
 // Advance rules 1, 3 and 4 are all callers of the one primitive, on BOTH branches; rule 2 is not a
 // caller at all. FR-029 shipped an in-flight claim on one branch only, and this structure exists
 // so that mistake cannot be repeated (§7.2, invariant 2a).
-func TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoRecordsNothing(t *testing.T) {
+func TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoWithholds(t *testing.T) {
 	due := time.Now().UTC().Add(-30 * time.Second).Truncate(time.Second)
 	// Rule 3 on the PLAIN branch: a canary with no capable runner in its region.
 	t.Run("rule 3, a policy skip on the plain branch", func(t *testing.T) {
@@ -273,10 +280,12 @@ func TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoRecordsNothing(t *test
 			t.Errorf("the next expectation is %s, which is not a backoff away", advance.NextDue)
 		}
 	})
-	// Rule 2 on the plain branch: the dispatch FAILED, so the expectation is unchanged and there
-	// is nothing to preserve. A row here would record a window as answered or abandoned when it is
-	// neither.
-	t.Run("rule 2, a failed dispatch records nothing", func(t *testing.T) {
+	// Rule 2 on the plain branch, AMENDED by phase F (§7.4). The dispatch fails AFTER the window
+	// is reserved, so the row exists and says what is true of it: the core minted the identity and
+	// the transport refused the job. It is neither answered nor abandoned — `withheld_reason` says
+	// which — and it is emphatically not a window nothing was due in, which is what the old order
+	// produced once the record it skipped was reconstructed by a later gap.
+	t.Run("rule 2, a failed dispatch withholds rather than recording nothing", func(t *testing.T) {
 		monitor := domain.Monitor{
 			ID: "unpublishable", Type: domain.MonitorHTTP, Target: "https://example.com",
 			Region: domain.DefaultRegion, Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
@@ -294,9 +303,25 @@ func TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoRecordsNothing(t *test
 		// Give the leader several ticks: the assertion is an ABSENCE, so it has to be given time
 		// to be violated.
 		time.Sleep(1500 * time.Millisecond)
-		if got := advancesFrom(fs); len(got) != 0 {
-			t.Fatalf("a failed dispatch recorded %d advances: %+v — the expectation is unchanged, "+
-				"so the next tick retries it and there is nothing to preserve", len(got), got)
+		got := advancesFrom(fs)
+		if len(got) == 0 {
+			t.Fatal("a failed dispatch reserved no window: the job was published only because the " +
+				"ledger recorded it first, so a refusal at the transport cannot leave the row absent")
+		}
+		if got[0].JobID == "" || got[0].ReservedAt.IsZero() {
+			t.Fatalf("the reserved window carries no minted identity: %+v", got[0])
+		}
+		// And the confirm says what the transport did, so the window reads `reserved` with a reason
+		// rather than as an issue that never happened.
+		confirms := confirmsFrom(fs)
+		if len(confirms) == 0 {
+			t.Fatal("nothing was confirmed: a reserved window whose publish failed must be told so")
+		}
+		if confirms[0].WithheldReason != store.WithheldPublishFailed {
+			t.Fatalf("the confirm carries %q, want %q", confirms[0].WithheldReason, store.WithheldPublishFailed)
+		}
+		if confirms[0].JobID != got[0].JobID || !confirms[0].DueAt.Equal(got[0].ExpectedDue) {
+			t.Fatalf("the confirm names a different window than the reserve: %+v vs %+v", confirms[0], got[0])
 		}
 	})
 }

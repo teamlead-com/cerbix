@@ -453,8 +453,10 @@ func TestEveryPageCarriesTheBoundsThatSayWhatItMeans(t *testing.T) {
 // §11's measurement: the ratio is UNDEFINED with no updates, and the gauge is then not published.
 //
 // A gauge reporting 0 or 1 for "no data" is a lie in whichever direction happens to be convenient.
-// The counters are still exported, because they are monotonic and say honestly that nothing has
-// happened yet.
+// The two INPUTS are still exported: "nothing has updated yet" is a true thing to say, and the gate
+// reads it as "not enough sample". They are gauges rather than `_total` counters — the exposition
+// side is asserted by `TestTheLedgerFamiliesDeclareTheTypesTheyActuallyAre` in `internal/metrics`,
+// because this test covers the SAMPLER and nothing here can see what a scrape contains.
 func TestTheHOTRatioIsUndefinedUntilSomethingHasUpdated(t *testing.T) {
 	st, ctx := ledgerStore(t)
 	stat, err := st.ExpectedRunHOTRatio(ctx)
@@ -480,7 +482,7 @@ func TestTheHOTRatioIsUndefinedUntilSomethingHasUpdated(t *testing.T) {
 		MonitorID: m.ID, JobID: ledgerJobA, NextDue: now.Add(time.Minute), IntervalInForce: 60,
 		CarrierGeneration: domain.LedgerMinCarrier, ExpectedDue: due,
 		ExpectedRevision: m.ExecutionRevision, Region: m.Region})
-	if err := st.RecordRunClaim(ctx, claimHeartbeat(m, due, ledgerJobA, now)); err != nil {
+	if _, err := st.RecordRunClaim(ctx, claimHeartbeat(m, due, ledgerJobA, now)); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 	after, err := st.ExpectedRunHOTRatio(ctx)

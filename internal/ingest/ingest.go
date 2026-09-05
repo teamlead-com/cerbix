@@ -30,8 +30,9 @@ type Store interface {
 	RecordProbeError(ctx context.Context, hb domain.Heartbeat) (store.ProbeErrorOutcome, error)
 	// RecordRunClaim fills `claimed_at` on the window this claim answers (FR-032 §8.4). It is
 	// one idempotent statement over one row and takes no transaction: unlike a terminal, a claim
-	// accompanies nothing that must land with it.
-	RecordRunClaim(ctx context.Context, hb domain.Heartbeat) error
+	// accompanies nothing that must land with it. It reports whether a window TOOK the claim, so
+	// one that arrived before its window was committed can be re-offered rather than dropped.
+	RecordRunClaim(ctx context.Context, hb domain.Heartbeat) (bool, error)
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
 	FindOpenAutoIncidentByMonitor(ctx context.Context, monitorID string) (domain.Incident, error)
 	CreateIncidentBySystem(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error)
@@ -85,12 +86,51 @@ type Publisher interface {
 	Publish(events.Event)
 }
 
+// Run-claim retry bounds (FR-032 §8.4).
+//
+// A claim is emitted the instant an executor takes a job off the transport, while the window it
+// answers is written by §7.1's advance at the END of the leader's tick — one statement for the
+// whole tick, deliberately. On a fast transport the claim therefore ARRIVES FIRST, and on the
+// in-process one it does so almost always: a running `role=all` instance recorded one claim across
+// sixty-two generation-4 windows. Dropping the other sixty-one did not cost a verdict, but it made
+// `issued_never_claimed` mean "the claim raced the advance" rather than "an executor died between
+// ack and probe", which is the whole of what §8.5 says the state is for.
+//
+// So an unmatched claim is held and re-offered. The bounds are the tick, not a guess: the advance
+// lands within one tick of the publish, so the first retry only has to outlast a tick, and three
+// RE-offers cover a leader whose statement was slow or briefly failed. Past that the claim is
+// dropped in silence — it is a diagnostic, a terminal always outranks a missing one, and a claim
+// that correlates to no window at all reaches the same end without a special case.
+const (
+	runClaimRetryEvery = 2 * time.Second
+	// runClaimRetryLimit counts RE-offers, not offers: a claim is tried once when it arrives and
+	// at most this many times again, so four store calls in the worst case.
+	runClaimRetryLimit = 3
+	// runClaimRetryMax bounds the memory this can hold — one tick's worth of claims for a very
+	// large instance, past which the OLDEST are dropped. A ring rather than unbounded growth,
+	// because the thing being buffered is the least important message in the system.
+	runClaimRetryMax = 8192
+)
+
+// pendingRunClaim is one claim waiting for its window to be committed.
+type pendingRunClaim struct {
+	hb       domain.Heartbeat
+	attempts int
+	next     time.Time
+}
+
 type Consumer struct {
 	store      Store
 	dispatcher dispatch.Dispatcher
 	recorder   Recorder
 	reconciler *Reconciler
 	logger     *slog.Logger
+	// now is injectable so the claim-retry schedule can be driven by a test without waiting for
+	// wall-clock seconds. Nil means time.Now.
+	now func() time.Time
+	// claimRetry is owned by Run's goroutine alone — handle and the retry sweep both run on it —
+	// so it needs no lock.
+	claimRetry []pendingRunClaim
 }
 
 // New builds a results consumer. Its post-commit reconciler shares the store/recorder;
@@ -112,12 +152,21 @@ func (c *Consumer) WithEvents(p Publisher) *Consumer {
 }
 
 // Run blocks until ctx is cancelled, persisting each result heartbeat.
+//
+// The ticker is the run-claim retry sweep and nothing else. It shares this goroutine with result
+// handling on purpose: the retry buffer is then owned by one goroutine and needs no lock, and a
+// sweep that fell behind because results were arriving is a sweep that was busy doing the more
+// important thing.
 func (c *Consumer) Run(ctx context.Context) {
 	results := c.dispatcher.Results()
+	sweep := time.NewTicker(runClaimRetryEvery)
+	defer sweep.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-sweep.C:
+			c.retryRunClaims(ctx)
 		case hb, ok := <-results:
 			if !ok {
 				return
@@ -125,6 +174,14 @@ func (c *Consumer) Run(ctx context.Context) {
 			c.handle(ctx, hb)
 		}
 	}
+}
+
+// clock is time.Now unless a test injected one.
+func (c *Consumer) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
@@ -178,15 +235,84 @@ func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
 
 // handleClaim records the claim and nothing else.
 //
-// A failure is logged and dropped rather than retried, and the direction is the one this design
+// An ERROR is logged and dropped rather than retried, and the direction is the one this design
 // accepts everywhere: a missing claim reads `issued_never_claimed`, which is WITHHOLDING — it says
 // the ledger cannot witness that the run started, never that the run did not happen. A terminal
 // outcome always outranks a missing claim (invariant 10), so the loss costs a diagnostic and never
 // a coverage verdict.
+//
+// A claim that no window TOOK is a different case and is held, because it is the ordinary one: the
+// advance that writes the window runs once per tick, after the publishes in it, so a fast transport
+// delivers the claim first. See the retry bounds above.
 func (c *Consumer) handleClaim(ctx context.Context, hb domain.Heartbeat) {
-	if err := c.store.RecordRunClaim(ctx, hb); err != nil {
+	matched, err := c.store.RecordRunClaim(ctx, hb)
+	if err != nil {
 		c.logger.Warn("record_run_claim_failed", "monitor_id", hb.MonitorID, "error", err.Error())
+		return
 	}
+	if !matched {
+		c.deferRunClaim(hb, 1)
+	}
+}
+
+// deferRunClaim parks a claim whose window is not committed yet.
+//
+// The ring drops the OLDEST when full rather than refusing the newest: a claim's value is its
+// timing, so the one still worth landing is the one that just arrived.
+func (c *Consumer) deferRunClaim(hb domain.Heartbeat, attempts int) {
+	if attempts > runClaimRetryLimit {
+		return
+	}
+	if len(c.claimRetry) >= runClaimRetryMax {
+		c.claimRetry = c.claimRetry[1:]
+	}
+	c.claimRetry = append(c.claimRetry, pendingRunClaim{
+		hb: hb, attempts: attempts, next: c.clock().Add(runClaimRetryEvery),
+	})
+}
+
+// retryRunClaims re-offers every parked claim whose wait has elapsed.
+//
+// The claim's own instant is untouched, which is the point of retrying at all: `claimed_at` records
+// when the executor STARTED, and the merge rule is "earliest wins", so a claim landing three
+// seconds late still writes the instant it was taken at.
+func (c *Consumer) retryRunClaims(ctx context.Context) {
+	if len(c.claimRetry) == 0 {
+		return
+	}
+	now := c.clock()
+	// A FRESH slice rather than the filter-in-place idiom (`keep := c.claimRetry[:0]`). That form
+	// writes retained entries over the head of the same backing array, so the early return on a
+	// cancelled context would have left `c.claimRetry` at its old LENGTH with its head already
+	// rewritten — a prefix of survivors followed by entries the sweep had passed. Harmless in
+	// practice, because the only caller returns immediately afterwards, but it is a slice whose
+	// contents depend on where a loop stopped, and one allocation per non-empty sweep is not a
+	// price worth the subtlety.
+	keep := make([]pendingRunClaim, 0, len(c.claimRetry))
+	for i, p := range c.claimRetry {
+		if ctx.Err() != nil {
+			// The rest have not been offered this round, so they are carried unchanged: a
+			// shutdown must not consume a claim's attempt budget.
+			keep = append(keep, c.claimRetry[i:]...)
+			break
+		}
+		if now.Before(p.next) {
+			keep = append(keep, p)
+			continue
+		}
+		matched, err := c.store.RecordRunClaim(ctx, p.hb)
+		if err != nil {
+			c.logger.Warn("record_run_claim_failed", "monitor_id", p.hb.MonitorID, "error", err.Error())
+			continue
+		}
+		if matched || p.attempts >= runClaimRetryLimit {
+			continue
+		}
+		p.attempts++
+		p.next = now.Add(runClaimRetryEvery)
+		keep = append(keep, p)
+	}
+	c.claimRetry = keep
 }
 
 func (c *Consumer) handleProbeError(ctx context.Context, hb domain.Heartbeat) {

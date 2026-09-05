@@ -164,6 +164,55 @@ const strokePaths = computed(() => {
     .filter((d) => d.includes(" "));
 });
 
+/**
+ * The ONE owner of what each verdict looks like — `docs/design/mock-expected-run-reserved.html`,
+ * approved 2026-09-05.
+ *
+ * It is a MAP and it has no default arm, which is the whole point. The chain of ternaries this
+ * replaced sent every unmapped verdict to `empty`, the `--down` outline whose meaning is "a run was
+ * due here and nothing ran" — so `unknown`, `issued_never_claimed` and `claimed_never_finished`
+ * were all drawn as missed runs, and `unknown` had been assigned the HATCH by the phase-E mock this
+ * panel was approved against. On the shipped default (`ledger.carrier_enabled` off) every window
+ * reads `unknown`, so the panel drew a full row of missed runs on an instance where nothing was
+ * missed. A default arm is how a rendering claims something nobody decided.
+ *
+ * Three verdicts share `empty` because they say the same thing ABOUT THE WINDOW — nothing ran in
+ * it — and the verdict itself stays on the cell for the readout and the tests.
+ *
+ * **`satisfies` is what makes "no default arm" true rather than said.** The map was typed
+ * `Record<string, string>` first, which permits deleting `reserved` or `unknown` and compiles — the
+ * comment above claimed a compile-time hole the type did not give (reviewer P1 at party [38]).
+ * Bound to the GENERATED verdict union instead, a missing key is a build failure, while the
+ * incoming wire value stays a plain string and keeps the runtime hatch fallback for a verdict this
+ * build has never heard of. The two are different questions and both are answered.
+ */
+type ExpectedRunVerdict = components["schemas"]["ExpectedRunVerdict"];
+type ExpectationCellKind = "covered" | "late" | "empty" | "notStored" | "reserved";
+
+const CELL_FOR_VERDICT = {
+  covered: "covered",
+  covered_late: "late",
+  expected_never_issued: "empty",
+  issued_never_claimed: "empty",
+  claimed_never_finished: "empty",
+  // The ledger cannot answer: no result could ever correlate to a window dispatched below the
+  // ledger carrier. The hatch claims nothing, which is the only honest cell for it.
+  unknown: "notStored",
+  // FR-032 phase F (§7.4): identity minted and committed, no dispatch recorded. Neither absence
+  // verdict may be borrowed — one asserts nothing ran, the other asserts a publish — so it gets a
+  // neutral outline: the geometry of the missed-run cell in a hue that is not failure.
+  reserved: "reserved",
+} satisfies Record<ExpectedRunVerdict, ExpectationCellKind>;
+
+/**
+ * The cell for one wire value. The parameter is a STRING and not the union on purpose: what arrives
+ * is whatever the server sent, and a build that has never heard of a verdict must render the cell
+ * that claims nothing rather than refuse the answer or accuse the window.
+ */
+function cellFor(verdict: string): ExpectationCellKind {
+  return (CELL_FOR_VERDICT as Record<string, ExpectationCellKind>)[verdict] ?? "notStored";
+}
+
 /** One cell per due window, carrying its verdict. Only windows inside the drawn span are shown. */
 const expectationCells = computed(() => {
   const c = chart.value;
@@ -172,20 +221,90 @@ const expectationCells = computed(() => {
   const ledgerFrom = answer.ledger_from == null ? Number.POSITIVE_INFINITY : Date.parse(answer.ledger_from);
   const pts = panelPoints.value;
   const cw = Math.max(1.2, ((c.W - 16) / Math.max(1, pts.length - 1)) * 0.62);
-  const out: { x: number; w: number; kind: string; verdict: string; ms: number }[] = [];
+  const out: ExpectationCell[] = [];
   for (const w of answer.windows) {
     const ms = Date.parse(w.due_at);
     if (Number.isNaN(ms) || ms < c.t0 || ms > c.t1) continue;
     // Before `ledger_from` the ledger holds nothing, and the cell says exactly that — not
-    // covered, and not missed either (§12.3).
-    const kind = ms < ledgerFrom ? "notStored"
-      : w.verdict === "covered" ? "covered"
-      : w.verdict === "covered_late" ? "late"
-      : "empty";
-    out.push({ x: c.x(ms) - cw / 2, w: cw, kind, verdict: w.verdict, ms });
+    // covered, and not missed either (§12.3). It outranks the verdict because it is a fact about
+    // the LEDGER rather than about the window.
+    //
+    // A verdict this panel has never heard of falls here too, and lands on the hatch: an unknown
+    // name is precisely the case where the panel cannot say what happened, and the cell that
+    // claims nothing is the safe one. The old default claimed a missed run instead.
+    // WHY the cell is `notStored` has to travel with it. Two different situations produce that
+    // kind — time the ledger holds nothing for, and a window dispatched below the ledger carrier —
+    // and the readout has to tell them apart: saying "before the ledger begins" about the second
+    // would be as wrong as letting the second's wording escape onto the first, which is what
+    // `cellLabel` did until the final-tree audit.
+    const beforeLedger = ms < ledgerFrom;
+    const kind = beforeLedger ? "notStored" : cellFor(w.verdict);
+    out.push({
+      x: c.x(ms) - cw / 2, w: cw, kind, verdict: w.verdict, ms, beforeLedger,
+      reservedAt: w.reserved_at ?? null, withheldReason: w.withheld_reason ?? "",
+    });
   }
   return out;
 });
+
+/**
+ * Which cells are drawn as an OUTLINE rather than a fill. Both of them mean "this window holds no
+ * completed run", and neither may be filled: a fill reads as a recorded failure, which is a claim
+ * about what happened rather than about what is absent.
+ */
+function outlined(kind: string): boolean {
+  return kind === "empty" || kind === "reserved";
+}
+
+type ExpectationCell = {
+  x: number; w: number; kind: string; verdict: string; ms: number;
+  /** The window is before `ledger_from`, which outranks its stored verdict in the words too. */
+  beforeLedger: boolean;
+  reservedAt: string | null; withheldReason: string;
+};
+
+/** The hovered or focused expectation cell, which drives its own readout. */
+const hoverCell = ref<ExpectationCell | null>(null);
+
+/**
+ * What one cell says in words. The verdicts are NAMED rather than described, because the name is
+ * what the API returns and what the spec argues about — a reader who sees `covered_late` here can
+ * find it in `openapi.yaml` and in §14.1, and a paraphrase would cost them that.
+ */
+function cellLabel(c: ExpectationCell): string {
+  const due = `window due ${instantLabel(new Date(c.ms).toISOString())}`;
+  // UNCONDITIONAL, and before the verdict switch. `ledger_from` outranks every verdict — that is
+  // §12.3 — and it has to outrank it in the WORDS as well as in the fill. This test carried an
+  // exception for `unknown` at first, so a pre-`ledger_from` window whose stored verdict happened to
+  // be `unknown` was described as "dispatched on a carrier that carries no job identity": a claim
+  // about a dispatch, made about time the ledger says it cannot answer for. The geometry was right
+  // and the sentence beside it was not, which is the defect class this arc keeps producing. It is
+  // reachable whenever a truncation fence moves `ledger_from` past a row that still exists.
+  if (c.beforeLedger) {
+    return `${due} — before the ledger begins: not stored, and claimable as nothing`;
+  }
+  switch (c.verdict) {
+    case "covered":
+      return `${due} — covered: a run answered it inside the interval that spaced it`;
+    case "covered_late":
+      return `${due} — covered_late: a run answered it, later than the interval that spaced it`;
+    case "expected_never_issued":
+      return `${due} — expected_never_issued: nothing was dispatched for it`;
+    case "issued_never_claimed":
+      return `${due} — issued_never_claimed: a job was published and no executor took it`;
+    case "claimed_never_finished":
+      return `${due} — claimed_never_finished: an executor started and no outcome arrived`;
+    case "unknown":
+      return `${due} — unknown: dispatched on a carrier that carries no job identity, so nothing could correlate`;
+    case "reserved": {
+      const at = c.reservedAt ? instantLabel(c.reservedAt) : instantLabel(new Date(c.ms).toISOString());
+      const why = c.withheldReason ? ` · ${c.withheldReason}` : "";
+      return `${due} — reserved at ${at}: no dispatch recorded${why}`;
+    }
+    default:
+      return `${due} — ${c.verdict}`;
+  }
+}
 
 /** Where `ledger_from` falls inside the drawn span, if it does. */
 const ledgerFromX = computed(() => {
@@ -196,6 +315,144 @@ const ledgerFromX = computed(() => {
   if (Number.isNaN(ms) || ms <= c.t0 || ms > c.t1) return null;
   return c.x(ms);
 });
+
+/**
+ * FR-032 §13a — every page of the drawn span's windows, not just the first.
+ *
+ * The panel used to ask for one page of 200 and ignore `next_cursor`. `strokeSegments` reads "every
+ * window between these two points is `covered`", so evaluating it over a page is evaluating it over
+ * a set that may be missing members — and the expectation ruler simply stopped part-way through the
+ * chart with nothing saying it had. That is the one distinction this whole requirement exists to
+ * make: "no window was due here" and "we did not fetch them" must not look the same.
+ *
+ * A span with a gap in it holds far more windows than points: sixty heartbeats either side of a
+ * two-day outage on a 60-second monitor are 2,880 windows. Paging is bounded so a pathological span
+ * cannot turn one panel into a hundred requests — past the bound the answer is abandoned entirely
+ * rather than truncated, because a partial answer is exactly what this is fixing.
+ */
+const expectedRunPageLimit = 200;
+const expectedRunMaxPages = 16;
+
+/**
+ * The widest range the endpoint will answer, learned from the SERVER rather than assumed.
+ *
+ * It opens at the documented default and is corrected by the first answer that carries
+ * `retention_days`. Two separate things follow from that, and conflating them is what the review
+ * of revision 31 found twice:
+ *
+ * - DISCOVERY: the value travels only on a SUCCESSFUL answer, and an instance configured below the
+ *   assumption refuses the question with `range_too_wide` and no body — so discovery needs a retry
+ *   at the enforced minimum, which every instance can answer.
+ * - COMPLETENESS: whichever request finally succeeded was asked under the bound the panel held
+ *   BEFORE the answer arrived, so it may describe less time than the panel drew. That is true of
+ *   the assumed default and of the minimum fallback alike — 14 against a 90-day instance, and 2
+ *   against a 7-day one, are the same defect — so completeness needs a refetch under the LEARNED
+ *   bound, and the test for it is one comparison rather than a case per path.
+ *
+ * Module-scoped because it is a property of the instance, not of a panel.
+ */
+let expectedRunRetentionDays = 14;
+
+/**
+ * The enforced MINIMUM of `ledger.expected_run_retention_days`. A range this narrow is answerable on
+ * every instance, which is what makes it the fallback below.
+ */
+const expectedRunMinRetentionDays = 2;
+
+/** Whether `expectedRunRetentionDays` above came from the server rather than from the default. */
+let expectedRunRetentionLearned = false;
+
+/**
+ * Where a request for this drawn span STARTS under a given retention bound.
+ *
+ * One expression, used by the request itself and by the completeness test above it. Two copies of
+ * this arithmetic is how "the request was clamped" and "the panel drew earlier than that" came to
+ * be compared through a proxy — `learned > assumed` — which was true in cases that needed no
+ * refetch and false in one that did.
+ */
+function expectedRunFromMs(earliestDrawnMs: number, to: Date, retentionDays: number): number {
+  return Math.max(earliestDrawnMs, to.getTime() - retentionDays * 86_400_000);
+}
+
+async function fetchExpectedRuns(
+  projectID: string,
+  monitorID: string,
+  drawn: PanelPoint[],
+): Promise<ExpectedRunAnswer | null> {
+  if (drawn.length < 2) return null;
+  // Half-open at the top, so the last point's own window is included.
+  const to = new Date(drawn[drawn.length - 1].ms + 1000);
+  const earliest = drawn[0].ms;
+
+  // DISCOVERY. The first question is asked under whatever bound we hold; if it comes back empty and
+  // we have never been told the real one, the assumption itself is a candidate cause, and the
+  // enforced minimum is a range every instance answers.
+  let asked = expectedRunRetentionDays;
+  let answer = await pageExpectedRuns(projectID, monitorID, earliest, to, asked);
+  if (!answer && !expectedRunRetentionLearned) {
+    asked = expectedRunMinRetentionDays;
+    answer = await pageExpectedRuns(projectID, monitorID, earliest, to, asked);
+  }
+  if (!answer) return null;
+
+  // COMPLETENESS, for BOTH paths under one comparison: the answer in hand was asked under `asked`,
+  // and the bound we now hold may reach further back. If it does, the windows between the two
+  // starts exist and were simply never requested — and `strokeSegments` would then evaluate a set
+  // missing members over that older time, where `coversInterval` sees no window and draws none. No
+  // stroke and no cell reads as "no run was due here", while `ledger_from` in the same answer says
+  // the ledger speaks for it. That is the one distinction this requirement exists to make, and it
+  // is why the page bound below abandons an answer rather than truncating one.
+  //
+  // Asking again costs one extra request, once per instance: the next load asks under the learned
+  // bound first, so the two starts agree and nothing is refetched.
+  if (expectedRunFromMs(earliest, to, expectedRunRetentionDays) < expectedRunFromMs(earliest, to, asked)) {
+    return pageExpectedRuns(projectID, monitorID, earliest, to, expectedRunRetentionDays);
+  }
+  return answer;
+}
+
+async function pageExpectedRuns(
+  projectID: string,
+  monitorID: string,
+  earliestDrawnMs: number,
+  to: Date,
+  retentionDays: number,
+): Promise<ExpectedRunAnswer | null> {
+  // Clamped to the retention window the endpoint will answer. A panel spanning more than that
+  // asked a range the API refuses with `range_too_wide`, and the whole answer — bounds included —
+  // was then dropped on the floor, so the ruler silently never appeared. Clamping asks for the
+  // part that CAN be answered; the rest holds no windows the SERVER's bound admits, and
+  // `ledger_from` says so — which is only true when `retentionDays` is the server's own value,
+  // hence the completeness test in the caller.
+  const from = new Date(expectedRunFromMs(earliestDrawnMs, to, retentionDays));
+  if (!(from.getTime() < to.getTime())) return null;
+
+  const windows: ExpectedRunAnswer["windows"] = [];
+  let ledgerFrom: string | null = null;
+  let cursor: string | undefined;
+  for (let page = 0; page < expectedRunMaxPages; page++) {
+    const res = await api.GET("/api/v1/projects/{projectID}/monitors/{monitorID}/expected-runs", {
+      params: {
+        path: { projectID, monitorID },
+        query: { from: from.toISOString(), to: to.toISOString(), limit: expectedRunPageLimit, cursor },
+      },
+    });
+    if (!res.data) return null;
+    if (typeof res.data.retention_days === "number" && res.data.retention_days > 0) {
+      expectedRunRetentionDays = res.data.retention_days;
+      expectedRunRetentionLearned = true;
+    }
+    windows.push(...(res.data.windows ?? []));
+    ledgerFrom = res.data.ledger_from ?? null;
+    const next = res.data.next_cursor;
+    if (!next) return { windows, ledger_from: ledgerFrom };
+    cursor = next;
+  }
+  // The bound was hit, so this span holds more windows than the panel will page through. Returning
+  // what we have would let `strokeSegments` decide "every window here is covered" over a set
+  // missing members — which is the one thing this requirement exists to prevent.
+  return null;
+}
 
 const rulerSpans = computed(() => {
   const pts = panelPoints.value;
@@ -307,26 +564,12 @@ async function load() {
       api.GET("/api/v1/monitors/{monitorID}/availability", { params: { path: { monitorID }, query: { days: 90 } } }),
       api.GET("/api/v1/projects/{projectID}/incidents", { params: { path: { projectID: pid } } }),
       api.GET("/api/v1/projects/{projectID}/monitors", { params: { path: { projectID: pid } } }),
-      drawn.length >= 2
-        ? api.GET("/api/v1/projects/{projectID}/monitors/{monitorID}/expected-runs", {
-            params: {
-              path: { projectID: pid, monitorID },
-              query: {
-                from: new Date(drawn[0].ms).toISOString(),
-                // Half-open at the top, so the last point's own window is included.
-                to: new Date(drawn[drawn.length - 1].ms + 1000).toISOString(),
-                limit: 200,
-              },
-            },
-          })
-        : Promise.resolve({ data: undefined }),
+      fetchExpectedRuns(pid, monitorID, drawn),
     ]);
     if (ticket !== loadTicket) return;
     // A failed or absent answer leaves the panel exactly as FR-031 left it: points, no stroke.
     // That is the honest default — the alternative is a line drawn because nothing said not to.
-    expectedRuns.value = runs?.data
-      ? { windows: runs.data.windows ?? [], ledger_from: runs.data.ledger_from ?? null }
-      : null;
+    expectedRuns.value = runs;
     availability.value = av.data ?? [];
     projectMonitors.value = mons.data ?? [];
     openIncident.value = (inc.data ?? []).find((i) => i.monitor_id === monitorID && i.status !== "resolved") ?? null;
@@ -834,18 +1077,31 @@ watch(
             <rect
               v-for="(c, i) in expectationCells"
               :key="'ec' + i"
-              :x="c.kind === 'empty' ? c.x + 0.6 : c.x"
-              :y="c.kind === 'empty' ? 2.6 : 2"
-              :width="c.kind === 'empty' ? Math.max(0.4, c.w - 1.2) : c.w"
-              :height="c.kind === 'empty' ? 8.8 : 10"
+              :x="outlined(c.kind) ? c.x + 0.6 : c.x"
+              :y="outlined(c.kind) ? 2.6 : 2"
+              :width="outlined(c.kind) ? Math.max(0.4, c.w - 1.2) : c.w"
+              :height="outlined(c.kind) ? 8.8 : 10"
               rx="1.5"
               :fill="c.kind === 'notStored' ? 'url(#er-hatch)' : c.kind === 'late' ? 'var(--degraded)' : c.kind === 'covered' ? 'var(--ink-3)' : 'none'"
               :opacity="c.kind === 'covered' ? 0.5 : 1"
-              :stroke="c.kind === 'empty' ? 'var(--down)' : 'none'"
-              :stroke-width="c.kind === 'empty' ? 1.4 : 0"
+              :stroke="c.kind === 'empty' ? 'var(--down)' : c.kind === 'reserved' ? 'var(--ink-3)' : 'none'"
+              :stroke-width="outlined(c.kind) ? 1.4 : 0"
               data-testid="lat-expect-cell"
               :data-kind="c.kind"
               :data-verdict="c.verdict"
+            />
+            <!-- The hit areas. A cell is about two pixels wide at sixty checks, so what a pointer
+                 or a Tab key reaches is a wider transparent rect over it — the same device the
+                 observation ruler's empty spans use, and for the same reason. -->
+            <rect
+              v-for="(c, i) in expectationCells"
+              :key="'eh' + i"
+              :x="c.x - 2.5" y="0" :width="c.w + 5" height="14"
+              fill="transparent" tabindex="0" role="button"
+              :aria-label="cellLabel(c)"
+              data-testid="lat-expect-hit"
+              @pointerenter="hoverCell = c" @pointerleave="hoverCell = null"
+              @focus="hoverCell = c" @blur="hoverCell = null"
             />
             <!-- Where the ledger starts answering at all. -->
             <rect v-if="ledgerFromX != null" :x="ledgerFromX - 0.9" y="0" width="1.8" height="14" fill="var(--ink-2)" data-testid="lat-ledger-from" />
@@ -859,13 +1115,21 @@ watch(
           <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[11px] w-[2px] bg-ink-2"></i> observation ruler — its empty spans ARE unobserved time</span>
           <template v-if="expectedRuns">
             <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-0 w-[14px] border-t-2 border-accent"></i> stroke — every window across it is <span class="font-mono">covered</span></span>
+            <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[9px] w-[9px] rounded-xs border border-ink-3"></i> <span class="font-mono">reserved</span> — recorded before dispatch, no dispatch recorded: neither a missed run nor a covered one</span>
             <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[9px] w-[9px] rounded-xs bg-degraded"></i> <span class="font-mono">covered_late</span> — answered too far from its window</span>
             <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[9px] w-[9px] rounded-xs border-[1.5px] border-down"></i> a window nothing ran in</span>
           </template>
         </div>
 
         <!-- Readouts. Times are local with the offset named, over the canonical UTC instant. -->
-        <div v-if="hoverPoint" class="mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-point-readout">
+        <!-- One cell's own words. It sits BEFORE the point readout because a window is the
+             narrower claim: a reader hovering the expectation band is asking what the ledger says
+             about that window, not what the nearest check measured. -->
+        <div v-if="hoverCell" class="mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-cell-readout">
+          <p class="text-[12.5px] text-ink-2">{{ cellLabel(hoverCell) }}</p>
+          <p class="mt-[3px] font-mono text-[11.5px] text-ink-3">{{ utcInstantLabel(new Date(hoverCell.ms).toISOString()) }}</p>
+        </div>
+        <div v-else-if="hoverPoint" class="mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-point-readout">
           <div class="font-mono text-[12.5px]">
             {{ instantLabel(hoverPoint.hb.ts) }} ·
             {{ hoverPoint.latency != null ? fmtMs(hoverPoint.latency) : "no latency recorded" }}

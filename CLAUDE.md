@@ -58,7 +58,10 @@ build output).
 ```bash
 # Canonical single-stack gate starts the required SSO and mail dependencies:
 make dev-up
-make dev-test                         # 54 pass + 1 skip (idle-provider MaC UI) as of iter-0163
+make dev-test                         # 68 pass + 1 skip (no file-managed monitor in this stack) as of iter-0176.
+                                      # The dev stack runs with `ledger.carrier_enabled: true` (D-0244) and the
+                                      # target DERIVES CERBIX_LEDGER_CARRIER from docker/config.dev.yaml, so the
+                                      # generation-4 path is exercised by the ordinary gate rather than by hand.
 
 # Advanced targeted run against that same local stack:
 CERBIX_TOPOLOGY=single CERBIX_URL=http://localhost:8080 ./e2e/run.sh tests/monitors.spec.ts

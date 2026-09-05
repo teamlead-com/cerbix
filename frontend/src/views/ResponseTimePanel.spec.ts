@@ -2,6 +2,9 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 
 import MonitorDetailView from "@/views/MonitorDetailView.vue";
+// The SAME formatter the panel uses. A test that spelled the instant itself would be asserting its
+// own arithmetic, and would keep passing if the panel's zone handling changed underneath it.
+import { instantLabel } from "@/lib/wallclock";
 
 // func-truthful-rendering §6 (FR-031, D-0235) against the REAL panel. The library tests in
 // `lib/latencypanel.spec.ts` pin the arithmetic; these reach the rendered surface, because a test
@@ -49,7 +52,10 @@ function heartbeats(opts?: { withTimeout?: boolean }) {
 }
 
 /** The ledger answer the panel gets, or `undefined` for a server that has none (FR-032 §13a). */
-type LedgerFixture = { windows: { due_at: string; verdict: string }[]; ledger_from: string | null };
+type LedgerFixture = {
+  windows: { due_at: string; verdict: string; reserved_at?: string; withheld_reason?: string }[];
+  ledger_from: string | null;
+};
 
 async function mountPanel(opts?: { withTimeout?: boolean; ledger?: LedgerFixture }) {
   for (const fn of Object.values(apiMock)) fn.mockReset();
@@ -268,5 +274,171 @@ describe("the Response time panel · FR-032 stroke", () => {
     expect(Date.parse(q.from)).toBe(instants[0]);
     expect(Date.parse(q.to)).toBeGreaterThan(instants[instants.length - 1]);
     expect(q.limit).toBe(200);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// FR-032 phase F — the cell vocabulary, as a SET (§7.4, mock approved 2026-09-05).
+//
+// The panel used to map `covered`, `covered_late` and pre-`ledger_from` time, and send EVERYTHING
+// ELSE to the `--down` outline whose meaning is "a run was due here and nothing ran". So `unknown`,
+// `issued_never_claimed` and `claimed_never_finished` were all drawn as missed runs — and `unknown`
+// had been assigned the hatch by the phase-E mock this panel was approved against. On the shipped
+// default (the ledger carrier off) EVERY window reads `unknown`, so the ruler drew a full row of
+// missed runs on an instance where nothing was missed.
+//
+// These cases pin every verdict the API can return, as a set rather than one by one, because the
+// way this breaks again is a NEW verdict falling through a default arm.
+
+const VERDICT_CELLS: [string, string][] = [
+  ["covered", "covered"],
+  ["covered_late", "late"],
+  ["expected_never_issued", "empty"],
+  ["issued_never_claimed", "empty"],
+  ["claimed_never_finished", "empty"],
+  ["unknown", "notStored"],
+  ["reserved", "reserved"],
+];
+
+describe("the expectation ruler's vocabulary", () => {
+  it("draws every verdict the API can return, and never sends one to a default", async () => {
+    const instants = fixtureInstants().slice(1);
+    // One window per verdict, laid along the drawn span so each gets its own cell.
+    const windows = VERDICT_CELLS.map(([verdict], i) => ({
+      due_at: new Date(instants[i]).toISOString(),
+      verdict,
+      ...(verdict === "reserved" ? { reserved_at: new Date(instants[i] - 1000).toISOString() } : {}),
+    }));
+    const w = await mountPanel({ ledger: { windows, ledger_from: new Date(0).toISOString() } });
+    const cells = w.findAll('[data-testid="lat-expect-cell"]');
+    const got = new Map(cells.map((c) => [c.attributes("data-verdict"), c.attributes("data-kind")]));
+
+    for (const [verdict, kind] of VERDICT_CELLS) {
+      expect(got.get(verdict), `${verdict} must be drawn as ${kind}`).toBe(kind);
+    }
+    // And the two that carry the loudest claims are asserted from the other side as well: neither
+    // may be the missed-run cell, which is what both of them were.
+    expect(got.get("unknown"), "unknown drawn as a missed run is the default-configuration defect").not.toBe("empty");
+    expect(got.get("reserved"), "reserved drawn as a missed run asserts an absence nobody knows").not.toBe("empty");
+  });
+
+  it("gives an unrecognised verdict the cell that claims nothing", async () => {
+    // A verdict this build has never heard of — a newer server, or a rollback. The old default arm
+    // called it a missed run; the honest answer is the hatch, because not knowing what a name means
+    // is exactly the case where the panel cannot say what happened.
+    const windows = [{ due_at: new Date(fixtureInstants()[1]).toISOString(), verdict: "some_future_state" }];
+    const w = await mountPanel({ ledger: { windows, ledger_from: new Date(0).toISOString() } });
+    const cell = w.find('[data-testid="lat-expect-cell"]');
+    expect(cell.attributes("data-kind")).toBe("notStored");
+  });
+
+  it("renders a reserved window as an outline in the neutral hue, never as a fill", async () => {
+    const windows = [{
+      due_at: new Date(fixtureInstants()[1]).toISOString(),
+      verdict: "reserved",
+      reserved_at: new Date(fixtureInstants()[1] - 1000).toISOString(),
+    }];
+    const w = await mountPanel({ ledger: { windows, ledger_from: new Date(0).toISOString() } });
+    const cell = w.find('[data-testid="lat-expect-cell"]');
+    // A fill would read as a recorded failure; the failure hue would say the run did not happen.
+    expect(cell.attributes("fill")).toBe("none");
+    expect(cell.attributes("stroke")).toBe("var(--ink-3)");
+    expect(cell.attributes("stroke")).not.toBe("var(--down)");
+  });
+
+  it("says in words what a reserved window is, and names the instant it has", async () => {
+    const due = fixtureInstants()[1];
+    const windows = [{
+      due_at: new Date(due).toISOString(),
+      verdict: "reserved",
+      reserved_at: new Date(due - 1000).toISOString(),
+      withheld_reason: "publish_failed",
+    }];
+    const w = await mountPanel({ ledger: { windows, ledger_from: new Date(0).toISOString() } });
+    const hit = w.findAll('[data-testid="lat-expect-hit"]');
+    expect(hit.length, "a cell two pixels wide needs a hit area or nothing can reach it").toBeGreaterThan(0);
+    await hit[0].trigger("focus");
+    const readout = w.find('[data-testid="lat-cell-readout"]');
+    expect(readout.exists()).toBe(true);
+    expect(readout.text()).toContain("reserved at");
+    expect(readout.text()).toContain("no dispatch recorded");
+    // The reason travels when there is one, and it is the API's own word rather than a paraphrase.
+    expect(readout.text()).toContain("publish_failed");
+    // The instant named is `reserved_at`, which is the only instant this window has.
+    expect(readout.text()).toContain(instantLabel(new Date(due - 1000).toISOString()));
+  });
+
+  it("never calls an unknown window a missed run in words either", async () => {
+    const windows = [{ due_at: new Date(fixtureInstants()[1]).toISOString(), verdict: "unknown" }];
+    const w = await mountPanel({ ledger: { windows, ledger_from: new Date(0).toISOString() } });
+    await w.findAll('[data-testid="lat-expect-hit"]')[0].trigger("focus");
+    const text = w.find('[data-testid="lat-cell-readout"]').text();
+    expect(text).toContain("unknown");
+    expect(text).not.toContain("nothing was dispatched");
+  });
+});
+
+// `ledger_from` outranks the stored verdict in the WORDS, not only in the fill (final-tree audit,
+// party [65]).
+//
+// The cell geometry always got this right — the kind is decided by `ms < ledgerFrom` before the map
+// is consulted — but `cellLabel` carried an exception for `unknown`, so a window before the ledger
+// begins whose stored verdict happened to be `unknown` was described as "dispatched on a carrier
+// that carries no job identity". That is a claim about a DISPATCH, made about time the ledger
+// explicitly cannot answer for, and it is reachable whenever a truncation fence moves `ledger_from`
+// past a row that still exists.
+describe("a window before ledger_from says only that", () => {
+  const beforeLedger = async (verdict: string, extra: Record<string, string> = {}) => {
+    const instants = fixtureInstants();
+    // The window is early in the drawn span; the ledger begins LATER, so this row is behind the
+    // fence while still being returned by the API.
+    const windows = [{ due_at: new Date(instants[2]).toISOString(), verdict, ...extra }];
+    const w = await mountPanel({
+      ledger: { windows, ledger_from: new Date(instants[20]).toISOString() },
+    });
+    return w;
+  };
+
+  it("hatches an unknown window behind the fence and never says it was dispatched", async () => {
+    const w = await beforeLedger("unknown");
+    const cell = w.find('[data-testid="lat-expect-cell"]');
+    expect(cell.attributes("data-kind")).toBe("notStored");
+    await w.findAll('[data-testid="lat-expect-hit"]')[0].trigger("focus");
+    const text = w.find('[data-testid="lat-cell-readout"]').text();
+    expect(text).toContain("before the ledger begins");
+    expect(text).toContain("claimable as nothing");
+    // The overclaim: any statement about how the run was dispatched, about a carrier, or about an
+    // identity, for time the ledger says it holds nothing for.
+    expect(text).not.toContain("dispatched");
+    expect(text).not.toContain("carrier");
+    expect(text).not.toContain("correlate");
+  });
+
+  it("says the same of a reserved window behind the fence, and claims no reservation", async () => {
+    const instants = fixtureInstants();
+    const w = await beforeLedger("reserved", {
+      reserved_at: new Date(instants[2] - 1000).toISOString(),
+      withheld_reason: "publish_failed",
+    });
+    const cell = w.find('[data-testid="lat-expect-cell"]');
+    expect(cell.attributes("data-kind")).toBe("notStored");
+    await w.findAll('[data-testid="lat-expect-hit"]')[0].trigger("focus");
+    const text = w.find('[data-testid="lat-cell-readout"]').text();
+    expect(text).toContain("before the ledger begins");
+    expect(text).not.toContain("reserved at");
+    expect(text).not.toContain("no dispatch recorded");
+    expect(text).not.toContain("publish_failed");
+  });
+
+  it("still describes an unknown window that is INSIDE the ledger's range", async () => {
+    // The other half, so the fix cannot be "always say before the ledger begins": a window the
+    // ledger does hold, dispatched below the carrier, keeps its own wording.
+    const windows = [{ due_at: new Date(fixtureInstants()[20]).toISOString(), verdict: "unknown" }];
+    const w = await mountPanel({ ledger: { windows, ledger_from: new Date(0).toISOString() } });
+    await w.findAll('[data-testid="lat-expect-hit"]')[0].trigger("focus");
+    const text = w.find('[data-testid="lat-cell-readout"]').text();
+    expect(text).toContain("unknown");
+    expect(text).toContain("carrier");
+    expect(text).not.toContain("before the ledger begins");
   });
 });

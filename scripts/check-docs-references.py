@@ -891,6 +891,65 @@ def check_fr032_discharge(body, test_source, spec='docs/specs/func-expected-run-
     return out
 
 
+def paragraphs(text):
+    """`text` as claim-sized units, each flattened to one line.
+
+    A count and the iteration it belongs to are routinely a LINE APART in prose — these documents
+    wrap at 100 columns — so a line-based reader scan misses exactly the drift it exists to catch,
+    which is how the first version of the iter-0178 guard let a mutated "three P1s" through.
+
+    But a MARKDOWN TABLE has no blank lines between its rows, and each row is its own claim. Joined
+    into one unit, one row's number is attributed to whichever iteration another row happens to
+    name — which immediately misread `iter-0177`'s own rows ABOUT a drift as the drift. So a line
+    beginning with `|` is a unit by itself.
+    """
+    units = []
+    for block in re.split(r'\n\s*\n', text):
+        prose = []
+        for line in block.split('\n'):
+            if line.lstrip().startswith('|'):
+                units.append(' '.join(line.split()))
+            else:
+                prose.append(line)
+        if prose:
+            units.append(' '.join(' '.join(prose).split()))
+    return units
+
+
+def unquoted(text):
+    """`text` with double-quoted spans removed.
+
+    A number inside quotation marks is a CITATION of a claim, not a claim: these documents keep the
+    wrong number visible on purpose — "it first said \u201cthree P1s\u201d while the table held five" is
+    the record of the correction, and a guard that reads it as a fresh drift punishes the honesty
+    it exists to enforce. Same reasoning as `check_fr032_audit_totals` reading only its declared
+    **Result:** span.
+    """
+    return re.sub(r'[\u201c"\u2018\u2019\'][^\u201d"\u2018\u2019\']*[\u201d"\u2018\u2019\']', ' ', text)
+
+
+def regions_naming(line, name):
+    """The spans of `line` that belong to iteration `name`.
+
+    `status.md` packs a CHAIN of iterations into one line — "iter-0178 ... Previous: iter-0177 ..."
+    — so a line-wide scan attributes every count in it to every iteration named in it, and a
+    sentence-wide scan does no better, because a count often sits a sentence away from the name it
+    belongs to. The rule that holds for this document's shape: text after an `iter-NNNN` mention
+    belongs to THAT iteration until the next mention.
+
+    Without this, the guard added for iter-0178 immediately reported iter-0177's own "EIGHT
+    findings" as iter-0178's drift — a false positive that would have taught the next reader to
+    ignore it.
+    """
+    marks = [(m.start(), m.group(0)) for m in re.finditer(r'iter-\d{4}', line)]
+    out = []
+    for i, (start, mark) in enumerate(marks):
+        end = marks[i + 1][0] if i + 1 < len(marks) else len(line)
+        if mark == name:
+            out.append(line[start:end])
+    return out
+
+
 def check_iteration_finding_counts(iteration='docs/iterations/iter-0177.md',
                                    readers=('docs/status.md', 'docs/traceability.md',
                                             'docs/decisions.md')):
@@ -927,11 +986,12 @@ def check_iteration_finding_counts(iteration='docs/iterations/iter-0177.md',
     for doc in (iteration,) + tuple(readers):
         if not os.path.exists(doc):
             continue
-        for line in read(doc).split('\n'):
+        for line in paragraphs(read(doc)):
             if name not in line:
                 continue
+            scoped = unquoted(' '.join(regions_naming(line, name)))
             for stated in re.findall(r'\b(\d+|' + '|'.join(words.values()) + r')\s+findings\b',
-                                     line, re.I):
+                                     scoped, re.I):
                 low = stated.lower()
                 value = int(low) if low.isdigit() else next(
                     (n for n, w in words.items() if w == low), None)
@@ -939,6 +999,87 @@ def check_iteration_finding_counts(iteration='docs/iterations/iter-0177.md',
                     out.append(f'{doc} says {stated} findings for {name}; its findings table holds '
                                f'{derived}{" (" + spelled + ")" if spelled else ""}. A count that '
                                f'drifts from its own rows is the one number nobody re-derives')
+    return out
+
+def check_iter0178_findings(iteration='docs/iterations/iter-0178.md',
+                            readers=('docs/status.md', 'docs/decisions.md',
+                                     'docs/traceability.md')):
+    """iter-0178's SEVERITY and ORIGIN split, derived from its own findings table.
+
+    `check_iteration_finding_counts` above derives a total from the same shape and did not fire
+    here, because the claim that drifted was phrased "three P1s on the response" rather than
+    "three findings". A guard is only as wide as the sentence it matches — so this one reads the
+    severity column and the origin column and holds the declared **Tally:** span, plus any reader
+    document that states a P0/P1 count beside this iteration's name, to what the rows actually say.
+
+    The table is `| # | Severity | Found in | ... |`; a row's origin is "the slice" or "the
+    response". Both are derived; neither is written twice.
+    """
+    out = []
+    if not os.path.exists(iteration):
+        return out
+    body = read(iteration)
+    rows = re.findall(r'^\| (\d+) \| *(P[01]) *\| *([^|]*?) *\|', body, re.M)
+    if not rows:
+        out.append(f'{iteration} has no `| # | Severity | Found in |` findings table, so every '
+                   f'count it states about itself is a number nobody can re-derive')
+        return out
+    total = len(rows)
+    p0 = sum(1 for _, sev, _ in rows if sev == 'P0')
+    p1 = sum(1 for _, sev, _ in rows if sev == 'P1')
+    in_slice = sum(1 for _, _, where in rows if 'slice' in where)
+    on_response = sum(1 for _, _, where in rows if 'response' in where)
+    if in_slice + on_response != total:
+        out.append(f'{iteration}: {total - in_slice - on_response} findings row(s) name neither '
+                   f'"the slice" nor "the response" as their origin, so the split cannot be derived')
+    words = {1: 'one', 2: 'two', 3: 'three', 4: 'four', 5: 'five', 6: 'six', 7: 'seven',
+             8: 'eight', 9: 'nine', 10: 'ten'}
+
+    def value(token):
+        low = token.lower()
+        return int(low) if low.isdigit() else next((n for n, w in words.items() if w == low), None)
+
+    number = r'(\d+|' + '|'.join(words.values()) + r')'
+    # The declared tally span is where the totals live, so it is checked exhaustively.
+    tally = re.search(r'\*\*Tally:(.+?)\*\*', body, re.S)
+    if not tally:
+        out.append(f'{iteration} has a findings table and no **Tally: ...** span; the totals must '
+                   f'live where a reader looks for them or the table summarises itself to nobody')
+    else:
+        span = tally.group(1)
+        for pattern, derived, label in (
+                (number + r'\s+findings', total, 'findings'),
+                (number + r'\s+P0s?', p0, 'P0'),
+                (number + r'\s+P1s?', p1, 'P1'),
+                (number + r'\s+in the slice', in_slice, 'in the slice'),
+                (number + r'\s+on the response', on_response, 'on the response')):
+            found = [value(m) for m in re.findall(pattern, span, re.I)]
+            found = [v for v in found if v is not None]
+            if not found:
+                out.append(f'{iteration}: the **Tally:** span states no {label} count, so that '
+                           f'number is claimed elsewhere and derived nowhere')
+            for v in found:
+                if v != derived:
+                    out.append(f'{iteration}: the **Tally:** span says {v} {label}; its findings '
+                               f'table holds {derived}')
+    # Reader documents may state the severity split beside this iteration's name; if they do, it
+    # must be the table's.
+    name = os.path.basename(iteration).removesuffix('.md')
+    for doc in readers:
+        if not os.path.exists(doc):
+            continue
+        for line in paragraphs(read(doc)):
+            if name not in line:
+                continue
+            scoped = unquoted(' '.join(regions_naming(line, name)))
+            for pattern, derived, label in ((number + r'\s+P0s?', p0, 'P0'),
+                                            (number + r'\s+P1s?', p1, 'P1')):
+                for m in re.findall(pattern, scoped, re.I):
+                    v = value(m)
+                    if v is not None and v != derived:
+                        out.append(f'{doc} says {m} {label} for {name}; its findings table holds '
+                                   f'{derived}. The count that drifted here was phrased "P1s", '
+                                   f'which is why the findings-count guard did not see it')
     return out
 
 def check_fr032_audit_totals(body, spec='docs/specs/func-expected-run-ledger.md'):
@@ -1365,6 +1506,17 @@ def check_enumerations():
             bad.append((spec, 1, 'enum', msg))
     for msg in check_iteration_finding_counts():
         bad.append(('docs/iterations/iter-0177.md', 1, 'enum', msg))
+    for msg in check_iteration_finding_counts('docs/iterations/iter-0178.md'):
+        bad.append(('docs/iterations/iter-0178.md', 1, 'enum', msg))
+    for msg in check_iter0178_findings():
+        bad.append(('docs/iterations/iter-0178.md', 1, 'enum', msg))
+    # THESE THREE WERE DEAD. They were indented into the loop above, so they ran only when the
+    # finding-count guard FAILED — that is, never, because it was green. The success line of this
+    # script named all three by name throughout. Found while fixing a drifted count in `iter-0178`
+    # (2026-09-06), which is the same class one level up: a summary claiming what the mechanism
+    # beside it does not do. `check_every_guard_is_called` below now makes the omission structural
+    # rather than a matter of reading the indentation.
+    if os.path.exists(spec):
         migs = {p: read(p) for p in sorted(glob.glob('internal/store/migrations/*.sql'))}
         stores = {p: read(p) for p in sorted(glob.glob('internal/store/*.go'))
                   if not p.endswith('_test.go')}

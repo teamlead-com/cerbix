@@ -4,7 +4,9 @@ A guard that is not itself tested is a sentence about a guard. Each case below i
 round actually found, or the hole the guard's own first draft had.
 """
 import ast
+import contextlib
 import glob
+import io
 import importlib.util
 import os
 import pathlib
@@ -1199,6 +1201,57 @@ class IterationFindingCountTest(unittest.TestCase):
         found = self.run_guard("iter-0177: four findings.\n", table="# iter-0177\n\nno table here\n")
         self.assertEqual(len(found), 1, found)
         self.assertIn("no numbered findings table", found[0])
+
+class EveryGuardIsActuallyReached(unittest.TestCase):
+    """The guards are WIRED, not merely defined.
+
+    `check_fr032_drain_surfaces`, `check_fr032_transport_matrix` and
+    `check_fr032_carrier_gate_contract` were indented INTO the body of
+    `for msg in check_iteration_finding_counts():`, so they ran only when that guard FAILED — that
+    is, never, because it was green. Their own fixture tests passed throughout, because a fixture
+    test calls the function directly; the success line of the checker named all three by name. The
+    same class as a builder that is defined, documented and never called.
+
+    So this asserts EXECUTION rather than definition: every `check_*` in the module is wrapped in a
+    proxy that records it and calls through, `check_enumerations()` is run against the real tree,
+    and any guard the run never reached is reported by name.
+    """
+
+    def test_the_entry_point_reaches_every_guard(self):
+        os.chdir(os.path.dirname(HERE))
+        names = [n for n in dir(cdr)
+                 if n.startswith("check_") and callable(getattr(cdr, n))
+                 and n != "check_enumerations"]
+        self.assertGreater(len(names), 5, "the scan found almost no guards; it is looking wrong")
+        seen = set()
+        originals = {}
+
+        def proxy(name, fn):
+            def wrapped(*a, **kw):
+                seen.add(name)
+                return fn(*a, **kw)
+            return wrapped
+
+        for n in names:
+            originals[n] = getattr(cdr, n)
+            setattr(cdr, n, proxy(n, originals[n]))
+        # The ENTRY POINT, not one of its halves: `main()` is what `make docs-check` runs, and
+        # "wired" means reachable from there. Running `check_enumerations()` alone would have
+        # declared nine guards dead that `main` reaches by another route.
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                cdr.main()
+        finally:
+            for n, fn in originals.items():
+                setattr(cdr, n, fn)
+
+        missing = sorted(set(names) - seen)
+        self.assertEqual(
+            missing, [],
+            "guards defined and never reached by main(): " + ", ".join(missing),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

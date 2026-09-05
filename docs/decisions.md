@@ -7873,8 +7873,17 @@ stays in the non-oracular bucket. Two mutations cover the order (P8, P9), the se
 generation 1 specifically.
 
 **The independent audit's result (2026-09-06).** The owner-authorized slice `0a1557c..d0a8fed` was
-read; the P0 and the P1s found in it were resolved in a response tree examined separately through
-`8175cd0`, and the three P1s raised on that response are closed verifiably. **No blocking findings
+read; the P0 and the P1 found in it were resolved in a response tree examined separately through
+`8175cd0`, and every P1 raised on that response is closed verifiably. `iter-0178` §8.1 enumerates
+them and derives the totals from its own rows: **seven findings in all — one P0 and six P1s, two in
+the slice and five on the response.** The name comes before the numbers deliberately — the guard
+attributes a count to the iteration named nearest ahead of it, so a total written before its
+subject is a total nobody checks.
+
+This paragraph first said "three P1s on the response", here and in §8, while the report already
+recorded five. `check_iteration_finding_counts` — written when `iter-0177`'s count drifted — did
+not fire, because the claim was phrased "P1s" and not "findings": a guard is only as wide as the
+sentence it matches. `check_iter0178_findings` derives the severity and origin split as well. **No blocking findings
 remain in the verified final tree.** The reviewer ran scoped Go tests, `git diff --check`,
 `make docs-check`, the final response diff and the provenance himself; the stable `-race` run and
 every live gate stay attributed to this session as consistent evidence rather than his own runs.
@@ -7886,3 +7895,17 @@ exactly this shape and three more findings arrived afterwards, which is why the 
 written down rather than assumed. **The lifecycle and the VCS belong to the owner.** The three open
 items — silence as a refusal, credentialed dispatch unexercised in geo, and the untested
 dead-letter label — are untouched by it.
+
+**And the count guard's repair found three guards that had never run.**
+`check_fr032_drain_surfaces`, `check_fr032_transport_matrix` and
+`check_fr032_carrier_gate_contract` were indented into the body of
+`for msg in check_iteration_finding_counts():`, so they executed only when that guard FAILED —
+never, because it was green — while the success line `make docs-check` prints named all three by
+name on every run. Their fixture tests passed throughout, because a fixture test calls the function
+directly. Both ends tested, the wire between them tested by nothing: D-0239's shape, in the tooling
+rather than in the product.
+
+The answer is a test of EXECUTION rather than of definition: every `check_*` in the module is
+wrapped in a recording proxy, `main()` is run — the entry point, not one of its halves — and any
+guard the run never reached is named. Restoring the dead branch fails it by naming all three, and
+the tree passes all three now that they run.

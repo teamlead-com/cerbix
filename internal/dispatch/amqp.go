@@ -873,6 +873,14 @@ func (d *AMQP) serveTestsGeneration(once *sync.Once, queue string, generation in
 	return initialErr
 }
 
+// deadLetterSourceForTests names the test carrier a poison delivery was dropped from.
+// It is derived from the generation rather than written per call site, because the one
+// hardcoded "tests.v2" label was attached to deliveries from the v3 queue too, and a
+// dead-letter header that names the wrong carrier sends the reader to the wrong consumer.
+func deadLetterSourceForTests(generation int) string {
+	return fmt.Sprintf("tests.v%d", generation)
+}
+
 func serveEnvelopeTestsOnce(d *AMQP, conn *amqp.Connection, queue string, generation int, run TestRunner, ready chan<- error) {
 	ch, err := conn.Channel()
 	if err != nil {
@@ -901,9 +909,21 @@ func serveEnvelopeTestsOnce(d *AMQP, conn *amqp.Connection, queue string, genera
 			if !ok {
 				return
 			}
+			// The QUEUE is the carrier generation here too, exactly as on the jobs path
+			// (§4.7, D-0160): the body's own ProtocolVersion is attacker-editable and is
+			// never consulted. It USED to be, against a hardcoded ProtocolV2, in a function
+			// that serves the v3 carrier as well — so every generation-3 Test Connection was
+			// dead-lettered by the consumer bound to its own queue, and the caller, which is
+			// answered only on success, waited out its timeout and reported the region as
+			// having no worker. What made it invisible: the inproc dev stack never takes this
+			// path, and the distributed gate that does was red for an unrelated reason.
+			//
+			// What remains is the one property a generation >= 2 test carrier is DEFINED by:
+			// it carries a credential envelope. A delivery without one is a protocol
+			// violation on this queue and is dead-lettered for inspection.
 			var job CheckJob
-			if err := json.Unmarshal(msg.Body, &job); err != nil || job.ProtocolVersion != ProtocolV2 || job.CredentialEnvelope == nil {
-				d.deadLetter("tests.v2", msg.Body)
+			if err := json.Unmarshal(msg.Body, &job); err != nil || job.CredentialEnvelope == nil {
+				d.deadLetter(deadLetterSourceForTests(generation), msg.Body)
 				_ = msg.Nack(false, false)
 				continue
 			}

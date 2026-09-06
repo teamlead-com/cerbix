@@ -6,22 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
-## [Unreleased] — everything since `v0.1.8`
+## [v0.1.9] - 2026-09-06
 
-**This section carried the heading `[v0.1.9] - 2026-09-03` and there is no such tag.** The tag was
-created and then **deleted by hand** before the review that gates it had closed — see
-`8ee023c docs(v0.1.9): the tag is dropped, not moved, until the review closes`. The dated heading
-outlived the tag and announced a release that does not exist, which is exactly the claim a
-changelog must not make. `v0.1.8` (2026-09-03) is the newest tag in the repository.
+Everything since `v0.1.8`, in three parts and one set of fixes: the **typed external canary** and
+the audit trail that were prepared under this number once before, the **truthful-rendering**
+package, and the **expected-run ledger**.
 
-Renamed rather than deleted: the work below shipped into `main` and is real; only the version
-number was not. When a release is cut, this heading takes its number and its date, and nothing
-under it needs rewriting.
+**This heading was `[v0.1.9] - 2026-09-03` before, and it was withdrawn.** The tag had been created
+and then deleted by hand before the review that gates it closed (`8ee023c docs(v0.1.9): the tag is
+dropped, not moved, until the review closes`), while the dated heading outlived it and announced a
+release that did not exist. It is back by the owner's decision, with the later work folded in and
+the date moved to when that decision was taken.
 
-Two clusters of work landed after that heading was written and are recorded below it: **the
-truthful-rendering package (FR-031 / NFR-025)** and **the expected-run ledger (FR-032)**.
+**Stated plainly, because this file has already carried the opposite claim once:** at the time of
+writing there is no `v0.1.9` tag in the repository — `v0.1.8` is the newest — and the commits below
+are unpushed. Tagging and pushing are separate acts and belong to the owner.
 
-### Part 1 — the canary release that was prepared as v0.1.9
+### Part 1 — the canary work, prepared under this number once before
 
 Four things in one release, in the order the owner set: a **typed external canary** for async API
 journeys, an **audit trail for writes that change something** — incidents and now monitors — the
@@ -330,8 +331,8 @@ due and never happened" — so no rendering could honestly connect two points ac
 
 <sub>iter-0178, `D-0246` · `make dev-test-distributed` 11 passed / 1 skipped · geo topology 14
 passed, including credentialed dispatch on both remote transports — a path no geo run exercised
-before · `make secret-smoke` and `make mac-smoke` green · **not a release: nothing here is
-tagged**</sub>
+before · `make secret-smoke` and `make mac-smoke` green · full `-race` 33 packages exit 0 ·
+`iter-0178` CLOSED by the owner</sub>
 
 ---
 

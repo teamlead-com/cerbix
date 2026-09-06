@@ -8040,3 +8040,28 @@ defect and the other three were the gap between a working tree and a trustworthy
 
 **Closure is not a release.** No tag, push or release is authorized by it; `CHANGELOG.md` still
 opens with `[Unreleased]`, which is accurate — `v0.1.8` remains the newest tag in the repository.
+
+### D-0246 addendum 3 — the CHANGELOG heading is `v0.1.9` again, by the owner's decision, after the closure
+
+Two sentences above are superseded by this one and are left standing as the record of what was
+true when they were written: this decision says the top section "is `[Unreleased]` now", and the
+closure note says the file "opens with `[Unreleased]`, which is accurate". Both were true through
+the whole of `iter-0178`. **After the closure the owner asked for the section to be versioned**, and
+it now reads `## [v0.1.9] - 2026-09-06`.
+
+`iter-0178`'s lifecycle line still says the top section is `[Unreleased]`. That is deliberate: it
+was true at the moment of closure, and a closed report is a record of a moment rather than a live
+document. The correction goes forward, here.
+
+**What changed is the heading and nothing else.** Stated because this file has already carried the
+opposite claim once, and the whole reason the earlier heading was withdrawn was that a dated
+version announced a release that did not exist:
+
+- there is no `v0.1.9` tag in the repository — `v0.1.8` remains the newest;
+- the chain `0a1557c..HEAD` is unpushed;
+- tagging and pushing are separate acts and were not part of this decision.
+
+The section's own preamble says the same in the file itself, so a reader who opens `CHANGELOG.md`
+without this record still learns that the number is a heading and not yet a release. The option was
+presented with that consequence named, and the owner chose it knowing it; the alternative offered —
+deleting the section — would have discarded the record of everything since `v0.1.8`.

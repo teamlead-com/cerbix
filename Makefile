@@ -283,7 +283,11 @@ geo-up: geo-compose-check
 	@$(MAKE) --no-print-directory geo-ready
 
 geo-up-all: geo-up
-	$(GEO_DC) --profile geo1 --profile geo2 up -d --no-deps worker-geo1 worker-geo2
+	# The credentialed TARGETS start with their regions: `--no-deps` means every service this
+	# stack needs is named here, and a service that is defined and profiled but not listed
+	# simply never runs — which is how `redis-geo1`/`redis-geo2` were declared, documented and
+	# absent on their first run.
+	$(GEO_DC) --profile geo1 --profile geo2 up -d --no-deps redis-geo1 redis-geo2 worker-geo1 worker-geo2
 	@$(MAKE) --no-print-directory geo-ready-all
 
 dev-ready: dev-ready-single

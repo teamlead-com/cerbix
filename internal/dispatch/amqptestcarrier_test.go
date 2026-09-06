@@ -189,10 +189,31 @@ func TestAMismatchedEnvelopeIsDeadLetteredOnBothAMQPPaths(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start v3 test consumer: %v", err)
 	}
-	if _, err := d.RunJobTest(ctx, dispatch.CheckJob{
+	refusedAt := time.Now()
+	_, err = d.RunJobTest(ctx, dispatch.CheckJob{
 		Monitor: m, ProtocolVersion: dispatch.ProtocolV3, CredentialEnvelope: downgraded,
-	}); err == nil {
+	})
+	if err == nil {
 		t.Fatal("the v3 test carrier ANSWERED a generation-1 envelope — it reached the runner")
+	}
+	// A REFUSAL IS ANSWERED, not waited out. It used to be silence: the consumer dead-lettered the
+	// body and published nothing, so this call spent its whole RPC timeout and came back with
+	// `no worker responded in region …` — the sentence an EMPTY region gives. An operator could
+	// not tell a refused delivery from a region with no worker in it at all, and that cost this
+	// arc a debugging cycle. Owner's decision (2026-09-06) on the item the reviewer fenced.
+	if elapsed := time.Since(refusedAt); elapsed > time.Second {
+		t.Fatalf("the refusal took %s — that is the RPC timeout being waited out, not an answer", elapsed)
+	}
+	if strings.Contains(err.Error(), "no worker responded") {
+		t.Fatalf("a refused delivery reported %q, which is what an EMPTY region reports", err)
+	}
+	// The exact REASON, not merely the shape: a prefix check passes for an empty reason, and an
+	// empty reason is a typed error carrying no information. A known envelope on the wrong carrier
+	// stays in the non-oracular bucket — the executor never tells a prober which way its forgery
+	// was wrong — and that is the same answer the unit test pins at the gate, so this proves the
+	// WIRE carries it too rather than that something arrived.
+	if want := "probe_error: " + domain.ProbeErrorDecryptAuthFailed; err.Error() != want {
+		t.Fatalf("a refused delivery reported %q, want %q", err, want)
 	}
 	if ran.Load() {
 		t.Fatal("the test runner was invoked with a generation-1 envelope on a generation-3 carrier")

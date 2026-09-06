@@ -134,6 +134,38 @@ services:
     volumes:
       - ./config.worker-core.yaml:/etc/cerbix/worker.yaml:ro
 
+  # ---- credentialed targets, one PER REGION ----
+  #
+  # FR-020's whole point is that a credential reaches the executor that needs it and nowhere else,
+  # and this stack is the only one that can show that physically. So the authenticated target lives
+  # INSIDE the region: `redis-geo1` sits on geo1 and `redis-geo2` on geo2, each with its own
+  # password, each reachable only by its own prober. A shared target on the central network would
+  # have proved that a credential travels — not that it travels to the right place.
+  #
+  # They carry DIFFERENT passwords on purpose: geo1's worker holds only geo1's dispatch key, so it
+  # cannot open geo2's envelope even if one were misrouted to it.
+  redis-geo1:
+    image: redis:7-alpine
+    profiles: ["geo1"]
+    # `*dataCaps` alongside `*infraLog`, exactly as postgres and rabbitmq take them: the redis
+    # entrypoint drops privileges with `setpriv`, which needs SETUID/SETGID, and `cap_drop: [ALL]`
+    # alone makes it exit 127 with `setresuid failed`. Found by the first live run, where the
+    # credential reached the prober and DNS then failed — the target had never started.
+    <<: [*infraLog, *dataCaps]
+    command: ["redis-server", "--requirepass", "geo1-redis-password"]
+    networks:
+      geo1:
+        ipv4_address: 10.6.1.50
+
+  redis-geo2:
+    image: redis:7-alpine
+    profiles: ["geo2"]
+    <<: [*infraLog, *dataCaps]
+    command: ["redis-server", "--requirepass", "geo2-redis-password"]
+    networks:
+      geo2:
+        ipv4_address: 10.6.2.50
+
   # ---- remote geo-1: AMQP worker, broker-only, DB-less ----
   worker-geo1:
     <<: *cerbix

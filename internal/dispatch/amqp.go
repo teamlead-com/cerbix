@@ -940,8 +940,7 @@ func serveEnvelopeTestsOnce(d *AMQP, conn *amqp.Connection, queue string, genera
 			// violation on this queue and is dead-lettered for inspection.
 			var job CheckJob
 			if err := json.Unmarshal(msg.Body, &job); err != nil || job.CredentialEnvelope == nil {
-				d.deadLetter(deadLetterSourceForTests(generation), msg.Body)
-				_ = msg.Nack(false, false)
+				d.refuseTest(ch, msg, generation, job, domain.ProbeErrorDecryptAuthFailed)
 				continue
 			}
 			// ...and it must be the envelope THIS carrier defines. Presence alone admitted a
@@ -952,19 +951,55 @@ func serveEnvelopeTestsOnce(d *AMQP, conn *amqp.Connection, queue string, genera
 				d.logger.Error("dispatch_test_envelope_carrier_mismatch",
 					"queue", queue, "carrier", generation,
 					"envelope", job.CredentialEnvelope.V, "error", err.Error())
-				d.deadLetter(deadLetterSourceForTests(generation), msg.Body)
-				_ = msg.Nack(false, false)
+				d.refuseTest(ch, msg, generation, job, CredentialProbeErrorReason(err))
 				continue
 			}
 			hb, runErr := run(d.ctx, DeliveredJob{Job: job, CarrierGeneration: generation})
-			if runErr == nil && msg.ReplyTo != "" {
-				if reply, err := json.Marshal(hb); err == nil {
-					_ = ch.PublishWithContext(d.ctx, "", msg.ReplyTo, false, false, amqp.Publishing{ContentType: "application/json", Body: reply})
-				}
+			if runErr != nil {
+				// The runner itself refused. It is not a poison BODY — nothing to dead-letter —
+				// but the caller still gets an answer rather than a timeout.
+				d.replyTest(ch, msg, ProbeErrorHeartbeat(job, CredentialProbeErrorReason(runErr)))
+				_ = msg.Ack(false)
+				continue
 			}
+			d.replyTest(ch, msg, hb)
 			_ = msg.Ack(false)
 		}
 	}
+}
+
+// replyTest publishes one heartbeat back to a test RPC's reply queue, when it asked for one.
+func (d *AMQP) replyTest(ch *amqp.Channel, msg amqp.Delivery, hb domain.Heartbeat) {
+	if msg.ReplyTo == "" {
+		return
+	}
+	reply, err := json.Marshal(hb)
+	if err != nil {
+		return
+	}
+	_ = ch.PublishWithContext(d.ctx, "", msg.ReplyTo, false, false, amqp.Publishing{
+		ContentType: "application/json", Body: reply,
+	})
+}
+
+// refuseTest answers a REFUSED test delivery and then disposes of the body.
+//
+// A refusal used to be silence: the consumer dead-lettered the message and published nothing, so
+// the caller waited out its RPC timeout and reported `no worker responded in region X` — the exact
+// sentence an operator gets when the region is empty. That indistinguishability cost this arc a
+// whole debugging cycle when the generation-3 carrier was admitting nothing, and it would cost the
+// next reader the same. Owner's decision (2026-09-06) on the item the reviewer fenced: the caller
+// gets the typed reason instead.
+//
+// Both dispositions are kept, because they answer different people: the REPLY tells the operator
+// who is waiting, and the DEAD LETTER keeps the poison body for whoever investigates afterwards
+// (`docs/runbook.md`). The probe-error vocabulary is NOT widened — the reason comes from
+// `CredentialProbeErrorReason`, the same bounded map the executors already answer with, so a
+// prober still learns nothing about which way its forgery was wrong.
+func (d *AMQP) refuseTest(ch *amqp.Channel, msg amqp.Delivery, generation int, job CheckJob, reason string) {
+	d.replyTest(ch, msg, ProbeErrorHeartbeat(job, reason))
+	d.deadLetter(deadLetterSourceForTests(generation), msg.Body)
+	_ = msg.Nack(false, false)
 }
 
 // ServeTests starts (once) a consumer of this dispatcher's region test-RPC queue

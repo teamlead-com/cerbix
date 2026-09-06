@@ -10,3 +10,24 @@ rabbitmq:
 prober:
   allow_private_ips: true                       # internal targets
   allow_metadata_ips: false
+
+# The executor half of FR-020, and ONLY its own region's half.
+#
+# This worker sits on the `geo1` network alone: it cannot see the database, and it holds neither the
+# at-rest master (`ValidateSecretsForRole` REFUSES a worker config carrying `security.encryption_key`
+# or `previous_keys`) nor any other region's dispatch key. A leaked geo1 executor therefore exposes
+# at most geo1's payloads — the property the network isolation demonstrates physically and this
+# keyring demonstrates cryptographically.
+#
+# The id and material must match what `config.geo.yaml` publishes for `geo1`, or every dispatch into
+# this region seals something nobody here can open.
+secrets:
+  enabled: true
+  dispatch_envelope: "enforced"
+
+security:
+  dispatch:
+    regions:
+      geo1:
+        primary: {id: "geo1-2026a", key: "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="}
+        previous: []

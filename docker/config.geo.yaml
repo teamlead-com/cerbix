@@ -26,3 +26,33 @@ pull:
 security:
   admin_email: "admin@cerbix.local"
   admin_password: "devpassword123"
+  # Fixed, public DEVELOPMENT-ONLY keys, same disposable-stack caveat as the single stack: never
+  # reuse outside this demo. The AT-REST master lives only here, on the central site.
+  encryption_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  # ONE keyring per region, and each executor holds only its own. That is the property this stack
+  # exists to demonstrate physically: geo1's worker sits on a network that cannot see the DB, geo2's
+  # agent cannot see the broker, and NEITHER can open the other's credentials.
+  #
+  # `core` must match `config.worker-core.yaml`, which this compose mounts unchanged and which the
+  # DISTRIBUTED stack mounts too — one file, two topologies, and a key that differed between them
+  # would seal payloads that worker could not open.
+  dispatch:
+    regions:
+      core:
+        primary: {id: "dev-2026a", key: "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="}
+        previous: []
+      geo1:
+        primary: {id: "geo1-2026a", key: "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="}
+        previous: []
+      geo2:
+        primary: {id: "geo2-2026a", key: "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ="}
+        previous: []
+
+# FR-020 is ON in the geo stack, and that is the point of turning it on here rather than only in the
+# single-process one. Until 2026-09-06 no geo run exercised credentialed dispatch at all: the whole
+# stack ran on generation-1 carriers, so the one topology that reproduces a real geo boundary proved
+# nothing about the mechanism that boundary exists to protect. It was recorded as an open coverage
+# gap in `D-0246` rather than left unsaid, and this closes it.
+secrets:
+  enabled: true
+  dispatch_envelope: "enforced"

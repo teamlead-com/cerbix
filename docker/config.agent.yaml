@@ -15,3 +15,22 @@ pull:
 prober:
   allow_private_ips: true            # internal targets in the agent's segment
   allow_metadata_ips: false
+
+# The executor half of FR-020 for the PULL transport, and only geo2's half.
+#
+# This agent reaches the central API over HTTP and nothing else — no database, no broker — and holds
+# only geo2's dispatch key. The same rule as the AMQP worker: never the at-rest master, never
+# another region's key. Credentials arrive inside the job the agent claims and are wiped after one
+# execution.
+#
+# The id and material must match what `config.geo.yaml` publishes for `geo2`.
+secrets:
+  enabled: true
+  dispatch_envelope: "enforced"
+
+security:
+  dispatch:
+    regions:
+      geo2:
+        primary: {id: "geo2-2026a", key: "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ="}
+        previous: []

@@ -95,6 +95,94 @@ func TestGeoComposeKeepsRemoteRolesOnIntendedNetworks(t *testing.T) {
 	}
 }
 
+// loadComposeConfig loads one of the shipped compose configs through the REAL loader, so a file
+// that would not start the product cannot satisfy a test about it.
+func loadComposeConfig(t *testing.T, path string) *config.Config {
+	t.Helper()
+	cfg, err := config.Load(filepath.Clean(path))
+	if err != nil {
+		t.Fatalf("load %s: %v", path, err)
+	}
+	return cfg
+}
+
+// TestGeoRoleConfigsAgreeAndKeepTheMasterCentral is the geo topology's half of the same rule.
+//
+// It did not exist because the geo stack did not enforce envelopes: every config there was silent
+// about secrets, which was internally consistent and proved nothing — no geo run exercised
+// credentialed dispatch at all, recorded as an open coverage gap in `D-0246`. Now that the stack
+// carries it, the three configs must agree the way `config.dev.yaml` and `config.worker-core.yaml`
+// must, and each executor must hold its OWN region's key and no other.
+//
+// The `core` keyring is checked against `config.worker-core.yaml` rather than restated: that file
+// is mounted by BOTH topologies, and a core key that differed between them would seal payloads its
+// own worker could not open.
+func TestGeoRoleConfigsAgreeAndKeepTheMasterCentral(t *testing.T) {
+	central := loadComposeConfig(t, "../../docker/config.geo.yaml")
+	geo1 := loadComposeConfig(t, "../../docker/config.worker.yaml")
+	geo2 := loadComposeConfig(t, "../../docker/config.agent.yaml")
+	workerCore := loadComposeConfig(t, "../../docker/config.worker-core.yaml")
+
+	for name, executor := range map[string]*config.Config{"geo1 worker": geo1, "geo2 agent": geo2} {
+		if central.Secrets.EnvelopeEnforced() != executor.Secrets.EnvelopeEnforced() {
+			t.Errorf("the geo topology disagrees with itself: config.geo.yaml enforces=%v and the %s enforces=%v — "+
+				"an API that enforces envelopes publishes on a carrier an executor that does not will never bind",
+				central.Secrets.EnvelopeEnforced(), name, executor.Secrets.EnvelopeEnforced())
+		}
+		if executor.Security.EncryptionKey != "" {
+			t.Errorf("%s config carries the at-rest master; an executor holds only its own region's dispatch keys", name)
+		}
+		if len(executor.Security.PreviousKeys) != 0 {
+			t.Errorf("%s config carries at-rest previous_keys", name)
+		}
+	}
+	if central.Security.EncryptionKey == "" {
+		t.Error("the geo CENTRAL config has no at-rest master; nothing can materialize a credential")
+	}
+
+	// Each executor holds its own region and NOTHING else. A geo1 worker that also held geo2's key
+	// would make the network isolation this stack demonstrates cosmetic.
+	for _, tc := range []struct {
+		name     string
+		executor *config.Config
+		region   string
+	}{
+		{"geo1 worker", geo1, "geo1"},
+		{"geo2 agent", geo2, "geo2"},
+	} {
+		regions := tc.executor.Security.Dispatch.Regions
+		if len(regions) != 1 {
+			t.Errorf("%s holds %d dispatch keyrings, want exactly its own", tc.name, len(regions))
+		}
+		mine, ok := regions[tc.region]
+		if !ok {
+			t.Fatalf("%s holds no keyring for %s", tc.name, tc.region)
+		}
+		theirs, ok := central.Security.Dispatch.Regions[tc.region]
+		if !ok {
+			t.Fatalf("config.geo.yaml publishes no keyring for %s", tc.region)
+		}
+		if mine.Primary.ID != theirs.Primary.ID || mine.Primary.Key != theirs.Primary.Key {
+			t.Errorf("%s holds key %q for %s while the central site publishes with %q: a keyring that "+
+				"does not match seals payloads nobody can open", tc.name, mine.Primary.ID, tc.region, theirs.Primary.ID)
+		}
+	}
+
+	// The core region is shared with the distributed topology through one file.
+	centralCore, ok := central.Security.Dispatch.Regions["core"]
+	if !ok {
+		t.Fatal("config.geo.yaml publishes no keyring for core, but this compose mounts config.worker-core.yaml")
+	}
+	workerCoreKey, ok := workerCore.Security.Dispatch.Regions["core"]
+	if !ok {
+		t.Fatal("config.worker-core.yaml holds no core keyring")
+	}
+	if centralCore.Primary.ID != workerCoreKey.Primary.ID || centralCore.Primary.Key != workerCoreKey.Primary.Key {
+		t.Errorf("the geo central site publishes core key %q while config.worker-core.yaml — mounted by BOTH "+
+			"topologies — holds %q", centralCore.Primary.ID, workerCoreKey.Primary.ID)
+	}
+}
+
 func TestDevRoleConfigsKeepAtRestMasterOutOfWorker(t *testing.T) {
 	devPath := filepath.Join("..", "..", "docker", "config.dev.yaml")
 	dev, err := config.Load(devPath)
@@ -338,7 +426,12 @@ func TestMakefileDryRunTopologyExpansion(t *testing.T) {
 				"--env-file docker/.env.geo -f docker/docker-compose.geo.yml",
 				"run --rm --no-deps api migrate",
 				"up -d --no-deps scheduler api worker-core",
-				"up -d --no-deps worker-geo1 worker-geo2",
+				// The credentialed TARGETS are named here with the workers, and this assertion is
+				// why: `--no-deps` means a service that is defined and profiled but not LISTED
+				// simply never runs. `redis-geo1`/`redis-geo2` were declared, documented and absent
+				// on their first live run for exactly that reason, and this guard caught the
+				// Makefile edit that fixed it — which is the guard doing its job, not resisting.
+				"up -d --no-deps redis-geo1 redis-geo2 worker-geo1 worker-geo2",
 				"http://worker-geo1:8080/readyz",
 				"http://worker-geo2:8080/readyz",
 			},

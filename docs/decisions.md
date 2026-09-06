@@ -7983,3 +7983,35 @@ authorizes no VCS action, and he says so. `DONE` is the maintainer's assertion o
 - And a process one: nearly every finding was on the fix for the previous finding, and every
   mutation was aimed at the single view nothing covered. Where a reviewer keeps aiming is where
   the coverage is not.
+
+**The three items D-0246 left open are closed (2026-09-06, `iter-0178` §10).**
+
+**A refusal is answered rather than waited out — the owner's decision** on the one item the reviewer
+fenced as a wire-behaviour change. A refused test dispatch used to be met with silence, so the
+caller spent its RPC timeout and reported `no worker responded in region …` — what an EMPTY region
+reports. Both dispositions are kept because they answer different people: the reply for the operator
+waiting, the dead letter for whoever investigates. The bounded probe-error vocabulary is not
+widened. Four mutations; one of them, an EMPTY reason, survived the first assertion because it
+checked only the prefix.
+
+**Credentialed dispatch is exercised in geo, on both remote transports.** The gap was that the geo
+stack ran entirely on generation-1 carriers — the topology that reproduces a real geo boundary
+proved nothing about the mechanism that boundary protects. The credentialed target now lives INSIDE
+each region, because a shared target on the central network shows that a credential travels and not
+that it travels to the right place. Five config mutations killed.
+
+**The dead-letter label item was STALE.** It had been guarded since `1bf072f`, when the reviewer's
+P1 about durable dead-letter evidence was answered; the open list was simply not updated. A stale
+open item is a stale count pointed the other way — it claims work that does not exist. Recorded as
+a correction, with nothing written for it.
+
+**Two defects of this session's own, found only by the live run**, both the class this iteration is
+named for — defined, documented and never started: `geo-up-all` did not list the new targets in its
+`--no-deps` set, and they took the compose's logging anchor without its capability anchor, so
+redis's entrypoint died on `setpriv`. **The first red run is what proved the mechanism**: the
+heartbeat said `lookup redis-geo1 … server misbehaving`, which means the credential had reached the
+region and the envelope had opened, and only the target was absent.
+
+**And the instrumentation lied before the product did.** The diagnostic polled a column that does
+not exist with its errors suppressed, so every query failed silently and read as "no rows". Found
+by removing `2>/dev/null`. A diagnostic with its errors hidden is not evidence.

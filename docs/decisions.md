@@ -8015,3 +8015,28 @@ region and the envelope had opened, and only the target was absent.
 **And the instrumentation lied before the product did.** The diagnostic polled a column that does
 not exist with its errors suppressed, so every query failed silently and read as "no rows". Found
 by removing `2>/dev/null`. A diagnostic with its errors hidden is not evidence.
+
+**`iter-0178` CLOSED 2026-09-06, by the OWNER.** He asked what closing required, was given the list
+— one stale operator instruction and three record gaps — and gave the word once it was worked
+through. The attribution is the substance of this line, not its form: the independent reviewer
+returned two results during this iteration (no P0/P1 in the audited slice `0a1557c..d0a8fed`, and
+none in the NFR-025 contract review), and **an audit result is not closure authority**. He said so
+on every one of them. `iter-0177` was once marked closed on a result of that exact shape and three
+more findings arrived afterwards; that is why the record names a person.
+
+**The list that closing actually required** is worth keeping, because only one item on it was a
+defect and the other three were the gap between a working tree and a trustworthy record:
+
+- the runbook told operators that a Test Connection reporting `no worker responded` after the full
+  timeout means the consumer REFUSED the delivery. That inverted the moment a refusal started
+  answering — this iteration's own change, four hours earlier. An operator would have hunted a
+  refusal that did not happen;
+- the CHANGELOG's Fixed section covered the first two defects and not the envelope downgrade, the
+  answered refusal, or the zone-free controls;
+- `overview.md` described a far geo without saying that a credentialed monitor there needs its
+  region's own dispatch key, that an executor config carrying the at-rest master is refused at
+  startup, or that both halves must agree on `dispatch_envelope`;
+- `traceability.md`'s FR-020 row stopped at the two repairs.
+
+**Closure is not a release.** No tag, push or release is authorized by it; `CHANGELOG.md` still
+opens with `[Unreleased]`, which is accurate — `v0.1.8` remains the newest tag in the repository.

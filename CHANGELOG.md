@@ -308,8 +308,30 @@ due and never happened" — so no rendering could honestly connect two points ac
   the same message an empty region gives. The queue is the generation now, as it already was on the
   jobs path, and a table-driven regression publishes on every carrier an executor serves.
 
-<sub>iter-0178, `D-0246` · `make dev-test-distributed` 11 passed / 1 skipped · geo topology 13 passed
-· `make secret-smoke` and `make mac-smoke` green · **not a release: nothing here is tagged**</sub>
+- **An envelope OLDER than its carrier defines was accepted on every path.** The mapping is
+  explicit — carrier generation 2 carries envelope v1, generation 3 carries v2 — and the producer
+  had implemented it exactly since generation 3 shipped, while every consumer enforced only a
+  floor. So a generation-1 envelope on a generation-3 carrier opened normally and its credential
+  reached the prober WITHOUT the execution-body binding that generation exists to add: the property
+  that stops a credential being replayed against a different target. One owner holds the mapping
+  now, the gate every executor crosses refuses a mismatch, and both AMQP consumers dead-letter it.
+- **A refused dispatch is answered instead of being met with silence.** It used to publish nothing,
+  so the caller waited out its RPC timeout and reported `no worker responded in region …` — the
+  same sentence an EMPTY region gives, which made a refused delivery indistinguishable from a dead
+  region. It now returns a typed reason immediately, from the same bounded vocabulary executors
+  already answer with, and the poison body is still dead-lettered for inspection. **If you alert on
+  Test Connection latency, refusals stop costing a full timeout.**
+- **Every operator-typed timestamp control now names the zone it is read in.** Maintenance windows,
+  gate overrides, backfill instants and the instance-silence deadline are entered in controls whose
+  HTML value carries no offset, and they said only "Starts", "Ends", "Until", "from". The date
+  ranges on the change and gate-decision views are read as UTC calendar days and said only
+  "From"/"To". Each now states its interpretation, with the offset resolved AT the instant typed, so
+  a window entered across a DST change is not labelled with the wrong one.
+
+<sub>iter-0178, `D-0246` · `make dev-test-distributed` 11 passed / 1 skipped · geo topology 14
+passed, including credentialed dispatch on both remote transports — a path no geo run exercised
+before · `make secret-smoke` and `make mac-smoke` green · **not a release: nothing here is
+tagged**</sub>
 
 ---
 

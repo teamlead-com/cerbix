@@ -643,6 +643,34 @@ prober:
   allow_private_ips: true                    # internal geo-1 targets
 ```
 
+**A credentialed monitor in a far geo** (FR-020) needs the region's own dispatch key, and nothing
+else: the executor there opens a `credential_envelope` sealed for its region and never sees the
+at-rest master, which stays on the core. Give the central config one keyring per region under
+`security.dispatch.regions`, and each remote executor only its own:
+
+```yaml
+# CORE only — the at-rest master plus one dispatch keyring per region
+security:
+  encryption_key: "…"                      # never leaves the core
+  dispatch:
+    regions:
+      geo1: { primary: { id: "geo1-2026a", key: "…" } }
+
+# in geo-1, the worker gets ITS region and nothing more
+security:
+  dispatch:
+    regions:
+      geo1: { primary: { id: "geo1-2026a", key: "…" } }
+secrets: { enabled: true, dispatch_envelope: "enforced" }
+```
+
+The rule the loader enforces: a `worker` or `agent` config carrying `security.encryption_key` is
+REFUSED at startup. A leaked remote executor therefore exposes at most its own region's payloads.
+Both halves must also agree on `dispatch_envelope` — an API that enforces envelopes publishes on a
+carrier a non-enforcing executor never binds, and the symptom is
+`no worker queue for region "…" (AMQP 312 NO_ROUTE)`. `make geo-up-all` demonstrates all of it,
+with a password-protected target inside each region.
+
 **Rules and nuances:**
 
 - Existing monitors = `core` (migration), keep running on the central workers as before.

@@ -8,9 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [v0.1.9] - 2026-09-07
 
-Everything since `v0.1.8`, in three parts and one set of fixes: the **typed external canary** and
+Everything since `v0.1.8`, in four parts and one set of fixes: the **typed external canary** and
 the audit trail that were prepared under this number once before, the **truthful-rendering**
-package, and the **expected-run ledger**.
+package, the **expected-run ledger**, and the **fifty-two repairs** an independent two-axis review
+of this whole range then found in it.
 
 **This heading was `[v0.1.9] - 2026-09-03` before, and it was withdrawn.** The tag had been created
 and then deleted by hand before the review that gates it closed (`8ee023c docs(v0.1.9): the tag is
@@ -409,8 +410,11 @@ which is why it carries an iteration number and no `FR-`. Three of the findings 
 <sub>iter-0179, `D-0247` · 52 of 52 discharge rows built, each `behaviour` row with a recorded
 killing mutation · independent review COMPLETE, 52 of 52, no open findings · full `-race` 33
 packages exit 0 (`internal/store` 755.8 s) · `make docs-check` OK · SPA 683 tests at UTC and
-`Asia/Kolkata` · `make dev-test` 70 passed / 1 skipped · `make geo-test` 14 passed · `iter-0179`
-OPEN, and its closure is the owner's</sub>
+`Asia/Kolkata` · `make dev-test` 70 passed / 1 skipped on an image rebuilt from the CLOSING tree,
+verified by CONTENT rather than by build timestamp — the live server serves the closing SPA build
+and answers the pre-E4 asset with the index fallback · `make geo-test` 14 passed,
+run by the independent reviewer on a stack raised for him · `iter-0179` CLOSED by the owner, on his
+word and not on the review's result</sub>
 
 ---
 

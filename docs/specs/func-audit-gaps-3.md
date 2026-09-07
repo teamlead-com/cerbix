@@ -1,6 +1,6 @@
 # Spec: Audit gap package 3 — the post-v0.1.8 review (func-audit-gaps-3)
 
-> **Status: IMPLEMENTED at `iter-0179`, decision `D-0247`. NOT COMMITTED. The independent
+> **Status: IMPLEMENTED at `iter-0179`, decision `D-0247`, COMMITTED at `4cfae43`. The independent
 > implementation review is COMPLETE — all 52 items reviewed, no open findings (party [381]) — and
 > the reviewer states that this closes neither the iteration nor a commit, status or release.** The package carries NO requirement number, and that is the precedent rather
 > than an omission: neither `func-audit-gaps.md` (iter-0044) nor `func-audit-gaps-2.md`

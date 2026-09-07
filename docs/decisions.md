@@ -8049,9 +8049,12 @@ Two sentences above are superseded by this one and are left standing as the reco
 true when they were written: this decision says the top section "is `[Unreleased]` now", and the
 closure note says the file "opens with `[Unreleased]`, which is accurate". Both were true through
 the whole of `iter-0178`. **After the closure the owner asked for the section to be versioned**, and
-it was set to `## [v0.1.9] - 2026-09-06`. The date moved to `2026-09-07` when the release was cut,
-which is the day the tag was authorized; the heading is the only place that date lives, because
-`build.yml` publishes that section as the release body.
+it was set to `## [v0.1.9] - 2026-09-06`. The owner later moved the date to `2026-09-07`; that is the
+whole of what happened, and an earlier version of this sentence said the date moved "when the release
+was cut, which is the day the tag was authorized" — **neither is true: no `v0.1.9` tag exists and no
+release has been cut.** The heading is the only place that date lives, because `build.yml` publishes
+that section verbatim as the release body for the matching tag, which is the reason the date is worth
+getting right and not a claim that the tag exists.
 
 `iter-0178`'s lifecycle line still says the top section is `[Unreleased]`. That is deliberate: it
 was true at the moment of closure, and a closed report is a record of a moment rather than a live

@@ -5,7 +5,7 @@ import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
-import { instantRangeLabel, localInputRangeZoneHint, localInputZoneHint } from "@/lib/wallclock";
+import { instantRangeLabel, localInputRangeZoneHint, localInputValue, localInputZoneHint } from "@/lib/wallclock";
 import { isoInstant } from "@/lib/datekeys";
 
 type Channel = components["schemas"]["NotificationChannel"];
@@ -215,7 +215,11 @@ function startEditSchedule(sc: Schedule) {
   editingScheduleName.value = sc.name ?? "";
   scheduleForm.name = sc.name ?? "";
   scheduleForm.shift_seconds = sc.shift_seconds ?? 604800;
-  scheduleForm.anchor_at = sc.anchor_at ? sc.anchor_at.slice(0, 16) : "";
+  // E1: the instant RENDERED in the viewer's zone, never a slice of the RFC-3339 string. A
+  // `datetime-local` control is read as local, and the save path below parses it as local — so a
+  // sliced UTC instant moved the rotation anchor by the viewer's offset on every save, and editing
+  // a schedule's NAME silently re-ordered who gets paged.
+  scheduleForm.anchor_at = localInputValue(sc.anchor_at);
   scheduleForm.participants = [...(sc.participants ?? [])];
   scheduleError.value = "";
 }

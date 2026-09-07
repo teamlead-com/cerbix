@@ -206,20 +206,23 @@ type Store struct {
 	expectedRunGapCap        int
 }
 
-// WithExpectedRunPolicy sets the ledger's retention window and per-monitor gap cap. Out-of-range
-// and zero values take the defaults rather than being clamped silently at the store: the config
-// layer refuses an out-of-range value before business logic starts (AGENTS.md), so anything
-// arriving here outside the bounds is a caller that never went through config — a test, or a role
-// that forgot to wire it — and the default is the honest answer for both.
+// WithExpectedRunPolicy sets the ledger's retention window and per-monitor gap cap. An
+// out-of-range value is REFUSED — left unset, so the reader below answers the default — rather than
+// clamped silently: the config layer rejects one before business logic starts (AGENTS.md), so
+// anything arriving here outside the bounds is a caller that never went through config, which is a
+// test or a role that forgot to wire it.
+//
+// F1: this used to name `domain.Default…` itself, which made it one of five sites resolving the
+// same number. The DEFAULT now lives in the config loader and, for a store nobody wired, in the two
+// readers below — one place for the configured path and one for the unconfigured one, rather than a
+// third copy in the middle of them.
 func (s *Store) WithExpectedRunPolicy(retentionDays, gapWindowsMax int) *Store {
-	if retentionDays < domain.MinExpectedRunRetentionDays || retentionDays > domain.MaxExpectedRunRetentionDays {
-		retentionDays = domain.DefaultExpectedRunRetentionDays
+	if retentionDays >= domain.MinExpectedRunRetentionDays && retentionDays <= domain.MaxExpectedRunRetentionDays {
+		s.expectedRunRetentionDays = retentionDays
 	}
-	if gapWindowsMax < domain.MinExpectedRunGapWindowsMax || gapWindowsMax > domain.MaxExpectedRunGapWindowsMax {
-		gapWindowsMax = domain.DefaultExpectedRunGapWindowsMax
+	if gapWindowsMax >= domain.MinExpectedRunGapWindowsMax && gapWindowsMax <= domain.MaxExpectedRunGapWindowsMax {
+		s.expectedRunGapCap = gapWindowsMax
 	}
-	s.expectedRunRetentionDays = retentionDays
-	s.expectedRunGapCap = gapWindowsMax
 	return s
 }
 
@@ -239,14 +242,21 @@ func (s *Store) ExpectedRunRetentionDays() int {
 	return s.expectedRunRetentionDays
 }
 
-// expectedRunRetentionDaysOrDefault is the internal spelling, kept so the store's own call sites
-// read as store internals rather than as calls into its public surface.
-func (s *Store) expectedRunRetentionDaysOrDefault() int { return s.ExpectedRunRetentionDays() }
-
-// expectedRunRetention is the same window as a duration, for the callers that compute the floor in
-// Go — §7.1's advance, whose upper bound is the leader's own instant, and the ingest correlation.
-func (s *Store) expectedRunRetention() time.Duration {
-	return time.Duration(s.expectedRunRetentionDaysOrDefault()) * 24 * time.Hour
+// ExpectedRunRetentionCutoff is the ONE instant that says how far back the ledger reaches, and it
+// is MIDNIGHT-ALIGNED because that is what the purge actually does.
+//
+// C8. There were two answers. The purge drops a dated partition once its whole range is past
+// `now.Truncate(24h) - days`, while the correlation floor and the gap clip used a rolling
+// `now - days`. Between the two — up to a day wide, and widest just before midnight — sat windows
+// that were still stored, still returned by the read API, and refused by the correlation gate: a
+// result answering one of them was rejected as "outside retention" for a row an operator could see
+// on the screen beside it. The gap clip disagreed in the same band, refusing to materialize a
+// missed window on the grounds that it "would be dropped unread" when nothing was going to drop it.
+//
+// One formula, three readers: the purge that enforces it, the correlation that must not refuse what
+// is kept, and §7.1's clip that must not skip what is kept.
+func (s *Store) ExpectedRunRetentionCutoff(now time.Time) time.Time {
+	return now.UTC().Truncate(24*time.Hour).AddDate(0, 0, -s.ExpectedRunRetentionDays())
 }
 
 // expectedRunGapWindowsMax is the per-monitor cap, defaulted for a store nobody wired.

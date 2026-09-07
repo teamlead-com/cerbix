@@ -65,7 +65,12 @@ type ExpectationAdvance struct {
 	// already written to its in-memory nextRun map. Persisting the instant the leader ALREADY
 	// computes is what keeps invariant 1 true: no monitor's probe instant changes.
 	NextDue time.Time
-	// IntervalInForce is the monitor's real effective interval in seconds — never a backoff delay.
+	// IntervalInForce is the interval that PRODUCED NextDue, which is §6.2's own definition of the
+	// column it writes. For an ordinary advance that is the monitor's effective interval; for a
+	// credential BACKOFF it is the delay, because the delay is what produced the instant (C5). It
+	// used to be documented as "never a backoff delay", and the schedule then claimed a cadence
+	// step across a jump the cadence did not make: the instants between were on no grid, and the
+	// window at the far end carried a lateness threshold shorter than the span that spaced it.
 	IntervalInForce int
 	// CarrierGeneration is the carrier the PUBLISHER selected for this job, and it is meaningful
 	// only alongside a JobID. It is never recovered from a payload: on AMQP it is the queue the
@@ -308,8 +313,23 @@ current_window AS (
            -- new_interval: that one spaces the NEXT window (invariant 20c).
            p.interval_in_force
       FROM picked p
+    -- C2: DO NOTHING, and therefore RETURNING. The gate that lets a job leave the process used to
+    -- read the rows the SCHEDULE UPDATE returned, which is a different set: the update runs for
+    -- every picked monitor, while this insert writes nothing when a row for that monitor and that
+    -- due instant already exists. A repeated due instant -- a leader restart, or a
+    -- confirm-accelerated tick landing on the same instant -- therefore passed the gate, published
+    -- a job with a NEW identity, and left the window row carrying the OLD one. The result then
+    -- correlates to nothing and the run is recorded nowhere: the ordering invariant broken on a
+    -- path that reports success.
+    --
+    -- These rows are the windows THIS statement wrote, and they are what the outer SELECT returns.
     ON CONFLICT (monitor_id, due_at) DO NOTHING
-),` + expectedRunGapCTESQL("$6", "$7", "$8") + `
+    RETURNING monitor_id, due_at
+),` + expectedRunGapCTESQL("$6", "$7", "$8") + `,
+-- The schedule still advances for EVERY picked monitor, including one whose window was already
+-- there: the instant was reserved by an earlier tick, and leaving next_due_at behind would make the
+-- monitor pick the same instant again for ever. What narrows is the RETURN, not the advance.
+advanced AS (
 UPDATE monitor_schedule s
    -- The THREE columns that describe one instant are written by ONE statement, always. That is an
    -- amendment to §7.1 and it fixes a real over-claim the spec's own shape produced: §6.2 defines
@@ -337,12 +357,20 @@ UPDATE monitor_schedule s
   FROM picked p
   LEFT JOIN fence f ON f.monitor_id = p.monitor_id
  WHERE s.monitor_id = p.monitor_id
+RETURNING s.monitor_id
+)
 -- The identities this statement DURABLY reserved, and the reason it must return them rather than a
 -- count: a count cannot say WHICH items the fence refused, and the caller's next act is to publish
 -- the jobs these rows describe. Publishing on a count is publishing on an assumption — with a
 -- partial result the caller would send a job whose window was never written, which is the ordering
 -- invariant broken on the one path that looks like success (reviewer P0 at party [28]).
-RETURNING s.monitor_id, p.due_at`
+--
+-- The JOIN is the second half of that, and it is C2: an item qualifies when its WINDOW ROW was
+-- written here AND its schedule moved. Reading the update alone answered a different question —
+-- "did the schedule advance" — which is true for a monitor whose window belongs to another job.
+SELECT w.monitor_id, w.due_at
+  FROM current_window w
+  JOIN advanced a ON a.monitor_id = w.monitor_id`
 
 // ReserveExpectations moves every given monitor's expectation forward, writing the window it
 // answers, the windows it skipped past and the truncation fence in the SAME statement. It returns
@@ -370,61 +398,83 @@ RETURNING s.monitor_id, p.due_at`
 // in. That is deliberate: §10's segment close needs exactly the same two bounds from a different
 // role's process, and a value each caller supplied for itself is a bound two callers would
 // eventually disagree about — the shape of every divergence this design has been bitten by.
-func (s *Store) ReserveExpectations(ctx context.Context, now time.Time, items []ExpectationAdvance) ([]ExpectationReservation, error) {
+func (s *Store) ReserveExpectations(ctx context.Context, now time.Time, items []ExpectationAdvance) ([]ExpectationReservation, []ExpectationRejection, error) {
 	if len(items) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	gapCap, retentionFloor := s.expectedRunGapWindowsMax(), now.Add(-s.expectedRunRetention())
-	monitorIDs := make([]string, len(items))
-	jobIDs := make([]*string, len(items))
-	skipReasons := make([]*string, len(items))
-	nextDue := make([]time.Time, len(items))
-	intervals := make([]int32, len(items))
-	carriers := make([]*int32, len(items))
-	expectedDue := make([]time.Time, len(items))
-	expectedRev := make([]int64, len(items))
-	regions := make([]string, len(items))
-	confirming := make([]bool, len(items))
-	reservedAt := make([]*time.Time, len(items))
-	for i, it := range items {
+	// The MIDNIGHT-ALIGNED cutoff, the same one the purge enforces and the correlation reads (C8).
+	// A rolling floor here refused to materialize a missed window on the grounds that it "would be
+	// dropped unread" when nothing was going to drop it for up to another day.
+	gapCap, retentionFloor := s.expectedRunGapWindowsMax(), s.ExpectedRunRetentionCutoff(now)
+	monitorIDs := make([]string, 0, len(items))
+	jobIDs := make([]*string, 0, len(items))
+	skipReasons := make([]*string, 0, len(items))
+	nextDue := make([]time.Time, 0, len(items))
+	intervals := make([]int32, 0, len(items))
+	carriers := make([]*int32, 0, len(items))
+	expectedDue := make([]time.Time, 0, len(items))
+	expectedRev := make([]int64, 0, len(items))
+	regions := make([]string, 0, len(items))
+	confirming := make([]bool, 0, len(items))
+	reservedAt := make([]*time.Time, 0, len(items))
+	var rejected []ExpectationRejection
+	for _, it := range items {
+		// C1: per ELEMENT, which is what `Validate`'s own comment already promised. The bad item is
+		// left OUT of the statement and reported; the rest of the batch proceeds. Returning here
+		// made one unrepresentable item hold every ledgered dispatch, on this tick and — because
+		// the held payload is re-submitted unchanged — on every tick after it.
 		if err := it.Validate(); err != nil {
-			return nil, err
+			rejected = append(rejected, ExpectationRejection{MonitorID: it.MonitorID, Reason: err.Error()})
+			continue
 		}
-		monitorIDs[i] = it.MonitorID
+		monitorIDs = append(monitorIDs, it.MonitorID)
+		var jobID *string
+		var carrier *int32
+		var reserved *time.Time
 		if it.JobID != "" {
 			job := it.JobID
-			jobIDs[i] = &job
-			carrier := int32(it.CarrierGeneration)
-			carriers[i] = &carrier
+			jobID = &job
+			c := int32(it.CarrierGeneration)
+			carrier = &c
 			// The minted instant travels with the identity it belongs to. A skipped window has no
 			// job and therefore no reservation, which is what §6.1's biconditional already says
 			// about the pair beside it.
-			reserved := it.ReservedAt
-			reservedAt[i] = &reserved
+			at := it.ReservedAt
+			reserved = &at
 		}
+		jobIDs = append(jobIDs, jobID)
+		carriers = append(carriers, carrier)
+		reservedAt = append(reservedAt, reserved)
+		var skip *string
 		if it.SkipReason != "" {
 			reason := it.SkipReason
-			skipReasons[i] = &reason
+			skip = &reason
 		}
-		nextDue[i] = it.NextDue
-		intervals[i] = int32(it.IntervalInForce)
-		expectedDue[i] = it.ExpectedDue
-		expectedRev[i] = it.ExpectedRevision
-		regions[i] = it.Region
-		confirming[i] = it.Confirming
+		skipReasons = append(skipReasons, skip)
+		nextDue = append(nextDue, it.NextDue)
+		intervals = append(intervals, int32(it.IntervalInForce))
+		expectedDue = append(expectedDue, it.ExpectedDue)
+		expectedRev = append(expectedRev, it.ExpectedRevision)
+		regions = append(regions, it.Region)
+		confirming = append(confirming, it.Confirming)
+	}
+	// Every item was unrepresentable. There is nothing to reserve, and running the statement with
+	// empty arrays would be a query that answers a question nobody asked.
+	if len(monitorIDs) == 0 {
+		return nil, rejected, nil
 	}
 	rows, err := s.pool.Query(ctx, reserveExpectationsSQL,
 		monitorIDs, jobIDs, skipReasons, nextDue, intervals,
 		now, gapCap, retentionFloor, carriers, expectedDue, expectedRev, regions, confirming, reservedAt)
 	if err != nil {
-		return nil, fmt.Errorf("store: reserve expectations: %w", err)
+		return nil, nil, fmt.Errorf("store: reserve expectations: %w", err)
 	}
 	defer rows.Close()
 	out := make([]ExpectationReservation, 0, len(items))
 	for rows.Next() {
 		var r ExpectationReservation
 		if err := rows.Scan(&r.MonitorID, &r.DueAt); err != nil {
-			return nil, fmt.Errorf("store: scan reservation: %w", err)
+			return nil, nil, fmt.Errorf("store: scan reservation: %w", err)
 		}
 		out = append(out, r)
 	}
@@ -432,9 +482,9 @@ func (s *Store) ReserveExpectations(ctx context.Context, now time.Time, items []
 		// The rows are the RESULT, so a failure part-way through reading them is a failure to know
 		// what was reserved — and a caller that publishes on a partial read is the defect this
 		// return type exists to remove.
-		return nil, fmt.Errorf("store: reserve expectations: %w", err)
+		return nil, nil, fmt.Errorf("store: reserve expectations: %w", err)
 	}
-	return out, nil
+	return out, rejected, nil
 }
 
 // ExpectationReservation is one window this statement durably wrote: the key the caller must match
@@ -442,6 +492,22 @@ func (s *Store) ReserveExpectations(ctx context.Context, now time.Time, items []
 type ExpectationReservation struct {
 	MonitorID string
 	DueAt     time.Time
+}
+
+// ExpectationRejection is one item the batch REFUSED before the statement ran, and why.
+//
+// C1. `Validate` is called for every element, and its own comment says why: "a single bad element
+// aborts the whole tick's statement and would take every other monitor's evidence down with it".
+// The loop returned on the first failure anyway, so a single unrepresentable item became a batch
+// error — and the scheduler reads a batch error as "hold every ledgered dispatch this tick". One
+// bad monitor therefore stopped all ledgered probing, and, because the held payload is re-submitted
+// unchanged, it stopped it again on the next tick and every tick after.
+//
+// A rejected item is reported rather than merely dropped, because the caller is the only party that
+// can say which monitor it was and count it: this package has no logger and no metrics.
+type ExpectationRejection struct {
+	MonitorID string
+	Reason    string
 }
 
 // The withholding vocabulary (§7.4). A reserved window that never became a published one says WHY,
@@ -479,11 +545,26 @@ type ExpectationConfirm struct {
 	// its `reserved` verdict and carries the reason, because a publish that failed is not a run
 	// that was issued and is not a window nothing was due in.
 	WithheldReason string
+	// IssuedAt is the instant THIS job was published, taken at the publish and carried here.
+	//
+	// C7: the statement used to write the tick's own clock for every item in the batch. That clock
+	// is read at the START of the tick, before the snapshot refresh, before the authoritative read,
+	// before the reserve and before every publish in it — so `issued_at` was systematically EARLIER
+	// than the moment the job left the process, and lateness, measured as `issued_at - due_at`, was
+	// systematically SMALLER than the truth. Every other trade in this design points its residual
+	// at withholding; that one pointed at over-claiming, which the design says in as many words it
+	// refuses.
+	//
+	// It travels per ITEM rather than as one batch instant because the batch's publishes are not
+	// simultaneous: a slow region's job leaves long after a fast one's, and one instant for both
+	// would be wrong for at least one of them by construction. Ignored for a withheld confirm,
+	// which writes no issue instant at all.
+	IssuedAt time.Time
 }
 
 // confirmExpectationsSQL is §7.4's CONFIRM.
 //
-// $1 monitor_id[]  $2 due_at[]  $3 job_id[]  $4 withheld_reason[]  $5 now
+// $1 monitor_id[]  $2 due_at[]  $3 job_id[]  $4 withheld_reason[]  $5 issued_at[]
 //
 // `issued_at` is written HERE and nowhere else. The predicate carries the identity binding of
 // §7.4 — a row is confirmed only if it is still the row this job reserved — and `issued_at IS NULL`
@@ -492,12 +573,16 @@ type ExpectationConfirm struct {
 // the reserve, where its name would have become false.
 var confirmExpectationsSQL = `
 WITH v AS (
-    SELECT * FROM unnest($1::uuid[], $2::timestamptz[], $3::uuid[], $4::text[])
-        AS t(monitor_id, due_at, job_id, withheld_reason)
+    SELECT * FROM unnest($1::uuid[], $2::timestamptz[], $3::uuid[], $4::text[], $5::timestamptz[])
+        AS t(monitor_id, due_at, job_id, withheld_reason, issued_at)
 ),
 confirmed AS (
     UPDATE expected_runs e
-       SET issued_at       = CASE WHEN v.withheld_reason = '' THEN $5::timestamptz ELSE e.issued_at END,
+       -- PER ITEM (C7). The instant is the one taken when THIS job was published, not the tick's
+       -- start clock: the tick reads its clock before the snapshot refresh, the authoritative read,
+       -- the reserve and every publish in it, so a single batch instant shrank every measured
+       -- lateness -- the one direction this design says it refuses.
+       SET issued_at       = CASE WHEN v.withheld_reason = '' THEN v.issued_at ELSE e.issued_at END,
            withheld_reason = v.withheld_reason
       FROM v
      WHERE e.monitor_id = v.monitor_id
@@ -505,13 +590,16 @@ confirmed AS (
        AND e.job_id     = v.job_id
        AND e.reserved_at IS NOT NULL
        AND e.issued_at IS NULL
-    RETURNING e.monitor_id, v.withheld_reason AS withheld_reason
+    RETURNING e.monitor_id, v.withheld_reason AS withheld_reason, v.issued_at AS issued_at
 ),
 -- Data-modifying CTEs run to completion whether or not the primary query reads them, so the
 -- schedule moves even though the count below comes from the confirmed set.
 scheduled AS (
     UPDATE monitor_schedule s
-       SET last_issued_at = $5::timestamptz,
+       -- The same instant, from the same source: "the last instant a job was PUBLISHED" is a claim
+       -- about the publish, so re-reading the tick's clock here would restate C7's defect in the
+       -- column whose name promises otherwise.
+       SET last_issued_at = c.issued_at,
            updated_at     = statement_timestamp()
       FROM confirmed c
      WHERE s.monitor_id = c.monitor_id AND c.withheld_reason = ''
@@ -539,6 +627,7 @@ func (s *Store) ConfirmExpectations(ctx context.Context, now time.Time, items []
 	dueAt := make([]time.Time, len(items))
 	jobIDs := make([]string, len(items))
 	reasons := make([]string, len(items))
+	issuedAt := make([]time.Time, len(items))
 	for i, it := range items {
 		if it.MonitorID == "" || it.JobID == "" || it.DueAt.IsZero() {
 			return 0, fmt.Errorf("store: expectation confirm %d is missing its window identity", i)
@@ -548,10 +637,22 @@ func (s *Store) ConfirmExpectations(ctx context.Context, now time.Time, items []
 				it.MonitorID, it.WithheldReason)
 		}
 		monitorIDs[i], dueAt[i], jobIDs[i], reasons[i] = it.MonitorID, it.DueAt.UTC(), it.JobID, it.WithheldReason
+		// A successful confirm MUST carry the instant its job was published (C7). Falling back to
+		// the tick's clock would be the defect with a nil check in front of it, so it is refused
+		// instead: the caller owns the publish and is the only party that can observe it.
+		issuedAt[i] = it.IssuedAt.UTC()
+		if it.WithheldReason == "" && it.IssuedAt.IsZero() {
+			return 0, fmt.Errorf("store: expectation confirm for %s reports a publish with no instant", it.MonitorID)
+		}
+		if it.IssuedAt.IsZero() {
+			// A withheld confirm writes no issue instant; the array still needs a value, and `now`
+			// is the honest one for a column nothing reads on this path.
+			issuedAt[i] = now.UTC()
+		}
 	}
 	var confirmed int
 	if err := s.pool.QueryRow(ctx, confirmExpectationsSQL,
-		monitorIDs, dueAt, jobIDs, reasons, now.UTC()).Scan(&confirmed); err != nil {
+		monitorIDs, dueAt, jobIDs, reasons, issuedAt).Scan(&confirmed); err != nil {
 		return 0, fmt.Errorf("store: confirm expectations: %w", err)
 	}
 	return confirmed, nil
@@ -679,7 +780,8 @@ func (s *Store) EnsureExpectedRunPartitions(ctx context.Context, ahead int) erro
 //
 // Every field is either minted by the CORE and copied back verbatim by the executor (DueAt, JobID,
 // IssuedAt) or read from the monitor's own row. NOTHING here is an executor's invention, and the
-// carrier is the one field where that took a correction — see terminalCarrierGeneration.
+// carrier is the one field where that took a correction — see the note above
+// `fillExpectedRunTerminalSQL`.
 type expectedRunTerminal struct {
 	MonitorID string
 	DueAt     time.Time
@@ -695,8 +797,12 @@ type expectedRunTerminal struct {
 	Outcome string
 }
 
-// terminalCarrierGeneration is the carrier a correlatable result proves, and the source is a
-// finding rather than a transcription.
+// The carrier a correlatable result proves is `domain.LedgerMinCarrier`, written at the call site
+// below rather than wrapped in a function of its own (G6). The wrapper existed only to give this
+// note somewhere to live, and a function whose body is a constant is a name a reader has to follow
+// to learn nothing. The note is what mattered, so it stays; the indirection does not.
+//
+// The source of that carrier is a finding rather than a transcription.
 //
 // §8.3 names `dispatch.DeliveredJob.CarrierGeneration` — the transport adapter's observation of
 // the queue or claimed row a job arrived on. That value exists in the EXECUTOR's process. The
@@ -710,7 +816,6 @@ type expectedRunTerminal struct {
 // correlates AT ALL — one carrying a parseable `JobID` and a `DueAt` that passes §13.1's
 // validation — proves its job rode generation 4. The payload's own `ProtocolVersion` is never
 // read, which is what invariant 10d actually asks for.
-func terminalCarrierGeneration() int { return domain.LedgerMinCarrier }
 
 // fillExpectedRunTerminalSQL is §8.3's upsert.
 //
@@ -845,7 +950,7 @@ func fillExpectedRunTerminalTx(ctx context.Context, tx pgx.Tx, in expectedRunTer
 	// constraint — the reconciliation path would have errored on exactly the case it exists to
 	// serve (invariant 25c).
 	_, err := tx.Exec(ctx, fillExpectedRunTerminalSQL,
-		in.MonitorID, in.DueAt, in.JobID, in.Revision, terminalCarrierGeneration(),
+		in.MonitorID, in.DueAt, in.JobID, in.Revision, domain.LedgerMinCarrier,
 		in.IssuedAt, in.TerminalAt, in.Outcome)
 	if err != nil {
 		return fmt.Errorf("store: fill expected run terminal: %w", err)
@@ -974,7 +1079,12 @@ func (s *Store) correlateExpectedRun(hb domain.Heartbeat, dbNow time.Time) expec
 	// window that far back was dropped unread, and writing it now would make a span the ledger
 	// cannot bound look answered. That bound stays, and it is the only one left, because a future
 	// `due_at` can now only ever match a row the core itself wrote.
-	if hb.DueAt.Before(dbNow.Add(-s.expectedRunRetention())) {
+	//
+	// It reads the ALIGNED cutoff, which is C8: this used to be a rolling `now - retention` while
+	// the purge dropped partitions on a midnight-aligned one, so up to a day of windows were
+	// stored, listed, and refused here. A result was rejected as "outside retention" for a row the
+	// operator could see on the screen beside it.
+	if hb.DueAt.Before(s.ExpectedRunRetentionCutoff(dbNow)) {
 		return expectedRunRef{}
 	}
 	return expectedRunRef{DueAt: hb.DueAt, JobID: hb.JobID, IssuedAt: hb.JobIssuedAt, OK: true}
@@ -1024,12 +1134,22 @@ func (s *Store) refuseWithLedger(ctx context.Context, tx pgx.Tx, hb domain.Heart
 // that somebody started it, and it would occupy the window's primary key against the legitimate
 // materialization.
 //
-// Zero rows affected is therefore a legal outcome — and it is NOT the rare one this comment used to
-// call "the crash-after-publish case". §7.1 flushes the advance ONCE per tick, after every publish
-// in it, so on a fast transport the executor's claim routinely reaches the core before the window
-// exists. Measured on a running `role=all` instance: one claim landed out of sixty-two windows.
-// Dropping those left `issued_never_claimed` describing "the claim raced the advance" far more
-// often than the executor loss §8.5 exists to expose. The caller is told, and retries.
+// Zero rows affected is therefore a legal outcome, and RESTATED here against a re-measurement
+// (audit-gap package 3, item C4) because what stood in its place described an ordering phase F
+// inverted.
+//
+// The old text: §7.1 flushes the advance once per tick AFTER every publish in it, so a fast
+// transport's claim routinely reaches the core before the window exists — "one claim landed out of
+// sixty-two windows". Phase F (§7.4) reserves BEFORE the publish, so the window is committed before
+// the job leaves the process and a claim cannot outrun it. Re-measured on a `role=all` dev instance
+// over a full day: 20050 of 20052 generation-4 issued windows carry a `claimed_at`, and the two
+// that do not were never reserved — they are §8.3 adoptions, with no row for any claim to have
+// matched.
+//
+// What zero rows means now is one of the shapes invariant 25 already names: an adoption, a job id
+// or revision this window does not carry, or a window past the correlation floor. The caller is
+// still told, and still retries within its bound; see `internal/ingest`, where the same
+// re-measurement is written down beside the number it no longer justifies.
 var recordExpectedRunClaimSQL = `
 UPDATE expected_runs
    SET claimed_at = LEAST(COALESCE(claimed_at, $5), $5)
@@ -1044,10 +1164,11 @@ UPDATE expected_runs
 // between a claim and a terminal — the terminal must land with the heartbeat it accompanies or
 // neither, while a claim accompanies nothing.
 //
-// `matched` false means "no window took this claim", and it deliberately does NOT distinguish the
-// two reasons: a claim that correlates to nothing at all (invariant 25) and a claim whose window is
-// not committed yet. The caller's response to both is the same and is bounded — retry a few times,
-// then let it go — and a claim that never had a window simply exhausts the retries silently. An
+// `matched` false means "no window took this claim", and it names no reason. Under phase F the
+// window is committed before its job is published, so "not committed yet" is not among them; what
+// remains is a claim that correlates to nothing at all (invariant 25) and one whose job id or
+// revision the window does not carry. The caller's response is the same for all of them and is
+// bounded — a few re-offers, then let it go — and none of them is a state a re-offer changes. An
 // error is reserved for a claim this process could not evaluate.
 func (s *Store) RecordRunClaim(ctx context.Context, hb domain.Heartbeat) (matched bool, err error) {
 	if hb.Claim == nil || hb.Claim.At.IsZero() {

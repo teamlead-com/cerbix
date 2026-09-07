@@ -50,9 +50,12 @@ func reserveOrderFrom(fs *fakeStore) []int64 {
 // orderedDispatcher records the sequence in which jobs reach a transport, so a case can compare it
 // against the sequence in which the ledger recorded them.
 type orderedDispatcher struct {
-	seq  *int64
-	mu   sync.Mutex
-	sent []publishedJob
+	seq *int64
+	mu  sync.Mutex
+	// publishDelay makes the publish take measurable time, so a case can tell the tick's own clock
+	// apart from the instant a job actually left the process (C7).
+	publishDelay time.Duration
+	sent         []publishedJob
 }
 
 type publishedJob struct {
@@ -63,6 +66,9 @@ type publishedJob struct {
 }
 
 func (d *orderedDispatcher) PublishJob(_ context.Context, job dispatch.CheckJob) error {
+	if d.publishDelay > 0 {
+		time.Sleep(d.publishDelay)
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.sent = append(d.sent, publishedJob{
@@ -371,5 +377,131 @@ func TestAFencedPayloadIsDroppedAndTheMonitorIsDecidedAgain(t *testing.T) {
 	}
 	if sent[0].jobID != reserved.JobID {
 		t.Errorf("the published job %s is not the identity that was reserved %s", sent[0].jobID, reserved.JobID)
+	}
+}
+
+// C1 — one unrepresentable item does not stop the instance's ledgered probing.
+//
+// `ReserveExpectations` returned on the first item that failed validation, and this loop reads a
+// batch ERROR as "we do not know what committed": every ledgered dispatch is held, payload and all,
+// and re-submitted UNCHANGED on the next tick. So a single item the ledger cannot represent stopped
+// all ledgered probing — not for a tick, but for as long as the instance ran, because the thing
+// being retried was the thing that failed.
+//
+// The store now names the bad item and reserves the rest. The rejected monitor's payload is DROPPED
+// rather than held, which is the same treatment a fenced item gets and for the same reason: an
+// invalid advance re-submitted unchanged is invalid again.
+//
+// The mutation that must kill this: return the batch error again. The healthy monitor then
+// publishes nothing at all.
+func TestOneUnrepresentableAdvanceDoesNotHoldTheHealthyOnes(t *testing.T) {
+	due := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	healthy := domain.Monitor{
+		ID: "healthy-one", Type: domain.MonitorHTTP, Target: "https://example.com",
+		Region: domain.DefaultRegion, Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
+		ExecutionRevision: 1,
+	}
+	broken := healthy
+	broken.ID = "unrepresentable-two"
+	fs := &fakeStore{leader: true, monitors: []domain.Monitor{healthy, broken},
+		expectations: map[string]store.DueExpectation{
+			healthy.ID: ledgerExpectation(healthy.ID, due, healthy.ExecutionRevision),
+			broken.ID:  ledgerExpectation(broken.ID, due, broken.ExecutionRevision),
+		}}
+	fs.rejectMonitor = broken.ID
+	var seq int64
+	d := &orderedDispatcher{seq: &seq}
+	s := New(fs, d, testLogger()).WithLedgerCarrier(true).WithLocalLedgerRegions(domain.DefaultRegion)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+	waitFor(t, 5*time.Second, func() bool { return len(d.published()) > 0 })
+	// Several more ticks: the assertion about the rejected monitor is an ABSENCE, and the defect
+	// this closes was one that recurred tick after tick.
+	time.Sleep(1500 * time.Millisecond)
+
+	var healthyJobs, brokenJobs int
+	for _, job := range d.published() {
+		switch job.monitorID {
+		case healthy.ID:
+			healthyJobs++
+		case broken.ID:
+			brokenJobs++
+		}
+	}
+	if healthyJobs == 0 {
+		t.Fatal("the healthy monitor published nothing: one item the ledger cannot represent took " +
+			"every other monitor's dispatch down with it, every tick")
+	}
+	if brokenJobs != 0 {
+		t.Errorf("the rejected monitor published %d job(s): nothing was written for it anywhere, so "+
+			"its job must not leave the process", brokenJobs)
+	}
+	// And the rejected payload is not HELD: a held payload is re-submitted unchanged, so the same
+	// item would be rejected again for ever. It is decided afresh from the monitor's configuration,
+	// which is why it keeps appearing in the submissions.
+	var submitted int
+	for _, a := range advancesFrom(fs) {
+		if a.MonitorID == broken.ID {
+			submitted++
+		}
+	}
+	if submitted < 2 {
+		t.Errorf("the rejected monitor was submitted %d time(s); it should be decided again each "+
+			"tick from its current configuration rather than held", submitted)
+	}
+}
+
+// C7 — `issued_at` is the instant the job was PUBLISHED, not the instant the tick started.
+//
+// The confirm passed the tick's own clock for every item in the batch. That clock is read before
+// the snapshot refresh, before the authoritative read, before the reserve statement and before
+// every publish in the loop, so the recorded issue instant was systematically EARLIER than the
+// moment the job left the process — and lateness, measured as `issued_at - due_at`, was
+// systematically smaller than the truth. Every other trade in this design points its residual at
+// withholding; this one pointed at over-claiming, which §14.2 says in as many words it refuses.
+//
+// The dispatcher below spends real time inside the publish, so the tick's clock and the publish
+// instant are far enough apart to tell apart. The assertion is on the CONFIRM's value against the
+// tick's, because the two are what the defect confused.
+//
+// The mutation that must kill this: pass `st.now` to the confirm again.
+func TestTheConfirmRecordsThePublishInstantAndNotTheTicksClock(t *testing.T) {
+	due := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	m := domain.Monitor{
+		ID: "slow-publish", Type: domain.MonitorHTTP, Target: "https://example.com",
+		Region: domain.DefaultRegion, Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
+		ExecutionRevision: 1,
+	}
+	fs := &fakeStore{leader: true, monitors: []domain.Monitor{m},
+		expectations: map[string]store.DueExpectation{
+			m.ID: ledgerExpectation(m.ID, due, m.ExecutionRevision)}}
+	var seq int64
+	d := &orderedDispatcher{seq: &seq, publishDelay: 250 * time.Millisecond}
+	s := New(fs, d, testLogger()).WithLedgerCarrier(true).WithLocalLedgerRegions(domain.DefaultRegion)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+	waitFor(t, 5*time.Second, func() bool { return len(confirmsFrom(fs)) > 0 })
+
+	fs.mu.Lock()
+	confirm := append([]store.ExpectationConfirm(nil), fs.confirms...)[0]
+	tickClock := fs.confirmNow
+	fs.mu.Unlock()
+
+	if confirm.IssuedAt.IsZero() {
+		t.Fatal("the confirm carries no issue instant: the store refuses one, and the window would " +
+			"keep its `reserved` verdict for a publish that succeeded")
+	}
+	// The publish took a quarter of a second, and the tick's clock precedes it. A confirm carrying
+	// the tick's clock is exactly the defect.
+	if !confirm.IssuedAt.After(tickClock) {
+		t.Errorf("the confirm reports %s, which is not after the tick's clock %s — the instant was "+
+			"read before the publish, so every measured lateness is smaller than the truth",
+			confirm.IssuedAt, tickClock)
+	}
+	if gap := confirm.IssuedAt.Sub(tickClock); gap < 200*time.Millisecond {
+		t.Errorf("the confirm's instant is only %s after the tick's; the publish itself took 250ms, "+
+			"so this instant did not come from the far side of it", gap)
 	}
 }

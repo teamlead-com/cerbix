@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/teamlead-com/cerbix/internal/dispatch"
 )
 
 func TestFromAMQPDerivesManagement(t *testing.T) {
@@ -110,5 +112,51 @@ func TestTheCanaryQueuePrefixMatchesTheDispatcher(t *testing.T) {
 		if !strings.Contains(string(src), want) {
 			t.Fatalf("the dispatcher no longer declares %s — the two spellings have drifted", want)
 		}
+	}
+}
+
+// A6 — a consumer on a GENERATIONAL jobs queue never registers as a region.
+//
+// `LiveJobRegions` feeds the region-worker alert, and the generational queues share the legacy
+// prefix: `checks.jobs.v4.geo1` starts with `checks.jobs.`. The exclusion list was hand-written and
+// one generation behind, so a v4 consumer registered the phantom region `v4.geo1` — a region no
+// monitor belongs to, alerting about a worker that is running perfectly well.
+//
+// The subtraction is now DERIVED from the dispatcher's own generation table, so a generation added
+// tomorrow is excluded without anyone editing this package. The loop below iterates that table for
+// the same reason.
+//
+// The mutation that must kill this: restate the exclusion by hand, or drop one generation from it.
+func TestAGenerationalJobsQueueIsNotAPhantomRegion(t *testing.T) {
+	body := `[{"name":"checks.jobs.core","consumers":2}`
+	for _, prefix := range dispatch.JobsQueuePrefixes() {
+		if prefix == dispatch.LegacyJobsQueuePrefix() {
+			continue
+		}
+		body += `,{"name":"` + prefix + `geo1","consumers":1}`
+	}
+	body += `]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+
+	live, err := c.LiveJobRegions(context.Background())
+	if err != nil {
+		t.Fatalf("live regions: %v", err)
+	}
+	if len(live) != 1 || !live["core"] {
+		t.Fatalf("live = %#v, want {core} only — every other entry is a queue NAME read as a "+
+			"region, and the region-worker alert would page about a region no monitor belongs to", live)
+	}
+	// The generational readers still see their own queues: subtracting them from the legacy set
+	// must not make them invisible to the checks that exist to find them.
+	ledger, err := c.LiveLedgerJobRegions(context.Background())
+	if err != nil {
+		t.Fatalf("ledger regions: %v", err)
+	}
+	if !ledger["geo1"] {
+		t.Errorf("the generation-4 reader lost geo1: %#v", ledger)
 	}
 }

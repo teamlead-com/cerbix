@@ -467,42 +467,17 @@ func buildMonitor(uid string, rm rawMonitor) (DesiredMonitor, error) {
 		return DesiredMonitor{}, rejectf(reason, uid, "%s", serr.Error())
 	}
 
+	// Type-SPECIFIC first, then the shared step: the branch above already decided which fields the
+	// type owns, and everything else is the same for every type (G5).
 	m := domain.Monitor{
-		Name:         strings.TrimSpace(rm.Name),
-		Description:  strings.TrimSpace(rm.Description),
-		Type:         typ,
-		Target:       strings.TrimSpace(rm.Target),
-		Method:       orDefault(rm.Method, fmtDefaultMethod),
-		Conditions:   rm.Conditions,
-		Tags:         rm.Tags,
-		Region:       orDefault(rm.Region, fmtDefaultRegion),
-		Enabled:      boolOr(rm.Enabled, true),
-		AutoIncident: boolOr(rm.AutoIncident, true),
-		DependsOn:    normStringSet(rm.DependsOn),
-		Config:       settings,
+		Type:   typ,
+		Target: strings.TrimSpace(rm.Target),
+		Method: orDefault(rm.Method, fmtDefaultMethod),
+		Config: settings,
 	}
-	if m.Name == "" {
-		return DesiredMonitor{}, rejectf(ReasonDomainInvalid, uid, "monitor `name` is required")
+	if err := applyCommonMonitorFields(uid, rm, &m); err != nil {
+		return DesiredMonitor{}, err
 	}
-
-	var derr error
-	if m.IntervalSeconds, derr = durSeconds(uid, "interval", rm.Interval, fmtDefaultIntervalSeconds); derr != nil {
-		return DesiredMonitor{}, derr
-	}
-	if m.TimeoutSeconds, derr = durSeconds(uid, "timeout", rm.Timeout, fmtDefaultTimeoutSeconds); derr != nil {
-		return DesiredMonitor{}, derr
-	}
-	if m.ConfirmIntervalSeconds, derr = durSeconds(uid, "confirm_interval", rm.ConfirmInterval, 0); derr != nil {
-		return DesiredMonitor{}, derr
-	}
-	if m.RenotifySeconds, derr = durSeconds(uid, "renotify", rm.Renotify, 0); derr != nil {
-		return DesiredMonitor{}, derr
-	}
-	if m.GraceSeconds, derr = durSeconds(uid, "grace", rm.Grace, 0); derr != nil {
-		return DesiredMonitor{}, derr
-	}
-	m.Retries = intOr(rm.Retries, fmtDefaultRetries)
-	m.FailureThreshold = intOr(rm.FailureThreshold, fmtDefaultFailureThreshold)
 
 	// Domain normalization + validation is the single source of business rules; the provider
 	// never re-implements them. A sentinel ProjectID satisfies the domain's tenant check —
@@ -515,6 +490,65 @@ func buildMonitor(uid string, rm rawMonitor) (DesiredMonitor, error) {
 	}
 
 	return DesiredMonitor{UID: uid, Monitor: m, DependsOn: m.DependsOn, Hash: canonicalHash(uid, m)}, nil
+}
+
+// applyCommonMonitorFields copies every bundle field that is NOT type-specific onto the monitor
+// under construction, and it is the ONE place that mapping lives (D1, G5).
+//
+// The provider has a builder per type behind a per-field contract, and the two were kept in step by
+// hand. They were not: `buildCanaryMonitor` never copied `description`. The raw monitor accepts the
+// key, so strict field checking passed it; the canonical hash FOLDS the description, and for this
+// type it was always empty — so declaring one did nothing, and every later edit of it was a
+// permanent no-op that the plan reported as "no change".
+//
+// A shared step rather than a fixed omission, because the omission is not the defect: the SHAPE is.
+// The next optional field added to `rawMonitor` would have fallen into the same hole, in whichever
+// builder its author did not open. `TestEveryDeclaredTypeCarriesEveryCommonField` iterates the
+// declared types against this function's own field list, so a builder that stops calling it fails
+// for every type at once.
+//
+// Type-specific fields stay with their builder: `target` and `method` mean nothing to a canary,
+// whose workflow names its URLs, and `settings` versus `workflow` is the branch itself.
+func applyCommonMonitorFields(uid string, rm rawMonitor, m *domain.Monitor) error {
+	m.Name = strings.TrimSpace(rm.Name)
+	m.Description = strings.TrimSpace(rm.Description)
+	m.Conditions = rm.Conditions
+	m.Tags = rm.Tags
+	m.Region = orDefault(rm.Region, fmtDefaultRegion)
+	m.Enabled = boolOr(rm.Enabled, true)
+	m.AutoIncident = boolOr(rm.AutoIncident, true)
+	m.DependsOn = normStringSet(rm.DependsOn)
+	if m.Name == "" {
+		return rejectf(ReasonDomainInvalid, uid, "monitor `name` is required")
+	}
+	var err error
+	if m.IntervalSeconds, err = durSeconds(uid, "interval", rm.Interval, fmtDefaultIntervalSeconds); err != nil {
+		return err
+	}
+	if m.TimeoutSeconds, err = durSeconds(uid, "timeout", rm.Timeout, fmtDefaultTimeoutSeconds); err != nil {
+		return err
+	}
+	if m.ConfirmIntervalSeconds, err = durSeconds(uid, "confirm_interval", rm.ConfirmInterval, 0); err != nil {
+		return err
+	}
+	if m.RenotifySeconds, err = durSeconds(uid, "renotify", rm.Renotify, 0); err != nil {
+		return err
+	}
+	if m.GraceSeconds, err = durSeconds(uid, "grace", rm.Grace, 0); err != nil {
+		return err
+	}
+	m.Retries = intOr(rm.Retries, fmtDefaultRetries)
+	m.FailureThreshold = intOr(rm.FailureThreshold, fmtDefaultFailureThreshold)
+	return nil
+}
+
+// commonMonitorFields names what `applyCommonMonitorFields` owns. It is a LIST because G5's test
+// iterates it: a field added to the function without a line here, or the other way round, is a
+// gap the test names instead of a gap nobody sees.
+var commonMonitorFields = []string{
+	"Name", "Description", "Conditions", "Tags", "Region", "Enabled", "AutoIncident", "DependsOn",
+	"IntervalSeconds", "TimeoutSeconds", "ConfirmIntervalSeconds", "RenotifySeconds",
+	"GraceSeconds", "Retries", "FailureThreshold",
 }
 
 // durSeconds parses a duration string to whole seconds; empty → def. Fractional-second and

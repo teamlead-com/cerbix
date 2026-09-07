@@ -9,6 +9,7 @@ import glob
 import io
 import importlib.util
 import os
+import re
 import pathlib
 import tempfile
 import unittest
@@ -367,6 +368,346 @@ class EnumerationParsers(unittest.TestCase):
 
     def test_the_repository_itself_satisfies_every_enumeration(self):
         self.assertEqual(cdr.check_enumerations(), [])
+
+
+class SetNullSitesAreSelectedByContent(unittest.TestCase):
+    """F3 — the ON DELETE SET NULL list is checked at EVERY site that states it.
+
+    The guard matched one sentence, so it covered the project README and the code comment and missed
+    the operator-facing refusal string beside that comment, which says the same thing in different
+    words. That is how D5 drifted: the comment was corrected to six when 00093 arrived and the
+    message stayed at five, so the person whose upgrade had just refused was handed the short list.
+
+    These cases drive the FUNCTION over fixtures rather than over the tree, because the tree is
+    correct now and a guard proven only against a correct tree is a guard nobody has seen fail.
+    """
+
+    def sites(self, text, mig, word, tmpname="README.md"):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, tmpname)
+            pathlib.Path(path).write_text(text, encoding="utf-8")
+            # `sites=` rather than a monkeypatched constant: the site set is DERIVED from the tree
+            # now, and a fixture that replaced a hardcoded tuple was the reason the derivation was
+            # never exercised (reviewer P2, party [334]).
+            return [m for (_, _, _, m) in cdr.setnull_site_findings(mig, word, sites=[path])]
+
+    MIG = ["00070", "00080", "00081", "00082", "00084", "00093"]
+
+    # The DERIVATION itself, which no fixture reached while the site list was hardcoded and every
+    # fixture replaced it (reviewer P2, party [334]). These assert the rule, not today's file names.
+
+    def test_the_site_set_is_derived_and_reaches_beyond_the_two_stating_files(self):
+        sites = cdr.setnull_sites()
+        self.assertIn("README.md", sites)
+        self.assertIn("internal/store/migrate.go", sites)
+        self.assertGreater(len(sites), 2,
+                           "a set of exactly the two hardcoded files is the hole this closed")
+        for path in sites:
+            self.assertTrue(cdr.SETNULL_PHRASE_RE.search(cdr.flatten(cdr.read(path, errors="ignore"))),
+                            f"{path} is in the set without stating anything about the column-list form")
+
+    def test_records_of_the_past_are_out_of_scope_by_rule(self):
+        sites = cdr.setnull_sites()
+        self.assertFalse([p for p in sites if p.startswith("docs/iterations/")],
+                         "a closed report is immutable; its count was true when written")
+        self.assertNotIn("CHANGELOG.md", sites,
+                         "a released entry is a dated record, not a claim about today's schema")
+
+    def test_the_derivation_finds_a_drifted_file_the_old_pair_never_named(self):
+        """END TO END over a synthetic tree, which is what the previous fixtures could not do.
+
+        They passed `sites=[one file]`, so the DERIVATION was never executed and a hardcoded pair
+        would have satisfied every one of them. Here the tree is built, `setnull_sites` selects from
+        it, and the drifted file is neither of the two the old list named.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "docs", "iterations"), exist_ok=True)
+            os.makedirs(os.path.join(d, "internal", "store"), exist_ok=True)
+            claim = ("six migrations use the column-list `ON DELETE SET NULL (col)` form "
+                     "introduced in PostgreSQL 15.")
+            stale = claim.replace("six", "five")
+            pathlib.Path(d, "README.md").write_text(claim, encoding="utf-8")
+            pathlib.Path(d, "internal", "store", "migrate.go").write_text("// " + claim, encoding="utf-8")
+            pathlib.Path(d, "docs", "overview.md").write_text(stale, encoding="utf-8")
+            pathlib.Path(d, "CHANGELOG.md").write_text(stale, encoding="utf-8")
+            pathlib.Path(d, "docs", "iterations", "iter-0161.md").write_text(stale, encoding="utf-8")
+
+            sites = cdr.setnull_sites(root=d)
+            names = sorted(os.path.relpath(p, d) for p in sites)
+            self.assertIn(os.path.join("docs", "overview.md"), names,
+                          "a present-tense document outside the old pair must be selected")
+            self.assertNotIn("CHANGELOG.md", names)
+            self.assertNotIn(os.path.join("docs", "iterations", "iter-0161.md"), names)
+
+            found = [m for (_, _, _, m) in cdr.setnull_site_findings(self.MIG, "six", sites=sites)]
+            self.assertEqual(len(found), 1, found)
+            self.assertIn('says "five migrations"', found[0])
+
+    def test_the_default_site_set_is_the_derived_one(self):
+        # The wiring, not the function: a caller that went back to a hardcoded pair would leave every
+        # assertion above green. Read from the source, because there is nothing else to observe.
+        src = pathlib.Path("scripts/check-docs-references.py").read_text(encoding="utf-8")
+        body = src.split("def setnull_site_findings(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("setnull_sites() if sites is None else sites", body,
+                      "the default must come from the derivation, not from a list written by hand")
+
+    def test_the_plain_clause_is_a_different_subject(self):
+        # `func-project-deletion.md` discusses plain ON DELETE SET NULL in 00007/00009. Reading it as
+        # a claim about the PG15 column-list form reported a sentence that is entirely correct.
+        text = "Incidents' `monitor_id` is likewise `SET NULL` (00009) but the incidents survive."
+        # NOT named README.md: that file must keep stating the requirement, and a fixture standing in
+        # for a spec has to be a file that may legitimately say nothing.
+        self.assertEqual(self.sites(text, self.MIG, "six", tmpname="func-project-deletion.md"), [])
+
+    def test_the_plain_clause_with_its_own_list_is_still_a_different_subject(self):
+        # The version that KILLS a widened subject: plain `ON DELETE SET NULL` next to a real list of
+        # two migrations. Read as a claim about the PG15 form it is a mismatch; read correctly it is
+        # a sentence about a different feature and says nothing.
+        text = "Rows are detached by plain ON DELETE SET NULL in migrations (00007, 00009)."
+        self.assertEqual(self.sites(text, self.MIG, "six", tmpname="func-project-deletion.md"), [],
+                         "the guard must not read the plain clause as the column-list requirement")
+
+    def test_a_narrative_reference_to_one_migration_is_not_a_list(self):
+        text = ("A production upgrade died on `00070`; six migrations use the column-list "
+                "`ON DELETE SET NULL (col)` form.")
+        self.assertEqual(self.sites(text, self.MIG, "six"), [])
+
+    def test_a_stale_list_before_the_phrase_is_caught(self):
+        # runbook.md writes the list BEFORE the phrase, which a forward-only window could not see.
+        text = ("five migrations (`00070`, `00080`, `00081`, `00082`, `00084`) use the column-list "
+                "`ON DELETE SET NULL (col)` form.")
+        found = self.sites(text, self.MIG, "six")
+        self.assertTrue(any("states the ON DELETE SET NULL migrations as" in m for m in found), found)
+        self.assertTrue(any('says "five migrations"' in m for m in found), found)
+
+    def test_a_count_without_the_verb_use_is_still_a_count(self):
+        # overview.md says "in five migrations", and the first pattern required "migrations use".
+        text = ("the schema uses the column-list `ON DELETE SET NULL (col)` form from PG15 in five "
+                "migrations; `Migrate` refuses an older server.")
+        found = self.sites(text, self.MIG, "six")
+        self.assertTrue(any('says "five migrations"' in m for m in found), found)
+
+    def test_a_list_in_the_refusal_wording_is_checked(self):
+        # The exact phrasing the old guard could not see: no "N migrations use", no backticks.
+        text = ('schema uses the column-list ON DELETE SET NULL form introduced in PostgreSQL 15 '
+                '(migrations 00070, 00080, 00081, 00082, 00084). Nothing has been applied')
+        self.assertTrue(self.sites(text, self.MIG, "six"))
+
+    def test_a_correct_list_in_that_wording_passes(self):
+        text = ('schema uses the column-list ON DELETE SET NULL form introduced in PostgreSQL 15 '
+                '(migrations 00070, 00080, 00081, 00082, 00084, 00093). Nothing has been applied')
+        self.assertEqual(self.sites(text, self.MIG, "six"), [])
+
+    def test_a_wrong_count_in_the_comment_wording_is_still_checked(self):
+        text = ("five migrations use PostgreSQL 15's column-list `ON DELETE SET NULL (col)` form "
+                "(00070, 00080, 00081, 00082, 00084, 00093)")
+        found = self.sites(text, self.MIG, "six")
+        self.assertTrue(any("five migrations" in m for m in found), found)
+
+    def test_a_site_that_stops_stating_it_is_a_finding(self):
+        found = self.sites("nothing about migrations here", self.MIG, "six")
+        self.assertTrue(any("no longer states" in m for m in found), found)
+
+    def test_a_count_alone_is_enough_to_be_a_site(self):
+        # The README states how many and not which; that must still be checked, and must not be
+        # reported as a site that stopped stating it.
+        text = "six migrations use the column-list `ON DELETE SET NULL (col)` form"
+        self.assertEqual(self.sites(text, self.MIG, "six"), [])
+
+
+class IterationCountGuardCoversTheWholeDirectory(unittest.TestCase):
+    """F4 — the SET of iterations is derived from the directory, not enumerated call by call.
+
+    It was one call per iteration, so the next report was unguarded until somebody remembered to
+    add a line — and remembering is what this family of guards exists to stop depending on.
+
+    Deriving it also showed the guard's early return was written for the two reports that carry a
+    findings table: it complained about every report that does not, which is most of them and all
+    of them immutable. A count with no rows to derive it from is now silence rather than an
+    unanswerable complaint, and what remains is the subject: a count that disagrees with its rows.
+    """
+
+    def counts(self, table_rows, stated, name="iter-0999"):
+        with tempfile.TemporaryDirectory() as d:
+            report = os.path.join(d, f"{name}.md")
+            rows = "".join(f"| {i} | a finding |\n" for i in range(1, table_rows + 1))
+            pathlib.Path(report).write_text(f"# {name}\n\n{stated}\n\n{rows}", encoding="utf-8")
+            return cdr.check_iteration_finding_counts(report, readers=())
+
+    def test_a_count_that_matches_its_rows_passes(self):
+        self.assertEqual(self.counts(3, "iter-0999 closed with three findings."), [])
+
+    def test_a_count_that_disagrees_with_its_rows_is_reported(self):
+        found = self.counts(3, "iter-0999 closed with four findings.")
+        self.assertTrue(any("four findings" in m for m in found), found)
+
+    def test_a_report_with_no_table_is_silent_rather_than_unanswerable(self):
+        # Most historical reports have no numbered findings table, and they are immutable.
+        self.assertEqual(self.counts(0, "iter-0999 closed with four findings."), [])
+
+    def test_a_report_with_no_stated_count_is_silent(self):
+        self.assertEqual(self.counts(3, "iter-0999 closed."), [])
+
+    def test_every_iteration_report_in_the_tree_is_scanned_and_clean(self):
+        reports = glob.glob("docs/iterations/iter-*.md")
+        self.assertGreater(len(reports), 20, "the directory scan found almost nothing")
+        found = []
+        for r in sorted(reports):
+            found += cdr.check_iteration_finding_counts(r)
+        self.assertEqual(found, [])
+
+
+class OpenapiRetentionAgreesWithTheDomain(unittest.TestCase):
+    """E10 — the API reference's retention figure is the domain's default.
+
+    It was hardcoded at fourteen days while the same file documented the bound as configurable, so
+    an instance that had changed it read its own reference and was told the wrong number. A static
+    schema cannot read a runtime value — deriving is not on offer, and saying it was would be a
+    discharge nobody could perform — so the two are held EQUAL by a check that fails when they
+    disagree.
+    """
+
+    def test_the_domain_default_is_parsed(self):
+        self.assertEqual(cdr.expected_run_retention_default("DefaultExpectedRunRetentionDays = 21"), 21)
+
+    def test_a_missing_constant_is_reported_rather_than_ignored(self):
+        # A guard that answers None and then compares None to None passes while checking nothing.
+        self.assertIsNone(cdr.expected_run_retention_default("package domain\n"))
+
+    def test_the_repository_agrees(self):
+        self.assertEqual(cdr.openapi_retention_findings(), [])
+
+
+class GoCommentCitationsResolve(unittest.TestCase):
+    """D6 — a `Test…` name cited in a Go COMMENT must resolve, like one cited in a document.
+
+    The distinction that makes this guard work is `declared_test_names` rather than `test_tokens`:
+    a comment is part of the source, so a token set collected over the source would let the comment
+    satisfy itself. Two citations in the tree were dangling when this was written.
+    """
+
+    def test_declared_names_are_functions_and_not_mentions(self):
+        names = cdr.declared_test_names()
+        self.assertTrue(names, "no test functions found — the guard would flag everything")
+        self.assertIn("TestTheAPINeverCallsASystemDoor", names)
+        self.assertNotIn("TestAPIneverCallsASystemDoor", names,
+                         "a name that only ever appeared in a comment must not count as declared")
+
+    def test_the_tree_has_no_dangling_go_comment_citation(self):
+        self.assertEqual([f"{p}:{n} {m}" for (p, n, _, m) in cdr.check_go_comment_citations()], [])
+
+    # The BARE half, added after the backtick-only matcher was found to be the guard's own hole:
+    # three unbackticked citations sat in the tree while it was green, one of them dangling, and one
+    # of them added by the change that introduced the guard. Each rule below is a property of what a
+    # citation IS, so each is pinned separately — a rule nobody can state is an exception wearing a
+    # rule's clothes.
+
+    def cited(self, line):
+        """The guard's OWN decision for one line — called, not re-implemented.
+
+        The first draft of these fixtures copied the rules instead of calling them, and so would
+        have passed with the bare half deleted from the checker entirely.
+        """
+        return cdr.cited_test_names(line)
+
+    def test_a_bare_citation_is_a_citation(self):
+        self.assertEqual(self.cited("// see TestSomethingThatIsNotThere for the reason"),
+                         {"TestSomethingThatIsNotThere"},
+                         "the backtick was a house style, not the thing that makes a name a citation")
+
+    def test_an_identifier_the_tree_declares_is_not_a_citation(self):
+        self.assertIn("TestRunner", cdr.declared_go_identifiers(),
+                      "internal/dispatch/amqp.go declares `type TestRunner`")
+        self.assertEqual(self.cited("// TestRunner answers one test-RPC delivery."), set(),
+                         "a package naming its own type is describing itself, not citing a test")
+
+    def test_a_family_reference_is_not_a_citation_of_one_test(self):
+        self.assertEqual(self.cited("// covered by TestGuardedDial* in this file"), set(),
+                         "a prefix with a star names a family on purpose, and its members resolve")
+
+    def test_a_name_the_sentence_marks_as_gone_is_not_a_citation(self):
+        self.assertEqual(self.cited("// The former TestPreviewDegradesAtItsBudget was superseded"), set(),
+                         "telling the reader it is gone is the opposite of sending them after it")
+        self.assertEqual(self.cited("// see TestPreviewDegradesAtItsBudget"),
+                         {"TestPreviewDegradesAtItsBudget"},
+                         "the same name without the marker is an ordinary citation")
+
+    def test_an_unrelated_marker_elsewhere_on_the_line_forgives_nothing(self):
+        """Reviewer P2 on the first version of this rule.
+
+        `HISTORICAL_RE` was read over the WHOLE line, so one `former` about something else forgave
+        every bare citation beside it. The marker has to govern the NAME, which means the clause the
+        name stands in — otherwise the guard answers a question about a different part of the
+        sentence, and answers it in the direction of silence.
+        """
+        self.assertEqual(
+            self.cited("// the former queue shape is gone; see TestSomethingMissing for the new one"),
+            {"TestSomethingMissing"},
+            "a marker in another clause is about another thing")
+        self.assertEqual(
+            self.cited("// no longer relevant. TestAlsoMissing explains the replacement"),
+            {"TestAlsoMissing"},
+            "a full stop ends the clause, and with it the marker's reach")
+
+    def test_the_marker_reaches_its_own_clause_from_either_side(self):
+        self.assertEqual(self.cited("// The former TestGoneOne was superseded in round 5"), set())
+        self.assertEqual(self.cited("// TestGoneTwo is no longer in the tree"), set(),
+                         "the marker may follow the name, as long as it is the same clause")
+
+    def test_the_family_star_binds_to_its_own_occurrence(self):
+        self.assertEqual(self.cited("// covered by TestGuardedDial* here"), set())
+        self.assertEqual(self.cited("// TestFamilyOne* covers those; TestLonelyTwo does not exist"),
+                         {"TestLonelyTwo"},
+                         "a star on one name says nothing about a different bare name")
+
+    def test_a_backticked_citation_is_never_forgiven_by_the_sentence(self):
+        self.assertEqual(self.cited("// the former `TestGoneForGood` was superseded"),
+                         {"TestGoneForGood"},
+                         "the historical rule loosens the BARE half only; widening it to the "
+                         "backticked half would let a real dangling citation hide behind a word")
+
+
+class OpenapiRetentionGuardFails(unittest.TestCase):
+    """E10, the half the first fixtures did not have (reviewer P2, party [325]).
+
+    Those asserted a synthetic domain constant parses, that a missing one yields None, and that the
+    repository currently agrees. Every one of them passes against a checker that returns `[]`
+    unconditionally: they describe the TREE, not the guard. What discharges a guard is the case
+    where it fails, so each way the two sources can disagree is pinned here by injection.
+    """
+
+    DOMAIN = "const DefaultExpectedRunRetentionDays = 14"
+
+    def find(self, domain_src, doc):
+        return cdr.openapi_retention_findings(domain_src=domain_src, openapi_doc=doc)
+
+    def test_agreement_is_silent(self):
+        doc = "described as the retention window, whose DEFAULT is 14 days, and no longer."
+        self.assertEqual(self.find(self.DOMAIN, doc), [])
+
+    def test_a_disagreeing_number_is_a_finding_that_names_both(self):
+        doc = "described as the retention window, whose DEFAULT is 21 days, and no longer."
+        found = self.find(self.DOMAIN, doc)
+        self.assertEqual(len(found), 1, "the schema and the domain disagree and the guard was silent")
+        self.assertIn("21", found[0][3])
+        self.assertIn("14", found[0][3], "a finding that does not name the domain's number cannot be acted on")
+
+    def test_deleting_the_sentence_is_a_finding_and_not_a_pass(self):
+        doc = "described as the retention window, and no longer."
+        found = self.find(self.DOMAIN, doc)
+        self.assertEqual(len(found), 1,
+                         "removing the sentence must not read as agreement — that is how a guard is "
+                         "disarmed by an edit that looks like tidying")
+        self.assertIn("guard cannot check it", found[0][3])
+
+    def test_losing_the_domain_constant_is_a_finding(self):
+        doc = "described as the retention window, whose DEFAULT is 14 days, and no longer."
+        found = self.find("const SomethingElse = 14", doc)
+        self.assertEqual(len(found), 1)
+        self.assertIn("nothing to compare", found[0][3])
+
+    def test_the_real_repository_still_agrees(self):
+        self.assertEqual(cdr.openapi_retention_findings(), [])
 
 
 class CheckTypeLabelMap(unittest.TestCase):
@@ -1197,10 +1538,19 @@ class IterationFindingCountTest(unittest.TestCase):
         found = self.run_guard("iter-0177: four findings.\n", table=table)
         self.assertTrue(any("iter-0177.md says three findings" in m for m in found), found)
 
-    def test_a_table_with_no_rows_is_reported_rather_than_passing_silently(self):
+    def test_a_report_with_no_findings_table_is_silent(self):
+        # THIS ASSERTION CHANGED with F4, and the trade is worth stating rather than discovering.
+        #
+        # It used to require a complaint here: a stated count with no rows to derive it from. That
+        # was written when the guard ran against two named iterations, both of which carry a
+        # findings table. Deriving the SET from the directory applied it to every report, and most
+        # of them use a different shape and are IMMUTABLE — so the complaint could not be answered
+        # by anyone, which is the state in which a reader learns to skip a guard.
+        #
+        # What was bought: every report carrying a table is now compared, where two were. What was
+        # given up: a report that states a count and has no table is no longer told to grow one.
         found = self.run_guard("iter-0177: four findings.\n", table="# iter-0177\n\nno table here\n")
-        self.assertEqual(len(found), 1, found)
-        self.assertIn("no numbered findings table", found[0])
+        self.assertEqual(found, [])
 
 class FindingCountCountsFindings(unittest.TestCase):
     """"N findings TABLE" is a count of tables, and the guard must not read it as a count of

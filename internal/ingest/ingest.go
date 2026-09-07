@@ -88,23 +88,38 @@ type Publisher interface {
 
 // Run-claim retry bounds (FR-032 §8.4).
 //
-// A claim is emitted the instant an executor takes a job off the transport, while the window it
-// answers is written by §7.1's advance at the END of the leader's tick — one statement for the
-// whole tick, deliberately. On a fast transport the claim therefore ARRIVES FIRST, and on the
-// in-process one it does so almost always: a running `role=all` instance recorded one claim across
-// sixty-two generation-4 windows. Dropping the other sixty-one did not cost a verdict, but it made
-// `issued_never_claimed` mean "the claim raced the advance" rather than "an executor died between
-// ack and probe", which is the whole of what §8.5 says the state is for.
+// RESTATED against a re-measurement (audit-gap package 3, item C4). What stood here described an
+// ordering phase F inverted, and the limit below was sized from it.
 //
-// So an unmatched claim is held and re-offered. The bounds are the tick, not a guess: the advance
-// lands within one tick of the publish, so the first retry only has to outlast a tick, and three
-// RE-offers cover a leader whose statement was slow or briefly failed. Past that the claim is
-// dropped in silence — it is a diagnostic, a terminal always outranks a missing one, and a claim
-// that correlates to no window at all reaches the same end without a special case.
+// The old text: the window is written by §7.1's advance at the END of the leader's tick, so on a
+// fast transport the claim ARRIVES FIRST — "a running `role=all` instance recorded one claim across
+// sixty-two generation-4 windows". That was true when the advance ran AFTER the publish. Phase F
+// (§7.4, D-0243) moved the reserve BEFORE it: the window is committed before the job leaves the
+// process, so a claim cannot outrun the row it answers.
+//
+// Re-measured on a `role=all` dev instance carrying 20052 generation-4 issued windows across a full
+// day: 20050 of them hold a `claimed_at` — 99.99%, against the 1.6% the old note recorded. The two
+// that do not were never reserved at all (`reserved_at IS NULL`): they are §8.3 ADOPTIONS, windows
+// a terminal event created for a run the leader had not recorded, and no retry could have matched
+// them because there was no row to match at any point.
+//
+// So the bound is no longer sized from a race, and the honest statement is that under phase F's
+// ordering a re-offer cannot convert an unmatched claim into a matched one: every reachable
+// unmatched shape — an adoption, a job id or revision the window does not carry, a window past the
+// correlation floor — is unmatched for a reason the passage of two seconds does not change. The
+// mechanism is kept because removing it is a behaviour change beyond a re-measurement, and it costs
+// at most three further store calls for a message the system already treats as the least important
+// one it carries. Its removal is worth deciding on its own terms rather than folding into this.
+//
+// Past the budget the claim is dropped in silence — it is a diagnostic, a terminal always outranks
+// a missing one, and a claim that correlates to no window at all reaches the same end without a
+// special case.
 const (
 	runClaimRetryEvery = 2 * time.Second
 	// runClaimRetryLimit counts RE-offers, not offers: a claim is tried once when it arrives and
-	// at most this many times again, so four store calls in the worst case.
+	// at most this many times again, so four store calls in the worst case. The number is NOT
+	// derived from a measured race any more — see the re-measurement above — it is the ceiling on
+	// what an unmatched diagnostic is allowed to cost.
 	runClaimRetryLimit = 3
 	// runClaimRetryMax bounds the memory this can hold — one tick's worth of claims for a very
 	// large instance, past which the OLDEST are dropped. A ring rather than unbounded growth,
@@ -241,9 +256,11 @@ func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
 // outcome always outranks a missing claim (invariant 10), so the loss costs a diagnostic and never
 // a coverage verdict.
 //
-// A claim that no window TOOK is a different case and is held, because it is the ordinary one: the
-// advance that writes the window runs once per tick, after the publishes in it, so a fast transport
-// delivers the claim first. See the retry bounds above.
+// A claim that no window TOOK is a different case and is held, but NOT because it raced its window:
+// phase F reserves before publishing, so a ledgered job cannot leave the process until the row it
+// answers is committed — `TestNoJobIsPublishedBeforeItsWindowIsRecorded` pins that ordering. It is
+// held because the retry mechanism is kept — see the retry bounds above, where the re-measurement
+// and the reason for keeping it are recorded.
 func (c *Consumer) handleClaim(ctx context.Context, hb domain.Heartbeat) {
 	matched, err := c.store.RecordRunClaim(ctx, hb)
 	if err != nil {
@@ -255,7 +272,10 @@ func (c *Consumer) handleClaim(ctx context.Context, hb domain.Heartbeat) {
 	}
 }
 
-// deferRunClaim parks a claim whose window is not committed yet.
+// deferRunClaim parks an unmatched claim.
+//
+// Not "a claim whose window is not committed yet": under phase F's ordering that state is
+// unreachable. Every shape that reaches here is unmatched for a reason a re-offer does not change.
 //
 // The ring drops the OLDEST when full rather than refusing the newest: a claim's value is its
 // timing, so the one still worth landing is the one that just arrived.

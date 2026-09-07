@@ -33,12 +33,45 @@ type MaterializedExecution struct {
 	MonitorID string
 	Job       dispatch.CheckJob
 	Reason    string
+	// CarrierGeneration is the carrier this job was STAMPED with, reported beside the job so the
+	// caller records the publisher's decision rather than re-reading `Job.ProtocolVersion` (A2).
+	// It is zero exactly when Reason is non-empty, because a refused monitor has no job.
+	CarrierGeneration int
 }
 
 type materializedRef struct {
 	SecretID   string `json:"secret_id"`
 	Name       string `json:"name"`
 	Ciphertext string `json:"ciphertext"`
+}
+
+// stampedJob is the only shape in which a materialized job leaves this file, and its field is
+// unexported so that `stampJob` below is its only constructor.
+//
+// That is the whole of A1's fix. `dispatch.WithCarrier` used to be a call each exit of the
+// materializer had to REMEMBER, and one of three did not: a type credentialed by schema that
+// yields no envelope field — `promql` with `auth_mode: none`, `rabbitmq` with `mode: amqp`, both
+// `CredentialForbidden` variants — took neither the no-envelope exit nor the sealed one and fell
+// out carrying protocol version 1 with the window field still populated. The core then correlated
+// it and the window recorded `carrier_generation = 4` for a run that rode generation 1, which is
+// the exact false record the carrier mechanism exists to make impossible.
+//
+// Adding a third call would have restored the sentence "every exit remembers". The property
+// decided instead is that an UNSTAMPED job is unconstructible: a branch that returns without
+// choosing a carrier does not compile, so the next exit cannot reopen this silently.
+// It carries the generation ALONGSIDE the stamped job, so the caller has the publisher's own
+// decision to hand on and never has to read it back off the payload (A2). `ProtocolVersion` is a
+// field in a body an executor may not trust for a carrier question, and a producer that reads its
+// own decision back through the body is how that habit spreads.
+type stampedJob struct {
+	job        dispatch.CheckJob
+	generation int
+}
+
+// stampJob is that constructor: inside this file every job crosses `dispatch.WithCarrier` here
+// and nowhere else.
+func stampJob(job dispatch.CheckJob, carrierGeneration int) stampedJob {
+	return stampedJob{job: dispatch.WithCarrier(job, carrierGeneration), generation: carrierGeneration}
 }
 
 // MaterializeExecutionConfigs is the authoritative dispatch-authorization read (§4.4.3).
@@ -131,201 +164,13 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 		if err != nil {
 			return nil, fmt.Errorf("store: scan materialized execution: %w", err)
 		}
-		entry := MaterializedExecution{MonitorID: m.ID}
-		if !m.Enabled || !m.Type.Active() {
-			entry.Reason = MaterializeSkippedCurrentState
-			byID[m.ID] = entry
-			continue
-		}
-		job := dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV1, JobID: jobID, IssuedAt: issuedAt}
 		// The region's proven generation, read ONCE per monitor from the authoritative region so
-		// the two carrier decisions below cannot disagree with each other.
-		regionGeneration := carrierByRegion[m.Region]
-		hasWindow := dueAt != nil
-		if hasWindow {
-			job.DueAt = *dueAt
+		// the two carrier decisions inside cannot disagree with each other.
+		stamped, reason := s.materializeRow(m, carrierByRegion[m.Region], rawConfig, rawRefs, jobID, issuedAt, dueAt)
+		entry := MaterializedExecution{MonitorID: m.ID, Reason: reason}
+		if reason == "" {
+			entry.Job, entry.CarrierGeneration = stamped.job, stamped.generation
 		}
-		stored := map[string]string{}
-		if err := json.Unmarshal(rawConfig, &stored); err != nil {
-			entry.Reason = MaterializeDecryptFailed
-			byID[m.ID] = entry
-			continue
-		}
-		// Synthetic only, and precisely: this gate stops a `scenario_secret_*` key on another
-		// type from pulling that monitor onto the credential path, so the monitor KEEPS
-		// PROBING instead of failing for a key it cannot use. It does NOT make such a key
-		// harmless everywhere — an existing `monitor_secret_refs` row still counts against
-		// deleting its secret and still follows a rename, and the stored key blocks the
-		// monitor's next API edit until it is dropped. No released build ever accepted the
-		// key; `TestAPreFixNonSyntheticBindingRowBehavesAsDocumented` seeds one anyway and
-		// states each of those outcomes, because the review was right that "inert" was not
-		// what this gate delivers.
-		// FR-029 D8: the RUN key, set before the job is sealed so the execution digest covers it.
-		// It is the scheduled WINDOW — floor(now / interval) — and not the job id, so a redelivered
-		// AMQP message, a re-claimed pull job after a lease expiry and a transport retry all carry
-		// the same idempotency key while the next scheduled run carries a different one. A job that
-		// straddles a window boundary on retry gets the next window's key, which is the honest
-		// reading: it IS the next run.
-		if m.Type == domain.MonitorAsyncCanary && m.IntervalSeconds > 0 {
-			stored[domain.CanaryRunKey] = domain.CanaryRunKeyAt(m.IntervalSeconds, time.Now())
-			m.Config = stored
-			job.Monitor = m
-		}
-		var scenarioRefKeys []string
-		if m.Type == domain.MonitorSynthetic {
-			scenarioRefKeys = domain.ScenarioSecretRefKeys(stored)
-		}
-		// FR-029: a canary's bindings ride the same path — one envelope field per binding, and the
-		// same body-bound carrier floor, because the document that says WHERE a credential may be
-		// sent is what the digest has to cover.
-		var canaryRefKeys []string
-		if m.Type == domain.MonitorAsyncCanary {
-			canaryRefKeys = domain.CanarySecretRefKeys(stored)
-		}
-		// A monitor with neither a credential schema nor a scenario binding carries no
-		// envelope at all, exactly as before (FR-028 stage 2 adds the second half of this
-		// condition and nothing else to the ordinary path).
-		if !domain.CredentialedType(m.Type) && len(scenarioRefKeys) == 0 && len(canaryRefKeys) == 0 {
-			// A monitor with no envelope rides generation 1 or, with a window and a ledger-ready
-			// region, generation 4. `WithCarrier` strips `DueAt` when it is neither, so a job can
-			// never carry the field that DEFINES a generation it is not riding.
-			entry.Job = dispatch.WithCarrier(job, dispatch.CarrierFor(regionGeneration, false, hasWindow, m.Type))
-			byID[m.ID] = entry
-			continue
-		}
-		bound := map[string]materializedRef{}
-		if err := json.Unmarshal(rawRefs, &bound); err != nil {
-			entry.Reason = MaterializeMissingReference
-			byID[m.ID] = entry
-			continue
-		}
-		fields := map[string][]byte{}
-		// One envelope field per scenario binding, named for the binding. The executor
-		// substitutes them into the scenario after the structural gate and wipes them; they
-		// never touch the monitor's config on the way out of here.
-		scenarioFailure := ""
-		// A binding cannot ride a carrier whose envelope does not bind the body: the
-		// anti-relocation property depends on it, so a region still on an older carrier gets
-		// a per-monitor reason rather than a job that looks protected and is not.
-		if len(scenarioRefKeys)+len(canaryRefKeys) > 0 {
-			version, verr := envelopeForCarrier(
-				dispatch.CarrierFor(regionGeneration, true, hasWindow, m.Type))
-			if verr != nil || version < dispatch.EnvelopeV2 {
-				entry.Reason = MaterializeCarrierTooOld
-				byID[m.ID] = entry
-				continue
-			}
-		}
-		for _, key := range canaryRefKeys {
-			binding, _ := domain.CanaryBindingFromRefKey(key)
-			refName := strings.TrimSpace(stored[key])
-			ref, ok := bound[key]
-			if !ok || ref.Name != refName || ref.SecretID == "" || ref.Ciphertext == "" || s.cipher == nil {
-				scenarioFailure = MaterializeMissingReference
-				break
-			}
-			plain, err := s.cipher.DecryptBytes(ref.Ciphertext, secret.CanonicalAAD(m.ProjectID, ref.SecretID))
-			if err != nil {
-				scenarioFailure = MaterializeDecryptFailed
-				break
-			}
-			fields[domain.CanaryBindingField(binding)] = plain
-		}
-		for _, key := range scenarioRefKeys {
-			binding, _ := domain.ScenarioBindingFromRefKey(key)
-			refName := strings.TrimSpace(stored[key])
-			ref, ok := bound[key]
-			if !ok || ref.Name != refName || ref.SecretID == "" || ref.Ciphertext == "" || s.cipher == nil {
-				scenarioFailure = MaterializeMissingReference
-				break
-			}
-			plain, err := s.cipher.DecryptBytes(ref.Ciphertext, secret.CanonicalAAD(m.ProjectID, ref.SecretID))
-			if err != nil {
-				scenarioFailure = MaterializeDecryptFailed
-				break
-			}
-			fields[domain.ScenarioBindingField(binding)] = plain
-		}
-		if scenarioFailure != "" {
-			dispatch.WipeCredentialFields(fields)
-			entry.Reason = scenarioFailure
-			byID[m.ID] = entry
-			continue
-		}
-		if refName := stored["password_ref"]; refName != "" && domain.CredentialedType(m.Type) {
-			ref, ok := bound["password_ref"]
-			if !ok || ref.Name != refName || ref.SecretID == "" || ref.Ciphertext == "" || s.cipher == nil {
-				entry.Reason = MaterializeMissingReference
-				byID[m.ID] = entry
-				continue
-			}
-			plain, err := s.cipher.DecryptBytes(ref.Ciphertext, secret.CanonicalAAD(m.ProjectID, ref.SecretID))
-			if err != nil {
-				entry.Reason = MaterializeDecryptFailed
-				byID[m.ID] = entry
-				continue
-			}
-			fields["password"] = plain
-		} else if encrypted := stored["password"]; encrypted != "" && domain.CredentialedType(m.Type) {
-			if s.cipher == nil {
-				entry.Reason = MaterializeDecryptFailed
-				byID[m.ID] = entry
-				continue
-			}
-			plain, err := s.cipher.Decrypt(encrypted)
-			if err != nil {
-				entry.Reason = MaterializeDecryptFailed
-				byID[m.ID] = entry
-				continue
-			}
-			fields["password"] = []byte(plain)
-		}
-		if len(fields) > 0 {
-			ring, ok := s.credentialKeyrings.ForRegion(m.Region)
-			if !ok {
-				dispatch.WipeCredentialFields(fields)
-				entry.Reason = MaterializeNoDispatchKey
-				byID[m.ID] = entry
-				continue
-			}
-			// The AUTHORITATIVE region decides the carrier, exactly as it already decides
-			// the keyring — the two must come from the same row or they can disagree. The
-			// selection itself has ONE owner in `dispatch.CarrierFor`, shared with the
-			// scheduler's plain branch: a job with no standing expectation is capped BELOW
-			// generation 4 there rather than published as a v4 delivery missing the field that
-			// defines it (invariant 10i).
-			carrierGeneration := dispatch.CarrierFor(regionGeneration, true, hasWindow, m.Type)
-			envelopeVersion, err := envelopeForCarrier(carrierGeneration)
-			if err != nil {
-				dispatch.WipeCredentialFields(fields)
-				entry.Reason = MaterializeDecryptFailed
-				byID[m.ID] = entry
-				continue
-			}
-			envelope, err := ring.Seal(dispatch.SealContext{
-				EnvelopeVersion: envelopeVersion,
-				Region:          m.Region,
-				JobID:           jobID,
-				MonitorID:       m.ID,
-				Revision:        m.ExecutionRevision,
-				Body:            job.Monitor,
-			}, fields)
-			dispatch.WipeCredentialFields(fields)
-			if err != nil {
-				entry.Reason = MaterializeDecryptFailed
-				byID[m.ID] = entry
-				continue
-			}
-			job = dispatch.WithCarrier(job, carrierGeneration)
-			job.CredentialEnvelope = envelope
-			body, err := json.Marshal(job)
-			if err != nil || len(body) > maxMaterializedJobBytes {
-				entry.Reason = MaterializePayloadTooLarge
-				byID[m.ID] = entry
-				continue
-			}
-		}
-		entry.Job = job
 		byID[m.ID] = entry
 	}
 	if err := rows.Err(); err != nil {
@@ -342,6 +187,193 @@ func (s *Store) MaterializeExecutionConfigs(ctx context.Context, monitorIDs []st
 		}
 	}
 	return out, nil
+}
+
+// materializeRow builds one monitor's dispatch-ready job, or names the reason it has none.
+//
+// It exists so that the carrier stamp has ONE owner rather than one per exit. Its success value is
+// a `stampedJob`, whose only constructor is `stampJob`, so a branch that returns a job without
+// choosing a carrier does not compile. Every `return` below therefore either names a reason and
+// carries no job, or crosses the stamp — which is A1's decided property stated as a signature.
+//
+// regionGeneration is the region's PROVEN generation, taken once by the caller from the
+// authoritative row so the carrier decisions here cannot disagree with each other.
+func (s *Store) materializeRow(
+	m domain.Monitor, regionGeneration int,
+	rawConfig, rawRefs []byte, jobID string, issuedAt time.Time, dueAt *time.Time,
+) (stampedJob, string) {
+	if !m.Enabled || !m.Type.Active() {
+		return stampedJob{}, MaterializeSkippedCurrentState
+	}
+	job := dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV1, JobID: jobID, IssuedAt: issuedAt}
+	hasWindow := dueAt != nil
+	if hasWindow {
+		job.DueAt = *dueAt
+	}
+	stored := map[string]string{}
+	if err := json.Unmarshal(rawConfig, &stored); err != nil {
+		return stampedJob{}, MaterializeDecryptFailed
+	}
+	// Synthetic only, and precisely: this gate stops a `scenario_secret_*` key on another
+	// type from pulling that monitor onto the credential path, so the monitor KEEPS
+	// PROBING instead of failing for a key it cannot use. It does NOT make such a key
+	// harmless everywhere — an existing `monitor_secret_refs` row still counts against
+	// deleting its secret and still follows a rename, and the stored key blocks the
+	// monitor's next API edit until it is dropped. No released build ever accepted the
+	// key; `TestAPreFixNonSyntheticBindingRowBehavesAsDocumented` seeds one anyway and
+	// states each of those outcomes, because the review was right that "inert" was not
+	// what this gate delivers.
+	// FR-029 D8: the RUN key, set before the job is sealed so the execution digest covers it.
+	// It is the scheduled WINDOW — floor(now / interval) — and not the job id, so a redelivered
+	// AMQP message, a re-claimed pull job after a lease expiry and a transport retry all carry
+	// the same idempotency key while the next scheduled run carries a different one. A job that
+	// straddles a window boundary on retry gets the next window's key, which is the honest
+	// reading: it IS the next run.
+	if m.Type == domain.MonitorAsyncCanary && m.IntervalSeconds > 0 {
+		stored[domain.CanaryRunKey] = domain.CanaryRunKeyAt(m.IntervalSeconds, time.Now())
+		m.Config = stored
+		job.Monitor = m
+	}
+	var scenarioRefKeys []string
+	if m.Type == domain.MonitorSynthetic {
+		scenarioRefKeys = domain.ScenarioSecretRefKeys(stored)
+	}
+	// FR-029: a canary's bindings ride the same path — one envelope field per binding, and the
+	// same body-bound carrier floor, because the document that says WHERE a credential may be
+	// sent is what the digest has to cover.
+	var canaryRefKeys []string
+	if m.Type == domain.MonitorAsyncCanary {
+		canaryRefKeys = domain.CanarySecretRefKeys(stored)
+	}
+	// A monitor with neither a credential schema nor a scenario binding carries no
+	// envelope at all, exactly as before (FR-028 stage 2 adds the second half of this
+	// condition and nothing else to the ordinary path).
+	if !domain.CredentialedType(m.Type) && len(scenarioRefKeys) == 0 && len(canaryRefKeys) == 0 {
+		// A monitor with no envelope rides generation 1 or, with a window and a ledger-ready
+		// region, generation 4. `WithCarrier` strips `DueAt` when it is neither, so a job can
+		// never carry the field that DEFINES a generation it is not riding.
+		return stampJob(job, dispatch.CarrierFor(regionGeneration, false, hasWindow, m.Type)), ""
+	}
+	bound := map[string]materializedRef{}
+	if err := json.Unmarshal(rawRefs, &bound); err != nil {
+		return stampedJob{}, MaterializeMissingReference
+	}
+	fields := map[string][]byte{}
+	// One envelope field per scenario binding, named for the binding. The executor
+	// substitutes them into the scenario after the structural gate and wipes them; they
+	// never touch the monitor's config on the way out of here.
+	scenarioFailure := ""
+	// A binding cannot ride a carrier whose envelope does not bind the body: the
+	// anti-relocation property depends on it, so a region still on an older carrier gets
+	// a per-monitor reason rather than a job that looks protected and is not.
+	if len(scenarioRefKeys)+len(canaryRefKeys) > 0 {
+		version, verr := envelopeForCarrier(
+			dispatch.CarrierFor(regionGeneration, true, hasWindow, m.Type))
+		if verr != nil || version < dispatch.EnvelopeV2 {
+			return stampedJob{}, MaterializeCarrierTooOld
+		}
+	}
+	for _, key := range canaryRefKeys {
+		binding, _ := domain.CanaryBindingFromRefKey(key)
+		refName := strings.TrimSpace(stored[key])
+		ref, ok := bound[key]
+		if !ok || ref.Name != refName || ref.SecretID == "" || ref.Ciphertext == "" || s.cipher == nil {
+			scenarioFailure = MaterializeMissingReference
+			break
+		}
+		plain, err := s.cipher.DecryptBytes(ref.Ciphertext, secret.CanonicalAAD(m.ProjectID, ref.SecretID))
+		if err != nil {
+			scenarioFailure = MaterializeDecryptFailed
+			break
+		}
+		fields[domain.CanaryBindingField(binding)] = plain
+	}
+	for _, key := range scenarioRefKeys {
+		binding, _ := domain.ScenarioBindingFromRefKey(key)
+		refName := strings.TrimSpace(stored[key])
+		ref, ok := bound[key]
+		if !ok || ref.Name != refName || ref.SecretID == "" || ref.Ciphertext == "" || s.cipher == nil {
+			scenarioFailure = MaterializeMissingReference
+			break
+		}
+		plain, err := s.cipher.DecryptBytes(ref.Ciphertext, secret.CanonicalAAD(m.ProjectID, ref.SecretID))
+		if err != nil {
+			scenarioFailure = MaterializeDecryptFailed
+			break
+		}
+		fields[domain.ScenarioBindingField(binding)] = plain
+	}
+	if scenarioFailure != "" {
+		dispatch.WipeCredentialFields(fields)
+		return stampedJob{}, scenarioFailure
+	}
+	if refName := stored["password_ref"]; refName != "" && domain.CredentialedType(m.Type) {
+		ref, ok := bound["password_ref"]
+		if !ok || ref.Name != refName || ref.SecretID == "" || ref.Ciphertext == "" || s.cipher == nil {
+			return stampedJob{}, MaterializeMissingReference
+		}
+		plain, err := s.cipher.DecryptBytes(ref.Ciphertext, secret.CanonicalAAD(m.ProjectID, ref.SecretID))
+		if err != nil {
+			return stampedJob{}, MaterializeDecryptFailed
+		}
+		fields["password"] = plain
+	} else if encrypted := stored["password"]; encrypted != "" && domain.CredentialedType(m.Type) {
+		if s.cipher == nil {
+			return stampedJob{}, MaterializeDecryptFailed
+		}
+		plain, err := s.cipher.Decrypt(encrypted)
+		if err != nil {
+			return stampedJob{}, MaterializeDecryptFailed
+		}
+		fields["password"] = []byte(plain)
+	}
+	if len(fields) > 0 {
+		ring, ok := s.credentialKeyrings.ForRegion(m.Region)
+		if !ok {
+			dispatch.WipeCredentialFields(fields)
+			return stampedJob{}, MaterializeNoDispatchKey
+		}
+		// The AUTHORITATIVE region decides the carrier, exactly as it already decides
+		// the keyring — the two must come from the same row or they can disagree. The
+		// selection itself has ONE owner in `dispatch.CarrierFor`, shared with the
+		// scheduler's plain branch: a job with no standing expectation is capped BELOW
+		// generation 4 there rather than published as a v4 delivery missing the field that
+		// defines it (invariant 10i).
+		carrierGeneration := dispatch.CarrierFor(regionGeneration, true, hasWindow, m.Type)
+		envelopeVersion, err := envelopeForCarrier(carrierGeneration)
+		if err != nil {
+			dispatch.WipeCredentialFields(fields)
+			return stampedJob{}, MaterializeDecryptFailed
+		}
+		envelope, err := ring.Seal(dispatch.SealContext{
+			EnvelopeVersion: envelopeVersion,
+			Region:          m.Region,
+			JobID:           jobID,
+			MonitorID:       m.ID,
+			Revision:        m.ExecutionRevision,
+			Body:            job.Monitor,
+		}, fields)
+		dispatch.WipeCredentialFields(fields)
+		if err != nil {
+			return stampedJob{}, MaterializeDecryptFailed
+		}
+		job.CredentialEnvelope = envelope
+		// The size bound is measured on the STAMPED job, exactly as before: the stamp is what
+		// decides whether the window field is on the wire, so a payload check ahead of it would
+		// weigh a body no transport carries.
+		sealed := stampJob(job, carrierGeneration)
+		body, err := json.Marshal(sealed.job)
+		if err != nil || len(body) > maxMaterializedJobBytes {
+			return stampedJob{}, MaterializePayloadTooLarge
+		}
+		return sealed, ""
+	}
+	// The third exit, and the one A1 is about: a type credentialed BY SCHEMA whose effective
+	// variant forbids a credential — `promql` with `auth_mode: none`, `rabbitmq` with
+	// `mode: amqp` — reaches here with no envelope field. It carries no envelope, so it rides
+	// exactly what a secretless monitor of its region rides, and it reaches the stamp by
+	// construction rather than by a third call someone had to remember.
+	return stampJob(job, dispatch.CarrierFor(regionGeneration, false, hasWindow, m.Type)), ""
 }
 
 // MaterializeExecutionConfig is the singular test/manual convenience over the same
@@ -367,7 +399,11 @@ func (s *Store) MaterializeTestExecutionConfig(ctx context.Context, m domain.Mon
 		carrierGeneration = dispatch.ProtocolV2
 	}
 	if !domain.CredentialedType(m.Type) {
-		return MaterializedExecution{Job: dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV1}}, nil
+		// Through the same constructor as the scheduled path, so "no job leaves this file
+		// unstamped" is a property of the file and not of one function in it. A test carries no
+		// window, so generation 1 is what it rides.
+		stamped := stampJob(dispatch.CheckJob{Monitor: m}, dispatch.ProtocolV1)
+		return MaterializedExecution{Job: stamped.job, CarrierGeneration: stamped.generation}, nil
 	}
 	var projectID, monitorID, jobID string
 	fields := map[string][]byte{}
@@ -415,9 +451,10 @@ func (s *Store) MaterializeTestExecutionConfig(ctx context.Context, m domain.Mon
 	}
 	m.Config = configCopy
 	delete(m.Config, "password")
-	job := dispatch.CheckJob{Monitor: m, ProtocolVersion: dispatch.ProtocolV1}
+	job := dispatch.CheckJob{Monitor: m}
 	if len(fields) == 0 {
-		return MaterializedExecution{MonitorID: monitorID, Job: job}, nil
+		stamped := stampJob(job, dispatch.ProtocolV1)
+		return MaterializedExecution{MonitorID: monitorID, Job: stamped.job, CarrierGeneration: stamped.generation}, nil
 	}
 	ring, ok := s.credentialKeyrings.ForRegion(m.Region)
 	if !ok {
@@ -441,7 +478,7 @@ func (s *Store) MaterializeTestExecutionConfig(ctx context.Context, m domain.Mon
 	if err != nil {
 		return MaterializedExecution{MonitorID: monitorID, Reason: MaterializeDecryptFailed}, nil
 	}
-	job = dispatch.WithCarrier(job, carrierGeneration)
 	job.CredentialEnvelope = envelope
-	return MaterializedExecution{MonitorID: monitorID, Job: job}, nil
+	stamped := stampJob(job, carrierGeneration)
+	return MaterializedExecution{MonitorID: monitorID, Job: stamped.job, CarrierGeneration: stamped.generation}, nil
 }

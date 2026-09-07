@@ -84,53 +84,65 @@ const (
 	channelRetryBackoff = 2 * time.Second
 )
 
-// jobsQueueForRegion returns the per-region jobs queue name (empty → core).
-func jobsQueueForRegion(region string) string {
+// queueForRegion names a per-region queue, and it is the ONE place the empty-region default lives.
+//
+// A5: there used to be one helper per generation per family, each restating `region == "" →
+// DefaultRegion`, and the generation-4 jobs helper — the newest, written last — was the single
+// sibling that omitted it. Unreachable today, because every publisher resolves the region before
+// it gets here; a publisher with an empty region would have declared and published to
+// `checks.jobs.v4.` and no consumer binds that name, so the jobs would have sat unconsumed until
+// their TTL while every other generation routed correctly.
+//
+// One helper cannot have that shape. The generation tables below select a PREFIX and this
+// function applies the default, so a seventh generation is a row in a table rather than a
+// function someone has to remember to write correctly.
+func queueForRegion(prefix, region string) string {
 	if region == "" {
 		region = domain.DefaultRegion
 	}
-	return jobsQueuePrefix + region
+	return prefix + region
 }
 
-func jobsV2QueueForRegion(region string) string {
-	if region == "" {
-		region = domain.DefaultRegion
+// jobsQueuePrefixes and testsQueuePrefixes are the generation → queue-family mappings. They are
+// tables and not switches so that the mapping and the default cannot be edited apart, and
+// `JobsQueuePrefixes` below publishes the jobs table so that a reader of queue NAMES — the broker
+// admin client — derives the set from the generations this package can publish rather than
+// restating it (A6).
+var (
+	jobsQueuePrefixes = map[int]string{
+		ProtocolV1: jobsQueuePrefix,
+		ProtocolV2: jobsV2QueuePrefix,
+		ProtocolV3: jobsV3QueuePrefix,
+		ProtocolV4: jobsV4QueuePrefix,
 	}
-	return jobsV2QueuePrefix + region
-}
-
-// testsQueueForRegion returns the per-region test-RPC queue name (empty → core).
-func testsQueueForRegion(region string) string {
-	if region == "" {
-		region = domain.DefaultRegion
+	testsQueuePrefixes = map[int]string{
+		ProtocolV1: testsQueuePrefix,
+		ProtocolV2: testsV2QueuePrefix,
+		ProtocolV3: testsV3QueuePrefix,
 	}
-	return testsQueuePrefix + region
-}
+)
 
-func testsV2QueueForRegion(region string) string {
-	if region == "" {
-		region = domain.DefaultRegion
+// JobsQueuePrefixes reports the generation → jobs-queue-prefix table, copied so a caller cannot
+// edit the routing by editing the answer.
+//
+// It exists for A6. `internal/mqadmin` reads queue names off the broker and has to tell the legacy
+// region queue `checks.jobs.<region>` apart from the generational ones, which share its prefix. It
+// did that with a hand-written exclusion list, and the list was one generation behind: generation 4
+// shipped and nothing excluded `checks.jobs.v4.`, so a v4 consumer registered the phantom region
+// `v4.<region>` in the union feeding the region-worker alert. A list restated in a second package
+// is a list that goes stale the next time a generation is added; a derived one cannot.
+func JobsQueuePrefixes() map[int]string {
+	out := make(map[int]string, len(jobsQueuePrefixes))
+	for generation, prefix := range jobsQueuePrefixes {
+		out[generation] = prefix
 	}
-	return testsV2QueuePrefix + region
+	return out
 }
 
-func jobsV4QueueForRegion(region string) string {
-	return jobsV4QueuePrefix + region
-}
-
-func jobsV3QueueForRegion(region string) string {
-	if region == "" {
-		region = domain.DefaultRegion
-	}
-	return jobsV3QueuePrefix + region
-}
-
-func testsV3QueueForRegion(region string) string {
-	if region == "" {
-		region = domain.DefaultRegion
-	}
-	return testsV3QueuePrefix + region
-}
+// LegacyJobsQueuePrefix is the generation-1 jobs prefix, which every generational prefix EXTENDS.
+// A caller matching queue names needs both: this to recognise the family, and the table above to
+// subtract the generations that merely look like a region.
+func LegacyJobsQueuePrefix() string { return jobsQueuePrefix }
 
 // jobsQueueForGeneration maps a carrier generation to its physical queue. The mapping is
 // explicit and total: a generation with no queue is a programming error, never a silent
@@ -158,31 +170,19 @@ func canaryQueueForGeneration(token, region string, generation int) (string, boo
 }
 
 func jobsQueueForGeneration(region string, generation int) (string, bool) {
-	switch generation {
-	case ProtocolV1:
-		return jobsQueueForRegion(region), true
-	case ProtocolV2:
-		return jobsV2QueueForRegion(region), true
-	case ProtocolV3:
-		return jobsV3QueueForRegion(region), true
-	case ProtocolV4:
-		return jobsV4QueueForRegion(region), true
-	default:
+	prefix, ok := jobsQueuePrefixes[generation]
+	if !ok {
 		return "", false
 	}
+	return queueForRegion(prefix, region), true
 }
 
 func testsQueueForGeneration(region string, generation int) (string, bool) {
-	switch generation {
-	case ProtocolV1:
-		return testsQueueForRegion(region), true
-	case ProtocolV2:
-		return testsV2QueueForRegion(region), true
-	case ProtocolV3:
-		return testsV3QueueForRegion(region), true
-	default:
+	prefix, ok := testsQueuePrefixes[generation]
+	if !ok {
 		return "", false
 	}
+	return queueForRegion(prefix, region), true
 }
 
 // TestRunner answers one test-RPC delivery. Both the legacy and the envelope-bearing test
@@ -713,19 +713,19 @@ func (d *AMQP) Jobs() <-chan DeliveredJob {
 				}
 			})
 		}
-		consumeQueue(jobsQueueForRegion(d.jobRegion), "jobs", ProtocolV1)
+		consumeQueue(queueForRegion(jobsQueuePrefix, d.jobRegion), "jobs", ProtocolV1)
 		// One carrier per envelope generation this executor can open, and no others.
 		if d.credentialCapability >= EnvelopeV1 {
-			consumeQueue(jobsV2QueueForRegion(d.jobRegion), "jobs.v2", ProtocolV2)
+			consumeQueue(queueForRegion(jobsV2QueuePrefix, d.jobRegion), "jobs.v2", ProtocolV2)
 		}
 		if d.credentialCapability >= EnvelopeV2 {
-			consumeQueue(jobsV3QueueForRegion(d.jobRegion), "jobs.v3", ProtocolV3)
+			consumeQueue(queueForRegion(jobsV3QueuePrefix, d.jobRegion), "jobs.v3", ProtocolV3)
 		}
 		// Generation 4 is bound on its OWN capability, never on the credential one: job identity
 		// applies to every monitor, so gating it on an envelope capability would make an ordinary
 		// HTTP monitor's eligibility depend on something its dispatch never needs (§13.0).
 		if d.ledgerCapability >= 1 {
-			consumeQueue(jobsV4QueueForRegion(d.jobRegion), "jobs.v4", ProtocolV4)
+			consumeQueue(queueForRegion(jobsV4QueuePrefix, d.jobRegion), "jobs.v4", ProtocolV4)
 		}
 		// FR-029 invariant 6: consuming the canary queue IS this executor's announcement, so it is
 		// bound only when the runner in this process actually has the workflow. The envelope-bearing
@@ -857,7 +857,7 @@ func (d *AMQP) RunJobTest(ctx context.Context, job CheckJob) (domain.Heartbeat, 
 // after the initial queue declaration and consumer registration succeed, forming a
 // startup-readiness barrier.
 func (d *AMQP) ServeTestsV2(run TestRunner) error {
-	return d.serveTestsGeneration(&d.testsV2Once, testsV2QueueForRegion(d.jobRegion), ProtocolV2, run)
+	return d.serveTestsGeneration(&d.testsV2Once, queueForRegion(testsV2QueuePrefix, d.jobRegion), ProtocolV2, run)
 }
 
 // ServeTestsV3 consumes the generation-3 test carrier — the one that carries envelope v2.
@@ -865,7 +865,7 @@ func (d *AMQP) ServeTestsV2(run TestRunner) error {
 // and no consumer is a queue that fills until TTL, and "jobs AND tests, AMQP AND pull" is
 // the contract, not a slogan. Started only by a worker that declared capability 2.
 func (d *AMQP) ServeTestsV3(run TestRunner) error {
-	return d.serveTestsGeneration(&d.testsV3Once, testsV3QueueForRegion(d.jobRegion), ProtocolV3, run)
+	return d.serveTestsGeneration(&d.testsV3Once, queueForRegion(testsV3QueuePrefix, d.jobRegion), ProtocolV3, run)
 }
 
 func (d *AMQP) serveTestsGeneration(once *sync.Once, queue string, generation int, run TestRunner) error {
@@ -1012,7 +1012,7 @@ func (d *AMQP) refuseTest(ch *amqp.Channel, msg amqp.Delivery, generation int, j
 func (d *AMQP) ServeTests(run TestRunner) error {
 	var initialErr error
 	d.testsOnce.Do(func() {
-		queue := testsQueueForRegion(d.jobRegion)
+		queue := queueForRegion(testsQueuePrefix, d.jobRegion)
 		ready := make(chan error, 1)
 		go func() {
 			for {

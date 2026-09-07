@@ -50,8 +50,11 @@ func TestServiceAlertingDeclarationParses(t *testing.T) {
 	}
 }
 
-// A field omitted INSIDE a present block takes the documented §16.6a default. That is a
-// statement; the block's absence is not (see TestAbsentAlertingBlockDeclaresNothing).
+// A field omitted INSIDE a present block takes the documented §16.6a default — and so does an
+// absent block, by `TestAbsentAlertingBlockIsTheDefaultDeclaration` below. Both routes end at the
+// same values, which is why both are tested. The sentence here used to say the absence was NOT a
+// statement, and cited a test by a name the tree has never held — D6's guard could not see it,
+// because it read backticked citations only.
 func TestAlertingFieldDefaultsInsideAPresentBlock(t *testing.T) {
 	p := alertingOf(t, alertingYAML("    alerting:\n      owns_paging: true\n"))
 	if p == nil {

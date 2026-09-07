@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
-## [v0.1.9] - 2026-09-06
+## [v0.1.9] - 2026-09-07
 
 Everything since `v0.1.8`, in three parts and one set of fixes: the **typed external canary** and
 the audit trail that were prepared under this number once before, the **truthful-rendering**
@@ -18,9 +18,12 @@ dropped, not moved, until the review closes`), while the dated heading outlived 
 release that did not exist. It is back by the owner's decision, with the later work folded in and
 the date moved to when that decision was taken.
 
-**Stated plainly, because this file has already carried the opposite claim once:** at the time of
-writing there is no `v0.1.9` tag in the repository — `v0.1.8` is the newest — and the commits below
-are unpushed. Tagging and pushing are separate acts and belong to the owner.
+**Why that history is kept here:** a version heading can make a claim falsely, and this one did.
+The withdrawn heading announced a release whose tag had been deleted by hand, and the file went on
+saying so for days. The record of that stays; the sentence that reported the repository's tag state
+does not, because THIS SECTION IS THE RELEASE BODY — `.github/workflows/build.yml` publishes it
+verbatim for the matching tag — and a release announcing that its own tag does not exist would be
+the same defect wearing the opposite sign.
 
 ### Part 1 — the canary work, prepared under this number once before
 
@@ -333,6 +336,81 @@ due and never happened" — so no rendering could honestly connect two points ac
 passed, including credentialed dispatch on both remote transports — a path no geo run exercised
 before · `make secret-smoke` and `make mac-smoke` green · full `-race` 33 packages exit 0 ·
 `iter-0178` CLOSED by the owner</sub>
+
+### Part 4 — the repairs a two-axis review of this range found (audit gap package 3)
+
+Fifty-two findings from an independent review of everything since `v0.1.8`, in seven clusters. The
+package adds no requirement: it repairs FR-020, FR-026, FR-029, FR-030, FR-031/NFR-025 and FR-032,
+which is why it carries an iteration number and no `FR-`. Three of the findings were P0.
+
+#### ⚠️ Upgrade Notes
+
+- **Migration `00104` can REFUSE the upgrade, deliberately.** It narrows the `pull_tests` carrier
+  ceiling to generations 1–3 and stops with a count if the table holds a row at
+  `protocol_version = 4`. No build emits a generation-4 TEST carrier, so such a row was not written
+  by this product, and the migration will not discard it for you: silently deleting an unexplained
+  row destroys the evidence of whatever wrote it. Nothing is lost when this happens — the database
+  stays at `00103` — and `runbook.md` carries the query to inspect the rows and the reason the
+  asymmetry with `pull_jobs` is correct.
+- **Migration `00105` drops `expected_runs_job_idx`**, which served no query in the tree: every
+  statement that mentions `job_id` also constrains `due_at`, and the primary key is
+  `(monitor_id, due_at)`.
+- **`ON DELETE SET NULL` column-list migrations: SIX, not five.** `00093` added the sixth when the
+  reliability gate landed, and only the README and the refusal message were corrected then. Eight
+  other statements — the overview, the runbook's count and its list, two rows of `status.md`, two
+  passages of `decisions.md`, and a test comment — still said five. The PostgreSQL 15 floor itself
+  is unchanged; what was wrong was every document's count of why.
+
+#### 🩹 Fixed
+
+- **A credentialed-by-SCHEMA monitor with no credential value was stamped with the wrong carrier**
+  (P0). One producer branch skipped the stamp, so the ledger read those windows as `unknown` and
+  coverage was lost, silently, for a whole class of monitors — probes ran and results correlated.
+- **An external canary kept its binding headers across a scheme-downgrading redirect** (P0). The hop
+  is now refused before any header operation, and the origin comparison includes the scheme, so a
+  redirect from `https` to `http` on the same host and port is cross-origin rather than "the same
+  place".
+- **An undispatchable canary reported nothing at all** (P0). A canary in a region with no capable
+  runner now flips the monitor DOWN through the ordinary result pipeline instead of sitting on a
+  queue until its TTL — the indefinite pending the invariant forbids.
+- **A canary workflow with no completion block dereferenced a nil pointer**, which one crafted
+  message could use to take down a region's whole prober pool. It is refused structurally now.
+- **The expected-run ledger's read API listed rows it declared unanswerable.** The retained floor
+  ignored the DEFAULT partition, so rows stored there were returned by the list while
+  `ledger_from` said the ledger could not speak for that span — two answers, one of them provably
+  wrong. The retention cutoff is also midnight-aligned everywhere, matching the purge that drops
+  partitions on that boundary.
+- **A batch of expectation advances failed as a whole when one item was unrepresentable.** The
+  healthy items reserve and publish; the rejected one is named in the log with its reason.
+- **The reliability timeline drew cells wider than the windows they belonged to**, so a covered cell
+  painted over the missed windows beside it and the pointer targets overlapped identically — the
+  readout named a window the pointer was not over. Cell width now comes from the window grid, and
+  each pointer target is bounded by half the space to its neighbour, so two targets can touch and
+  never overlap.
+- **An on-call rotation anchor moved by the viewer's offset on a cosmetic edit.** The control is
+  pre-filled in the viewer's zone and saved back as an instant; CI now runs the frontend suite a
+  second time in a non-UTC zone, without which the test proved nothing.
+- **Six more rendering repairs**: a storage verdict printed from a series that had not been read; a
+  panel subtitle describing strokes it had not drawn; a legend naming all observations where the
+  figure was computed from measured ones; a timeout declared in scale from an unrelated average; a
+  UTC day range that hid its clock; and a retention bound the API description had hardcoded.
+
+#### 🔧 Changed
+
+- **The carrier decision has one owner, and the pull-region exclusion one reader.** The scheduler
+  held three independent resolvers for "what can this region's executors consume"; they now share
+  one record, and a source guard fails by name if any of them goes back to reading the map directly.
+- **Four guards were widened to what they claim.** The `Test…` citation guard reads Go comments in
+  both spellings; the declared-door guard follows embedded interfaces at any depth and reports an
+  element it cannot read rather than treating it as absence; the PG15 migration guard derives its
+  sites from the tree instead of a hardcoded pair; and the rendering guard matches the locale
+  formatter with or without `new`.
+
+<sub>iter-0179, `D-0247` · 52 of 52 discharge rows built, each `behaviour` row with a recorded
+killing mutation · independent review COMPLETE, 52 of 52, no open findings · full `-race` 33
+packages exit 0 (`internal/store` 755.8 s) · `make docs-check` OK · SPA 683 tests at UTC and
+`Asia/Kolkata` · `make dev-test` 70 passed / 1 skipped · `make geo-test` 14 passed · `iter-0179`
+OPEN, and its closure is the owner's</sub>
 
 ---
 

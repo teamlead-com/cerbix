@@ -109,7 +109,7 @@ func TestTheReserveRetryIsIdempotentUnderTheSamePayload(t *testing.T) {
 		ExpectedRevision: m.ExecutionRevision, Region: m.Region, ReservedAt: now,
 	}
 
-	first, err := st.ReserveExpectations(ctx, now, []ExpectationAdvance{payload})
+	first, _, err := st.ReserveExpectations(ctx, now, []ExpectationAdvance{payload})
 	if err != nil || len(first) != 1 {
 		t.Fatalf("first reserve: reserved=%+v err=%v", first, err)
 	}
@@ -117,7 +117,7 @@ func TestTheReserveRetryIsIdempotentUnderTheSamePayload(t *testing.T) {
 		t.Fatalf("the reserve named %+v, want the window it was given", first[0])
 	}
 	// The retry. Same payload, unchanged — which is what the scheduler holds and re-submits.
-	second, err := st.ReserveExpectations(ctx, now.Add(time.Second), []ExpectationAdvance{payload})
+	second, _, err := st.ReserveExpectations(ctx, now.Add(time.Second), []ExpectationAdvance{payload})
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -361,4 +361,81 @@ func TestTheWithholdingVocabularyIsClosedAtBothBoundaries(t *testing.T) {
 			t.Fatalf("a withheld window reads %q, want %q", got, domain.VerdictReserved)
 		}
 	})
+}
+
+// C2 — the publish gate answers "was THIS window row written", not "did the schedule move".
+//
+// The two are different sets and the statement returned the wrong one. The window insert carries
+// `ON CONFLICT (monitor_id, due_at) DO NOTHING`, so it writes nothing when a row for that instant
+// already exists; the schedule UPDATE runs for every picked monitor regardless. `RETURNING` sat on
+// the update, so a repeated due instant passed the gate — the caller published a job carrying a NEW
+// identity while the stored window still carried the OLD one, and the result that came back
+// correlated to nothing. The run was recorded nowhere, on the one path that reports success.
+//
+// The state is built directly rather than waited for, because what produces a repeated instant (a
+// leader restart, a schedule rewritten by a configuration path) is not this statement's subject:
+// the subject is what the statement does when it arrives.
+//
+// The mutation that must kill this: return the schedule update's rows again.
+func TestARepeatedDueInstantReservesNothingAndPublishesNothing(t *testing.T) {
+	st, ctx := ledgerStore(t)
+	proj := seedLedgerProject(t, st, ctx, "repeatdue")
+	m := ledgerMonitor(t, st, ctx, proj, "repeated", 60)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	due := now.Add(-time.Minute)
+	backdateSchedule(t, st, ctx, m.ID, due)
+	first := ExpectationAdvance{
+		MonitorID: m.ID, JobID: ledgerJobA, NextDue: now.Add(time.Minute), IntervalInForce: 60,
+		CarrierGeneration: domain.LedgerMinCarrier, ExpectedDue: due,
+		ExpectedRevision: m.ExecutionRevision, Region: m.Region, ReservedAt: now,
+	}
+	reserved, _, err := st.ReserveExpectations(ctx, now, []ExpectationAdvance{first})
+	if err != nil || len(reserved) != 1 {
+		t.Fatalf("first reserve: %+v err=%v", reserved, err)
+	}
+
+	// The schedule is put back on the SAME instant while the window row for it already exists. The
+	// fence passes — `next_due_at` equals the expectation and the revision is unchanged — so the
+	// only thing standing between this and a published job is what the gate reads.
+	backdateSchedule(t, st, ctx, m.ID, due)
+	second := first
+	second.JobID = ledgerJobB
+	second.ReservedAt = now.Add(time.Second)
+	again, rejected, err := st.ReserveExpectations(ctx, now.Add(time.Second), []ExpectationAdvance{second})
+	if err != nil {
+		t.Fatalf("second reserve: %v", err)
+	}
+	if len(rejected) != 0 {
+		t.Fatalf("the second advance was rejected as unrepresentable: %+v — it is a legal advance "+
+			"whose window happens to exist", rejected)
+	}
+	if len(again) != 0 {
+		t.Fatalf("the gate reserved %+v for an instant whose window row was already written by "+
+			"another job: the caller would publish %s while the stored window carries %s, and the "+
+			"result would correlate to nothing", again, ledgerJobB, ledgerJobA)
+	}
+
+	// The window at that instant still carries the FIRST identity: the second attempt wrote nothing
+	// over it. The assertion names the instant rather than counting rows, because the second
+	// statement legitimately materializes the never-issued window the schedule passed while it sat
+	// on the repeated instant — that is the gap machinery doing its job, not this defect.
+	var atDue *ledgerWindow
+	for i, w := range readWindows(t, st, ctx, m.ID) {
+		if w.DueAt.Equal(due) {
+			atDue = &readWindows(t, st, ctx, m.ID)[i]
+		}
+	}
+	if atDue == nil {
+		t.Fatal("the window this test is about does not exist any more")
+	}
+	if atDue.JobID == nil || *atDue.JobID != ledgerJobA {
+		t.Errorf("the window carries %v, want the identity that actually reserved it", atDue.JobID)
+	}
+	// And the schedule still ADVANCED, which is the half that must not regress: leaving it behind
+	// would make the monitor pick the same instant for ever.
+	if got := readSchedule(t, st, ctx, m.ID).NextDueAt; !got.Equal(second.NextDue) {
+		t.Errorf("next_due_at = %s, want %s — the advance is unconditional, only the RETURN narrows",
+			got, second.NextDue)
+	}
 }

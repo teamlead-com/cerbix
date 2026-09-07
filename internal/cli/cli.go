@@ -1108,8 +1108,8 @@ func runServe(args []string) int {
 				// retentions. `TestEveryLeaderConstructionWiresTheLedgerPass` parses this file so
 				// a third construction site cannot ship without them.
 				WithLedgerMetrics(registry).
-				WithExpectedRunRetention(cfg.Ledger.ExpectedRunRetentionDays).
 				WithLocalCanaryRegions(localCanaryRegions...). // FR-029: the in-proc worker IS the announcement in role=all
+				WithLocalCanaryAnyRegionIf(canaryToken != ""). // B5: and it runs one for EVERY non-pull region, exactly as it does for every other type
 				WithPullRegions(cfg.Pull.Regions).             // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
 				WithPullMetrics(registry).
 				WithServiceMetrics(registry).                    // service repair queue/watermark gauges + slice outcomes                                          // per-region pull-queue depth/lag gauges
@@ -1143,7 +1143,6 @@ func runServe(args []string) int {
 				WithSecretResolutionMetrics(registry).
 				// FR-032 §11/§12.3, the same pair as the role=all construction above.
 				WithLedgerMetrics(registry).
-				WithExpectedRunRetention(cfg.Ledger.ExpectedRunRetentionDays).
 				WithPullRegions(cfg.Pull.Regions). // pull-served regions get jobs via pull_jobs, not AMQP
 				WithPullMetrics(registry).
 				WithServiceMetrics(registry).                    // service repair queue/watermark gauges + slice outcomes                                          // per-region pull-queue depth/lag gauges

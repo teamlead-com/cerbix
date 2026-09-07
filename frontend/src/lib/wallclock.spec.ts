@@ -233,7 +233,7 @@ describe("the mechanism's shape", () => {
     const exported = [...src.matchAll(/export function (\w+)/g)].map((m) => m[1]).sort();
     expect(exported).toEqual([
       "instantLabel", "instantLabelShort", "instantRangeLabel",
-      "localInputRangeZoneHint", "localInputZoneHint",
+      "localInputRangeZoneHint", "localInputValue", "localInputZoneHint",
       "utcCellExtentLabel", "utcClockLabel", "utcClockRangeLabel",
       "utcCompactInstantLabel", "utcDayClockLabel", "utcDayInputHint", "utcDayLabel",
       "utcDayRangeLabel", "utcExtentLabel", "utcInstantLabel", "utcMillisLabel",
@@ -256,6 +256,31 @@ describe("the mechanism's shape", () => {
     // A name like formatDate / formatTime is exactly what a caller reaches for when it has a
     // bucket and wants "a date"; there is deliberately nothing here to reach for.
     expect(src).not.toMatch(/export function format(Date|Time|Timestamp)?\b/);
+  });
+
+  // E6 — the extent a per-segment label actually has, to the precision that distinguishes two.
+  //
+  // The label truncated to whole days, so two reliability segments split by a revision boundary
+  // hours apart on one day rendered the identical string and the label could not say which segment
+  // a reader was looking at. Definition changes minutes apart are the ordinary case here — the
+  // strip beside this label clusters them for exactly that reason.
+  //
+  // The mutation that must kill this: truncate to days again.
+  it("distinguishes two boundaries inside one day, and leaves a whole-day extent alone", () => {
+    // Unchanged where nothing is lost: both ends at midnight read as they always did.
+    expect(utcDayRangeLabel("2026-09-01T00:00:00Z", "2026-09-03T00:00:00Z"))
+      .toBe("01.09.2026 → 03.09.2026 UTC");
+
+    // Two segments of one day, split at 09:30. Under the old label both read
+    // "05.09.2026 → 05.09.2026 UTC".
+    const first = utcDayRangeLabel("2026-09-05T00:00:00Z", "2026-09-05T09:30:00Z");
+    const second = utcDayRangeLabel("2026-09-05T09:30:00Z", "2026-09-06T00:00:00Z");
+    expect(first).not.toBe(second);
+    expect(first).toContain("09:30");
+    expect(second).toContain("09:30");
+    // The date is stated once inside a single day, and the zone once for the pair.
+    expect(first).toBe("05.09.2026 00:00 → 09:30 UTC");
+    expect(second).toBe("05.09.2026 09:30 → 06.09.2026 00:00 UTC");
   });
 
   // NFR-025b's enforcement, and the reason it stays closed rather than being closed once: a
@@ -290,8 +315,45 @@ describe("the mechanism's shape", () => {
   // `lib/datekeys.ts` (keys, wire values and control values), no product file calls
   // `toISOString` or pulls a field off a `Date` at all. There is nothing left to enumerate, and
   // an indirection cannot walk past it because the call itself is what is banned.
+  // E11 widened this from a CALL SHAPE to the HAZARD.
+  //
+  // The list above banned the ISO serializer and the field getters, and E1 walked straight past it
+  // with a slice of an API string: `sc.anchor_at.slice(0, 16)` produced a `datetime-local` value in
+  // no zone at all, which the save path then read as local and moved an on-call rotation anchor by
+  // the viewer's offset. Also unbanned and reachable when this was written: the offset getter, the
+  // UTC and date string forms, and a direct `Intl.DateTimeFormat`.
+  //
+  // What is NOT banned, and why: `getTime()`. It yields a NUMBER for arithmetic — a duration, a
+  // comparison, a sort key — and nine product modules use it that way. Banning it would ban
+  // subtraction, which is not the hazard; deriving a DISPLAYED value from an instant is.
+  //
+  // The slice rule is narrow on purpose and its boundary is stated rather than implied: it fires
+  // when a receiver NAMED like an instant is cut at an RFC-3339 field boundary. A slice with
+  // computed bounds, or one whose receiver is named something else, is not caught here — those are
+  // what the per-view surface specs and the round-trip assertions exist for, and a guard that
+  // pretended otherwise would be the over-claim this package is about.
   it("has no product file building a date by hand — two modules own every one (NFR-025c)", () => {
-    const IDIOM = /toISOString\s*\(|getUTC(?:Date|Month|FullYear|Hours|Minutes|Seconds|Day)\s*\(|\.get(?:Hours|Minutes|Seconds|Date|Month|FullYear|Day)\s*\(/g;
+    const IDIOM = new RegExp([
+      /toISOString\s*\(/,
+      /getUTC(?:Date|Month|FullYear|Hours|Minutes|Seconds|Day)\s*\(/,
+      /\.get(?:Hours|Minutes|Seconds|Date|Month|FullYear|Day)\s*\(/,
+      // E11: the routes the shape-based list never named.
+      /getTimezoneOffset\s*\(/,
+      /\.to(?:UTC|Date|Time)String\s*\(/,
+      // WITHOUT the `new`, deliberately. `Intl.DateTimeFormat(...)` is callable as a plain
+      // function and returns the same formatter — `Intl.DateTimeFormat("en-GB", { timeZone: "UTC" })
+      // .format(d)` prints a wall clock, verified by running it, and the first version of this rule
+      // matched only the constructor form (reviewer P1, party [326]). That was a rule about a
+      // SPELLING wearing the clothes of a rule about a hazard, which is the defect this guard's own
+      // item exists to remove. `Intl.DateTimeFormatOptions` is a TYPE and stays uncaught: the word
+      // boundary does not fall between `DateTimeFormat` and `Options`.
+      /\bIntl\.DateTimeFormat\b/,
+      // and the one E1 used: an instant cut at an RFC-3339 field boundary.
+      // The receiver alternatives are anchored at a word boundary on purpose: a bare `ts` is an
+      // instant, while the `ts` inside `heartbeats` is the end of a plural and slicing an ARRAY is
+      // not this hazard.
+      /(?:\b\w*(?:_at|At|[Ii]so|ISO|imestamp)|\bts|\bTs)\s*(?:\?\.)?\.slice\s*\(\s*(?:0\s*,\s*(?:10|16|19)|11\s*,\s*(?:16|19))\s*\)/,
+    ].map((r) => r.source).join("|"), "g");
     const OWNERS = ["lib/wallclock.ts", "lib/datekeys.ts"];
     const offenders: string[] = [];
     for (const file of walk(SRC)) {
@@ -302,6 +364,52 @@ describe("the mechanism's shape", () => {
       for (const m of stripComments(readFileSync(file, "utf8")).matchAll(IDIOM)) offenders.push(`${rel}: ${m[0]}`);
     }
     expect(offenders).toEqual([]);
+
+    // The widened rule is pinned against FIXTURES as well as against the tree, because a tree that
+    // is already clean cannot tell a working guard from a broken pattern. Each of these is a route
+    // that walked past the old list.
+    const caught = (src: string) => [...src.matchAll(new RegExp(IDIOM.source, "g"))].length;
+    expect(caught('scheduleForm.anchor_at = sc.anchor_at.slice(0, 16);'), "E1's own route").toBe(1);
+    expect(caught("const d = ts.slice(0, 19);")).toBe(1);
+    expect(caught("const off = new Date().getTimezoneOffset();")).toBe(1);
+    expect(caught("el.textContent = d.toUTCString();")).toBe(1);
+    expect(caught("el.textContent = d.toDateString();")).toBe(1);
+    expect(caught('new Intl.DateTimeFormat("en-GB").format(d);')).toBe(1);
+    expect(
+      caught('Intl.DateTimeFormat("en-GB", { timeZone: "UTC" }).format(d);'),
+      "the same formatter without `new` — executed and it prints a wall clock",
+    ).toBe(1);
+    // And what it must NOT catch, or it would ban arithmetic and array work rather than rendering.
+    expect(caught("const ms = new Date(b).getTime() - new Date(a).getTime();"), "arithmetic").toBe(0);
+    expect(caught("heartbeats.slice(0, 12)"), "an array slice").toBe(0);
+    expect(caught('digest.slice(0, 16)'), "a digest, not an instant").toBe(0);
+    expect(caught("byDay.set(d.day.slice(0, 10), d)"), "a UTC day used as a map key").toBe(0);
+    expect(
+      caught("const opts: Intl.DateTimeFormatOptions = { hour: \"2-digit\" };"),
+      "a type annotation is not a call",
+    ).toBe(0);
+  });
+
+  // E11's second half: the control inventory matches a LITERAL attribute, so a control whose type
+  // is bound would vanish from it — and an inventory that silently shrinks is worse than no
+  // inventory, because the exact-map assertion beside it would still pass.
+  //
+  // The hole is closed by refusing the shape rather than by teaching the matcher to evaluate a
+  // binding: a `<input :type="…">` in a product template fails here by file name, and whoever
+  // wants one has to decide what the inventory should say about it. None exists today, which is
+  // what makes this a guard against a future edit rather than a repair.
+  it("has no input whose TYPE is bound, so the control inventory cannot be walked past", () => {
+    const offenders: string[] = [];
+    for (const file of walk(SRC).filter((f) => f.endsWith(".vue"))) {
+      const text = stripComments(readFileSync(file, "utf8"));
+      for (const m of text.matchAll(/<input[^>]*?\s(?::type|v-bind:type)\s*=/g)) {
+        offenders.push(`${file.split("/src/")[1]}: ${m[0].trim()}`);
+      }
+    }
+    expect(
+      offenders,
+      "a bound input type is invisible to the control-surface inventory, which counts a literal attribute",
+    ).toEqual([]);
   });
 
   // The guard above is only worth its comment if the two owners really are reachable — a typo in
@@ -594,7 +702,7 @@ describe("the mechanism's shape", () => {
     // the derivation itself is asserted, or a broken regex would silently guard nothing
     expect(zoneArg).toEqual({
       instantLabel: 1, instantLabelShort: 1, utcCellExtentLabel: 2, instantRangeLabel: 2,
-      localInputZoneHint: 1, localInputRangeZoneHint: 2,
+      localInputValue: 1, localInputZoneHint: 1, localInputRangeZoneHint: 2,
     });
 
     // IMPORT-AWARE, and it has to be twice over.

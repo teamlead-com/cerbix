@@ -51,9 +51,16 @@ func TestAnEnvelopeDisabledDeploymentStillAnnouncesTheLedgerCarrier(t *testing.T
 // all, which is §11's entire measurement gate, and the purge cut at the built-in default whatever
 // `ledger.expected_run_retention_days` said, so one setting produced two different retentions.
 //
-// Every `scheduler.New(` in this file is a leader construction and every one must carry both. The
-// SET is asserted per site rather than by counting calls, because a same-count edit — moving one
-// call from one site to the other — walks straight through a count.
+// The RETENTION half moved (C8, F1). The leader no longer holds the number: it asks the store, which
+// owns the one midnight-aligned cutoff the purge, the correlation and §7.1's clip all read. So
+// `WithExpectedRunRetention` is gone — after C8 nothing read the field it set, and a builder whose
+// value is never read is the same wiring-boundary defect this guard was written for, arriving from
+// the other side. What has to be wired instead is the STORE's policy, and it is asserted below at
+// the one site that builds a store.
+//
+// Every `scheduler.New(` in this file is a leader construction and every one must carry the metrics
+// sink. The SET is asserted per site rather than by counting calls, because a same-count edit —
+// moving one call from one site to the other — walks straight through a count.
 func TestEveryLeaderConstructionWiresTheLedgerPass(t *testing.T) {
 	src, err := os.ReadFile("cli.go")
 	if err != nil {
@@ -71,10 +78,10 @@ func TestEveryLeaderConstructionWiresTheLedgerPass(t *testing.T) {
 			end = sites[i+1][0]
 		}
 		chain := string(src[at[0]:end])
-		for _, call := range []string{"WithLedgerMetrics(", "WithExpectedRunRetention("} {
+		for _, call := range []string{"WithLedgerMetrics("} {
 			if !strings.Contains(chain, call) {
 				t.Errorf("scheduler construction #%d does not call %s — FR-032's HOT gauge is then "+
-					"exported by nothing and the ledger purge ignores its configured retention", i+1, call)
+					"exported by nothing", i+1, call)
 			}
 		}
 	}
@@ -84,11 +91,22 @@ func TestEveryLeaderConstructionWiresTheLedgerPass(t *testing.T) {
 	// strays, the totals must match — and it is asserted BESIDE the per-site check rather than
 	// instead of it, because a count alone lets both calls sit on one construction while the other
 	// has none.
-	for _, call := range []string{"WithLedgerMetrics(", "WithExpectedRunRetention("} {
+	for _, call := range []string{"WithLedgerMetrics("} {
 		if got := strings.Count(string(src), call); got != len(sites) {
 			t.Errorf("%s appears %d time(s) against %d scheduler construction(s): one per "+
 				"construction and no strays, or the per-site check above can be satisfied by text "+
 				"that belongs to a different one", call, got, len(sites))
 		}
+	}
+
+	// The retention half, at its own site: the STORE carries the configured bounds, and it must
+	// take them from the config rather than from a literal. Without this the purge would cut at the
+	// unwired default whatever `ledger.expected_run_retention_days` said — the same defect the
+	// scheduler half was written for, one layer over.
+	if !strings.Contains(string(src),
+		"WithExpectedRunPolicy(cfg.Ledger.ExpectedRunRetentionDays, cfg.Ledger.ExpectedRunGapWindowsMax)") {
+		t.Error("the store is not wired with the configured ledger bounds: the purge, the correlation " +
+			"floor and §7.1's clip all read the store's cutoff, so an unwired store makes one setting " +
+			"produce a different retention from the one an operator set")
 	}
 }

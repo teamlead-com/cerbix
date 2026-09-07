@@ -298,3 +298,66 @@ func TestAStampedGenerationFourIsAcceptedFromTheEndpointThatServesIt(t *testing.
 		t.Fatal("a generation-4 stamp was accepted from the v3 endpoint")
 	}
 }
+
+// A4 — a job the credential gate REFUSES is never claimed on the pull transport either.
+//
+// This was one §8.4 rule with two transports giving opposite evidence for the same job. The AMQP
+// worker publishes its claim AFTER the gate, so a refused job produces a probe_error and no claim
+// (`TestARefusedJobIsNeverClaimed` in `internal/worker`); the agent published the whole batch's
+// claims BEFORE the gate ran, so the same job produced both — a `claimed_at` asserting a run
+// started where the executor refused to start one.
+//
+// The mutation that must kill this: publish the claims from the raw batch again, before the gate.
+func TestTheAgentNeverClaimsAJobTheGateRefuses(t *testing.T) {
+	rec := &recordingServer{}
+	good := claimTestJob("m1")
+	// A credentialed monitor on the ledger carrier with no envelope: the gate refuses it before
+	// any connection to the target, exactly as it does on AMQP.
+	refused := claimTestJob("m2")
+	refused.Monitor.Type = domain.MonitorPostgres
+	refused.Monitor.Target = "db:5432"
+	refused.Monitor.Config = map[string]string{"username": "cerbix", "database": "app"}
+	srv := claimTestServer(t, rec, []dispatch.CheckJob{good, refused})
+	defer srv.Close()
+
+	a := New(srv.URL, "tok", "pull1", countingRunner{srv: rec}, slog.New(slog.NewTextHandler(io.Discard, nil))).
+		WithCredentialKeyring(testWorkerRing(t))
+	a.poll(context.Background())
+
+	posts, probesAt := rec.snapshot()
+	if len(posts) != 2 {
+		t.Fatalf("%d posts were made, want 2 — the batch's claims and its results: %+v", len(posts), posts)
+	}
+	claims, results := posts[0], posts[1]
+	if len(claims.results) != 1 {
+		t.Fatalf("the claim post carried %d claims, want 1 — the refused job was claimed for an "+
+			"execution the executor declined to start: %+v", len(claims.results), claims.results)
+	}
+	if claims.results[0].MonitorID != good.Monitor.ID {
+		t.Errorf("the surviving claim names %q, want the admitted job %q",
+			claims.results[0].MonitorID, good.Monitor.ID)
+	}
+	var probeErrors int
+	for _, hb := range results.results {
+		if hb.Claim != nil {
+			t.Errorf("a claim rode the RESULTS post: %+v", hb)
+		}
+		if hb.ProbeError != nil {
+			probeErrors++
+			if hb.MonitorID != refused.Monitor.ID {
+				t.Errorf("the probe error names %q, want the refused job %q", hb.MonitorID, refused.Monitor.ID)
+			}
+		}
+	}
+	if probeErrors != 1 {
+		t.Errorf("%d probe errors were reported, want 1 for the refused job: %+v", probeErrors, results.results)
+	}
+	// The other edge of §8.4's ordering is unchanged: the admitted job's probe still began after
+	// the claim post. Moving the publish behind the gate must not move it behind the probe.
+	if len(probesAt) != 1 {
+		t.Fatalf("%d probes ran, want 1 — only the admitted job is probed", len(probesAt))
+	}
+	if probesAt[0] < 1 {
+		t.Error("the admitted job was probed before its claim was posted")
+	}
+}

@@ -170,7 +170,8 @@ func TestNoStoreReadOfTheLedgerFeedsADispatchDecision(t *testing.T) {
 		"expectedruns.go":         true, // the primitive, the terminal, the refusal, the claim
 		"monitorschedule.go":      true, // §10's configuration boundary
 		"monitors.go":             true, // the ingest transaction, which fills a terminal behind its gate
-		"expectedrunretention.go": true, // phase D: retention, ledger_from, the paged read
+		"expectedrunretention.go": true, // phase D: retention and ledger_from
+		"expectedrunlist.go":      true, // phase D §13a: the versioned cursor and the paged read (G4)
 	}
 	for name, src := range storePackageSources(t) {
 		if allowed[name] {

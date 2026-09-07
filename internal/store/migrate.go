@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"strings"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver
 	"github.com/pressly/goose/v3"
@@ -26,6 +27,19 @@ const migrateLockKey int64 = 0x6365726269780002 // "cerbix" + slot 2 (distinct f
 // Migrate for which migrations depend on it.
 const minServerVersionNum = 150000
 
+// pg15Migrations names every migration that uses PostgreSQL 15's column-list
+// `ON DELETE SET NULL (col)` form, and it is the ONE list (D5).
+//
+// The comment above the version check and the operator-facing refusal below it both used to state
+// it by hand, and they disagreed: the comment was corrected to six when 00093 arrived, the message
+// was not, and the person reading the refusal was told five. One variable cannot half-land.
+//
+// It is a literal and not a scan of the embedded files, because the refusal must be produceable
+// with no database and no I/O — and because a list this short is checked against the tree by
+// `make docs-check`, which derives the true set from the migration bodies and fails on any site
+// that states a different one, whatever words it uses around it.
+var pg15Migrations = []string{"00070", "00080", "00081", "00082", "00084", "00093"}
+
 func Migrate(ctx context.Context, dsn string) error {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -44,7 +58,14 @@ func Migrate(ctx context.Context, dsn string) error {
 	// production failure rather than a precaution: six migrations use PostgreSQL 15's
 	// column-list `ON DELETE SET NULL (col)` form (00070, 00080, 00081, 00082, 00084, 00093),
 	// which is
-	// a SYNTAX error on 14 and below. Without this check the upgrade dies mid-run on 00070 with
+	// a SYNTAX error on 14 and below.
+	//
+	// The list below and the one in the refusal message are the SAME list, from `pg15Migrations`
+	// (D5). They were two hand-written lists and they had already drifted: this comment was
+	// corrected to six when 00093 arrived and the operator-facing message beside it still said
+	// five, so the person who most needed the list — the one whose upgrade just refused — was
+	// handed the shorter one. Half a patch landed, and the guard could not see it because it
+	// matched the comment's phrasing and the message is worded differently (F3). Without this check the upgrade dies mid-run on 00070 with
 	// a parser error naming a file, leaving an operator to work out from a truncated log that
 	// the problem is their server and not their data. The requirement is not new — every
 	// document and the CI matrix have said Postgres 16 — it was simply never enforced anywhere
@@ -64,8 +85,8 @@ func Migrate(ctx context.Context, dsn string) error {
 	if serverNum < minServerVersionNum {
 		return fmt.Errorf("store: PostgreSQL %d.%d is too old: cerbix needs %d or newer, because its "+
 			"schema uses the column-list ON DELETE SET NULL form introduced in PostgreSQL 15 "+
-			"(migrations 00070, 00080, 00081, 00082, 00084). Nothing has been applied",
-			serverNum/10000, serverNum%100, minServerVersionNum/10000)
+			"(migrations %s). Nothing has been applied",
+			serverNum/10000, serverNum%100, minServerVersionNum/10000, strings.Join(pg15Migrations, ", "))
 	}
 	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, migrateLockKey); err != nil {
 		return fmt.Errorf("store: acquire migrate lock: %w", err)

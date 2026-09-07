@@ -64,13 +64,16 @@ type fakeStore struct {
 	// rather than held — the reviewer's point at party [30].
 	fenceBelowRevision int64
 	// Whether LoadDueExpectations mints a fresh identity per call, as the real statement does.
-	mintFresh      bool
-	mintCounter    int
-	reserveSeq     *int64
-	reserveAt      []int64
-	confirms       []store.ExpectationConfirm
-	confirmNow     time.Time
-	confirmErr     error
+	mintFresh   bool
+	mintCounter int
+	reserveSeq  *int64
+	reserveAt   []int64
+	confirms    []store.ExpectationConfirm
+	confirmNow  time.Time
+	confirmErr  error
+	// rejectMonitor is the id C1's case makes unrepresentable: the store leaves it out and names
+	// it, and the rest of the batch is reserved regardless.
+	rejectMonitor  string
 	reserveShort   int
 	pullV4Payloads [][]byte
 	// FR-032 phase D recordings.
@@ -326,11 +329,16 @@ func (f *fakeStore) ReleaseCanaryInflight(_ context.Context, monitorID, runKey s
 	return nil
 }
 
-func (f *fakeStore) InsertHeartbeat(_ context.Context, hb domain.Heartbeat) error {
+// RecordScheduledResult is the door a shortage goes through since B2 — the SAME door every
+// executor result uses. The fake records what was submitted to it; whether that submission flips a
+// status is the real store's job and is asserted there, against a database, because a fake that
+// modelled the flip would prove only that the fake models it.
+func (f *fakeStore) RecordScheduledResult(_ context.Context, hb domain.Heartbeat) (store.ResultOutcome, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.canaryHeartbeats = append(f.canaryHeartbeats, hb)
-	return nil
+	return store.ResultOutcome{Applied: true, Inserted: true,
+		Prev: domain.StatusUp, Cur: domain.StatusDown}, nil
 }
 func (f *fakeStore) EnsureServiceFactPartitions(ctx context.Context, aheadMonths int) error {
 	atomic.AddInt32(&f.factEnsured, 1)
@@ -449,7 +457,7 @@ func (f *fakeStore) LoadDueExpectations(_ context.Context, monitorIDs []string) 
 	return out, nil
 }
 
-func (f *fakeStore) ReserveExpectations(_ context.Context, now time.Time, items []store.ExpectationAdvance) ([]store.ExpectationReservation, error) {
+func (f *fakeStore) ReserveExpectations(_ context.Context, now time.Time, items []store.ExpectationAdvance) ([]store.ExpectationReservation, []store.ExpectationRejection, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.advanceNow = now
@@ -458,14 +466,24 @@ func (f *fakeStore) ReserveExpectations(_ context.Context, now time.Time, items 
 		f.reserveAt = append(f.reserveAt, atomic.AddInt64(f.reserveSeq, 1))
 	}
 	if f.advanceErr != nil {
-		return nil, f.advanceErr
+		return nil, nil, f.advanceErr
 	}
+	// C1: the real statement REJECTS an unrepresentable item and reserves the rest, so the fake
+	// must be able to do the same. `rejectMonitor` names one; it is left out of the result and
+	// reported, which to the caller is the fence's shape with a reason attached.
+	var rejected []store.ExpectationRejection
 	// The real statement returns WHAT IT WROTE, so the fake must be able to write less than it was
 	// given: `reserveShort` drops that many items from the END of the batch, which is what a fence
 	// refusal looks like to the caller. A fake that always returned the whole batch could not
 	// exercise the partial path at all — and the partial path is where the P0 lived.
 	out := make([]store.ExpectationReservation, 0, len(items))
 	for i, it := range items {
+		if f.rejectMonitor != "" && it.MonitorID == f.rejectMonitor {
+			rejected = append(rejected, store.ExpectationRejection{
+				MonitorID: it.MonitorID, Reason: "store: expectation advance for " + it.MonitorID + " has no region",
+			})
+			continue
+		}
 		if f.reserveShort > 0 && i >= len(items)-f.reserveShort {
 			continue
 		}
@@ -474,7 +492,7 @@ func (f *fakeStore) ReserveExpectations(_ context.Context, now time.Time, items 
 		}
 		out = append(out, store.ExpectationReservation{MonitorID: it.MonitorID, DueAt: it.ExpectedDue})
 	}
-	return out, nil
+	return out, rejected, nil
 }
 
 // The CONFIRM half of §7.4. The fake records what the tick said the transport did, because that is
@@ -500,6 +518,14 @@ func (f *fakeStore) PurgeOldExpectedRuns(_ context.Context, cutoff time.Time) (i
 	defer f.mu.Unlock()
 	f.expectedRunCutoffs = append(f.expectedRunCutoffs, cutoff)
 	return 0, nil
+}
+
+// ExpectedRunRetentionCutoff mirrors the real store's formula, midnight-aligned (C8). The fake
+// computes it rather than echoing a value the caller passed in, because the point of the method is
+// that the LEADER no longer owns the formula: a fake that returned whatever it was given could not
+// tell an asking caller from a computing one.
+func (f *fakeStore) ExpectedRunRetentionCutoff(now time.Time) time.Time {
+	return now.UTC().Truncate(24*time.Hour).AddDate(0, 0, -domain.DefaultExpectedRunRetentionDays)
 }
 
 func (f *fakeStore) ExpectedRunHOTRatio(context.Context) (metrics.ExpectedRunHOTStat, error) {

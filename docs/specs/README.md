@@ -55,6 +55,7 @@ exists in the product. They diverge in both directions — an area can ship on t
 | `func-hardening.md` | Hardening package from the 2026-08 deep audit | written | shipped |
 | `func-audit-gaps.md` | Audit gap package: saved-but-never-used functionality | written | shipped |
 | `func-audit-gaps-2.md` | Audit gap package 2, the second layer | written | shipped |
+| `func-audit-gaps-3.md` | Audit gap package 3: the two-axis review of `v0.1.8..main`, in seven clusters — each cluster one mechanism joined to its neighbour by a sentence rather than by a statement (three P0: a canary credential surviving a scheme-downgrading redirect, an undispatchable canary that never goes DOWN, and a carrier stamp one producer branch never applies) | written; design reviewed at party [272], which approved nothing — it carries NO requirement number, by the precedent of the two earlier audit-gap packages | IMPLEMENTED at iter-0179 (`D-0247`), all 52 discharge-map rows; UNCOMMITTED. Independent review COMPLETE — 52 of 52, no open findings — which closes neither the iteration nor a release |
 | `func-e2e-coverage.md` | E2E coverage expansion beyond the D-0124 smoke suite | written | shipped |
 | `func-transport-resilience.md` | SSE and transport-level survivability gaps | written | shipped |
 | `func-observability-logging.md` | Operational logging expansion beyond failures | written | shipped |

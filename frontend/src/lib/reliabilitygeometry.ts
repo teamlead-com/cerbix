@@ -311,8 +311,18 @@ export type StorageVerdict = {
    * presentation from the series it holds; it may not manufacture a wire verdict whose canonical
    * meaning belongs server-side. This never leaves the component, never enters metrics, audit or
    * the API, and never drives reliability state.
+   *
+   * `suffix` is E2's fourth shape. The function measured a tail and had no shape for it, so
+   * everything that was not interior fell to `prefix` — and a segment whose records STOP EARLY was
+   * described to an operator as one whose records BEGIN LATE. The two ends are the two things this
+   * verdict claims to distinguish.
+   *
+   * `unknown` is E5's, and it is a different kind of statement: the series has not arrived, so
+   * there is no evidence for any shape. It used to render the prefix sentence computed from an
+   * empty array — a storage verdict quoted from no data, printed directly beside "Loading this
+   * segment's timeline…".
    */
-  shape: "complete" | "prefix" | "interior";
+  shape: "complete" | "prefix" | "suffix" | "interior" | "unknown";
 };
 
 /**
@@ -340,16 +350,24 @@ export function storageVerdict(
     .map((p) => (p.start ? Date.parse(p.start) : Number.NaN))
     .filter((t) => !Number.isNaN(t))
     .sort((x, y) => x - y);
-  if (!starts.length) return { storedMinutes, extentMinutes, complete: false, shape: "prefix" };
+  // E5: no series is not an empty segment. With nothing to measure, WHERE the absence sits is
+  // unknowable, and answering `prefix` was a sentence about data the caller does not have.
+  if (!starts.length) return { storedMinutes, extentMinutes, complete: false, shape: "unknown" };
   const firstMs = Math.max(a, starts[0]);
   const lastEndMs = Math.min(b, starts[starts.length - 1] + stepMs);
   const missingHead = (firstMs - a) / CANONICAL_BUCKET_MS;
   const missingTail = (b - lastEndMs) / CANONICAL_BUCKET_MS;
   const missingInside = extentMinutes - storedMinutes - missingHead - missingTail;
+  if (missingInside > 0.5) {
+    return { storedMinutes, extentMinutes, complete: false, shape: "interior" };
+  }
+  // E2: the tail was measured and never consulted. The bigger of the two ends names the shape, and
+  // a tie goes to the head — which is what the single-shape version always answered, so a segment
+  // that genuinely begins late reads exactly as it did.
   return {
     storedMinutes,
     extentMinutes,
     complete: false,
-    shape: missingInside > 0.5 ? "interior" : "prefix",
+    shape: missingTail > missingHead ? "suffix" : "prefix",
   };
 }

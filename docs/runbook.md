@@ -206,10 +206,39 @@ stops those workers claiming any more.
 If a deployment cannot take the pause, the honest expectation is that the ordering guarantee begins
 after the last old owner exits, not when the migration commits.
 
+### Migration `00104` can refuse an upgrade, on purpose
+
+`00104` narrows the `pull_tests` carrier ceiling to `(1, 2, 3)` and refuses to run if the table holds
+a row at `protocol_version = 4`:
+
+    refusing to narrow the pull_tests carrier ceiling: N row(s) at protocol_version 4. No build emits
+    a generation-4 test carrier, so these rows were not written by this product; inspect them, then
+    delete them explicitly. This migration will not discard them for you.
+
+This is a fail-fast, not a bug, and it is deliberate that the migration does not clean up for you: no
+build emits a generation-4 TEST carrier, so such a row was not written by this product, and silently
+deleting an unexplained row is how a migration destroys the evidence of the thing that wrote it.
+Nothing is lost — the DO block raises inside its own transaction — and the database stays at `00103`,
+with the process failing fast at startup exactly as any other migration error does.
+
+To clear it, look before deleting:
+
+```sql
+SELECT id, region, protocol_version, created_at FROM pull_tests WHERE protocol_version = 4;
+-- then, once you know what wrote them:
+DELETE FROM pull_tests WHERE protocol_version = 4;
+```
+
+Note the asymmetry with `pull_jobs`, which still accepts generation 4 and must: jobs ride the ledger
+carrier, test-connections do not. A rollback of `00104` widens the ceiling again and drains nothing,
+which is the same rule §13.0 of `func-expected-run-ledger.md` states for every V4-capable pull
+surface.
+
 ### PostgreSQL 15 is a hard requirement (learned in production)
 
 An upgrade to `v0.1.5-beta.1` on **PostgreSQL 14** applies migrations `00061`…`00069` and then dies on
-`00070` with `syntax error at or near "("` — five migrations (`00070`, `00080`, `00081`, `00082`, `00084`)
+`00070` with `syntax error at or near "("` — six migrations (`00070`, `00080`, `00081`, `00082`, `00084`,
+`00093`)
 use the column-list `ON DELETE SET NULL (col)` form that arrived in PostgreSQL 15. The plain form cannot
 substitute: on a composite FK it nulls EVERY referencing column including the NOT NULL `project_id`,
 which is the bug `00070` exists to fix.
@@ -230,7 +259,7 @@ requirement and the fact that nothing was applied. Upgrade the server to 15+ (16
 CI job here) rather than working around the syntax.
 
 Supporting 14 was considered and **declined** (D-0183, owner, 2026-08-27): the compatibility path means
-emulating column-list `ON DELETE SET NULL` with triggers across five migrations and maintaining them
+emulating column-list `ON DELETE SET NULL` with triggers across six migrations and maintaining them
 indefinitely, inside the code path whose correctness the composite foreign keys exist to guarantee. 15
 is the floor and there is no plan to lower it, so an operator reading this should budget the server
 upgrade rather than wait for a release that removes the requirement.

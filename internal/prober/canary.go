@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -44,6 +47,12 @@ const (
 type canaryProber struct {
 	dial  func(ctx context.Context, network, addr string) (net.Conn, error)
 	clock func() time.Time
+	// roots is the second half of that seam and exists for the same reason. Since B1 every
+	// redirect hop must be `https`, so a test that exercises a hop needs a TLS fixture, and a TLS
+	// fixture needs its throwaway CA trusted. Production leaves this nil and gets the system pool.
+	// A field a test sets is not a flag an operator can set: there is no configuration path to it,
+	// which is the property §6.12 asks for.
+	roots *x509.CertPool
 }
 
 // canaryFailure is a stage plus a bounded class. It is the only thing that reaches a heartbeat.
@@ -159,16 +168,38 @@ func (p canaryProber) client() *http.Client {
 	transport.Proxy = nil // a proxy would bypass the address guard the dialer enforces
 	transport.DialContext = p.dial
 	transport.TLSHandshakeTimeout = canaryTLSTimeout
+	if p.roots != nil {
+		transport.TLSClientConfig = &tls.Config{RootCAs: p.roots, MinVersion: tls.VersionTLS12}
+	}
 	return &http.Client{
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= canaryMaxRedirects {
 				return fmt.Errorf("too many redirects")
 			}
+			// B1. Every hop is re-validated against the rules the DECLARED url had to pass, because
+			// a write-time guarantee that is never re-checked is not a run-time guarantee. `https`
+			// was enforced once, when the workflow was saved; the policy below then compared host
+			// and port and never looked at the scheme, so an `https` → `http` redirect to the same
+			// host was "the same origin" and every binding-backed header survived it in cleartext.
+			//
+			// The hop is REFUSED and not followed: returning an error here means `net/http` makes
+			// no request for it, so no header leaves the process. It is a stage failure rather than
+			// a headers-stripped continuation, because a canary that quietly succeeds without its
+			// credential is a second false claim — it would report UP for an unauthenticated call.
+			//
+			// The reason names the rule and never the URL, which is the standing contract for a
+			// canary stage failure.
+			if violation := domain.CanaryHopViolation(req.URL); violation != domain.CanaryHopOK {
+				return errors.New(violation.HopReason())
+			}
 			prev := via[len(via)-1].URL
 			if canaryOrigin(req.URL) != canaryOrigin(prev) {
-				// Normalized host OR PORT changed: drop every header a binding produced, and do it
-				// for the whole binding-backed set rather than for the one name Go knows about.
+				// Normalized SCHEME, host OR port changed: drop every header a binding produced,
+				// and do it for the whole binding-backed set rather than for the one name Go knows
+				// about. The scheme is in the comparison independently of the refusal above, so a
+				// cross-scheme hop is an origin change even in a future where some downgrade
+				// becomes legal.
 				for name := range req.Header {
 					if canaryBindingBacked(req.Context(), name) {
 						req.Header.Del(name)
@@ -211,13 +242,25 @@ func canaryBindingBacked(ctx context.Context, name string) bool {
 	return marked
 }
 
+// canaryOrigin normalizes a URL to the triple an origin actually is: scheme, host, port.
+//
+// The scheme used to be missing and the default port was 443 for every scheme, so `https://x` and
+// `http://x` normalized to the SAME string and a downgrade was not an origin change (B1). The
+// default is now taken from the scheme, which is what makes `https://x` and `https://x:443` still
+// one origin while `http://x` is a different one.
 func canaryOrigin(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
 	host := strings.ToLower(u.Hostname())
 	port := u.Port()
 	if port == "" {
-		port = "443"
+		switch scheme {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		}
 	}
-	return host + ":" + port
+	return scheme + "://" + host + ":" + port
 }
 
 // do performs one request with the declared headers, the binding values injected, and bounded

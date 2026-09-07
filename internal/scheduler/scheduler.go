@@ -95,7 +95,13 @@ type Store interface {
 	// the instant it describes, so the pair cannot come to describe different instants (§7.3 as
 	// amended, invariants 2c and 2d).
 	LoadDueExpectations(ctx context.Context, monitorIDs []string) (map[string]store.DueExpectation, error)
-	ReserveExpectations(ctx context.Context, now time.Time, items []store.ExpectationAdvance) ([]store.ExpectationReservation, error)
+	//
+	// It returns the REJECTS beside the reservations (C1): an item the ledger cannot represent is
+	// left out of the statement and named, rather than aborting the batch. A batch error means "we
+	// do not know what committed" and holds every ledgered dispatch this tick; an unrepresentable
+	// item is a fact about that one monitor, and letting it stop the instance's probing — every
+	// tick, since the held payload is re-submitted unchanged — is the failure this separation ends.
+	ReserveExpectations(ctx context.Context, now time.Time, items []store.ExpectationAdvance) ([]store.ExpectationReservation, []store.ExpectationRejection, error)
 	// ConfirmExpectations settles what the transport did with each reserved window (§7.4's third
 	// step). It is a SECOND method rather than a flag on the first because the two run either side
 	// of the dispatch, which is the whole content of phase F.
@@ -106,6 +112,10 @@ type Store interface {
 	// retention never has to do, because it deliberately has no default partition and this table
 	// deliberately does (§12.3).
 	PurgeOldExpectedRuns(ctx context.Context, cutoff time.Time) (int, error)
+	// ExpectedRunRetentionCutoff is the ONE owner of "how far back the ledger reaches" (C8). The
+	// leader asks rather than re-deriving, so the instant it purges at and the instant the store
+	// correlates and clips against are the same one.
+	ExpectedRunRetentionCutoff(now time.Time) time.Time
 	// ExpectedRunHOTRatio is §11's measurement, sampled by the same pass. It answers UNDEFINED
 	// rather than zero when nothing has updated yet.
 	ExpectedRunHOTRatio(ctx context.Context) (metrics.ExpectedRunHOTStat, error)
@@ -115,10 +125,18 @@ type Store interface {
 	// distributed semaphore.
 	ClaimCanaryInflight(ctx context.Context, monitorID, region, runKey string, ttl time.Duration) error
 	ReleaseCanaryInflight(ctx context.Context, monitorID, runKey string) error
-	// InsertHeartbeat is how a shortage becomes an ORDINARY monitor outcome rather than an
-	// indefinite pending: a run that could not be dispatched writes one DOWN heartbeat with a
-	// bounded reason, and the monitor's own failure_threshold decides whether that flips its status.
-	InsertHeartbeat(ctx context.Context, hb domain.Heartbeat) error
+	// RecordScheduledResult is how a shortage becomes an ORDINARY monitor outcome rather than an
+	// indefinite pending: a run that could not be dispatched records one DOWN result with a bounded
+	// reason, and the monitor's own failure_threshold decides whether that flips its status.
+	//
+	// It is the RESULT pipeline and not the bare heartbeat insert, which is B2. The insert touches
+	// no status, no confirmation counter, no transition outbox and no service bucket, so a canary
+	// whose region had no capable executor stayed green while nothing probed it: no alert, no
+	// incident, no escalation, and the service SLI kept reporting a number computed over a monitor
+	// that had stopped being measured. The docstring here said the opposite of what the code did,
+	// which is the shape this whole package is about. Ruled by the owner on 2026-09-06: route the
+	// shortage through the existing pipeline, no new store method and no new seam.
+	RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) (store.ResultOutcome, error)
 	EnsureServiceFactPartitions(ctx context.Context, aheadMonths int) error
 	PurgeOldHeartbeats(ctx context.Context, cutoff time.Time) (int, error)
 	EnqueueRenotifyReminders(ctx context.Context) (int, error)
@@ -358,11 +376,6 @@ const (
 // timeout + this, and the runbook states that number rather than leaving it to arithmetic.
 const canaryInflightSlack = 60 * time.Second
 
-// canaryCapabilityWindow is how recently a pull agent must have been seen for its announcement to
-// count. Same 45s the credential readiness lookups use: three missed 15s heartbeats, which is a real
-// outage rather than one slow poll.
-const canaryCapabilityWindow = 45 * time.Second
-
 // pullLeaseFor is the per-job claim lease a monitor needs: its own probe budget plus slack, or zero
 // for a probe short enough that the endpoint's default already covers it. Written against the
 // TIMEOUT rather than against the type, because the defect it closes predates the canary — any pull
@@ -427,7 +440,7 @@ func (s *Scheduler) releaseCanarySlot(ctx context.Context, m domain.Monitor) {
 // sits on a queue until its TTL and the monitor reports NOTHING, which is the indefinite pending the
 // brief forbids. One bounded DOWN per run says the same thing in the units the operator already
 // reads, and the monitor's own `failure_threshold` decides whether it flips.
-func (s *Scheduler) canaryRunnerAvailable(ctx context.Context, m domain.Monitor, announced func() map[string][]string) bool {
+func (s *Scheduler) canaryRunnerAvailable(ctx context.Context, m domain.Monitor, announced func() map[string][]string, caps *regionCapabilities) bool {
 	if m.Type != domain.MonitorAsyncCanary {
 		return true
 	}
@@ -435,7 +448,8 @@ func (s *Scheduler) canaryRunnerAvailable(ctx context.Context, m domain.Monitor,
 	// kind core does not know must ask for a runner that announces THAT kind rather than being
 	// dispatched hopefully to whatever is there.
 	required := domain.CanaryCapabilityRequiredByConfig(m.Config)
-	here := announced()[m.Region]
+	// The announcement sources merged in ONE place, including this process's own (G1, B5).
+	here := s.canaryTokensFor(m.Region, announced(), caps)
 	if domain.CanaryCapabilityAnnounced(here, required) {
 		return true
 	}
@@ -470,7 +484,7 @@ func pullWorkflowKindFor(m domain.Monitor) string {
 // bounded refusal with a reason, which is the same outcome as a genuinely absent runner and is
 // visible in the log and the metric. Silently dispatching into a region core could not verify is the
 // one outcome the invariant does not allow.
-func (s *Scheduler) canaryAnnouncements(ctx context.Context) map[string][]string {
+func (s *Scheduler) canaryAnnouncements(ctx context.Context, caps *regionCapabilities) map[string][]string {
 	out := map[string][]string{}
 	add := func(region string, tokens ...string) {
 		for _, t := range tokens {
@@ -479,7 +493,7 @@ func (s *Scheduler) canaryAnnouncements(ctx context.Context) map[string][]string
 			}
 		}
 	}
-	if byRegion, err := s.store.LiveCanaryAgentCapabilities(ctx, canaryCapabilityWindow); err != nil {
+	if byRegion, err := s.store.LiveCanaryAgentCapabilities(ctx, agentLivenessWindow); err != nil {
 		if ctx.Err() == nil {
 			s.logger.Warn("canary_agent_capability_lookup_failed", "error", err.Error())
 		}
@@ -487,7 +501,7 @@ func (s *Scheduler) canaryAnnouncements(ctx context.Context) map[string][]string
 		for region, tokens := range byRegion {
 			// Pull-only: an agent heartbeat says nothing about a region served over AMQP, exactly as
 			// the credential readiness split already treats it.
-			if s.pullRegions[region] {
+			if caps.servedByAgents(region) {
 				add(region, tokens...)
 			}
 		}
@@ -499,7 +513,7 @@ func (s *Scheduler) canaryAnnouncements(ctx context.Context) map[string][]string
 			}
 		} else {
 			for region, tokens := range byRegion {
-				if !s.pullRegions[region] {
+				if caps.servedHere(region) {
 					add(region, tokens...)
 				}
 			}
@@ -513,12 +527,34 @@ func (s *Scheduler) canaryAnnouncements(ctx context.Context) map[string][]string
 		// indefinite pending the invariant forbids. The rule lives here, at resolve time, so no
 		// builder order (`WithLocalCanaryRegions` before or after `WithPullRegions`) and no config
 		// (`pull.regions: [core]` is legal) can reintroduce it. Reviewer P1, party [99]/[100].
-		if s.pullRegions[region] {
+		if caps.servedByAgents(region) {
 			continue
 		}
 		add(region, domain.CanaryCapabilityOfThisBinary())
 	}
 	return out
+}
+
+// localCanaryTokenFor is the in-process half of the announcement, answered for the region a monitor
+// actually belongs to rather than for a region someone enumerated in advance.
+//
+// B5. `role=all` announced the DEFAULT region and nothing else, while the in-process dispatcher
+// ignores the region entirely and executes every job it is handed. A canary in any other non-pull
+// region — a perfectly ordinary thing to declare on a single-binary instance — was therefore
+// refused by the capability gate on every tick, forever, while an ordinary monitor of the same
+// region was probed normally. The region field meant one thing for canaries and another for every
+// other type.
+//
+// The announcement now derives from the SAME predicate the dispatcher uses: this process executes a
+// region in-process exactly when the region is not pull-served. `localCanaryRegions` stays for the
+// deployments that name a specific set; `localCanaryAnyRegion` is what a role that executes
+// everything declares, and it is a declaration of the ROLE rather than a list a config has to keep
+// in step with the monitors people create.
+func (s *Scheduler) localCanaryTokenFor(region string, caps *regionCapabilities) string {
+	if !s.localCanaryAnyRegion || caps.servedByAgents(region) {
+		return ""
+	}
+	return domain.CanaryCapabilityOfThisBinary()
 }
 
 // claimCanarySlot takes the in-flight slot for a canary and reports true when the job may be
@@ -550,9 +586,20 @@ func (s *Scheduler) claimCanarySlot(ctx context.Context, m domain.Monitor) bool 
 }
 
 // reportCanaryShortage turns a run cerbix could not dispatch into an ORDINARY monitor outcome: one
-// DOWN heartbeat with a bounded reason. Not an indefinite pending, not a readiness flip, and not a
+// DOWN result with a bounded reason. Not an indefinite pending, not a readiness flip, and not a
 // silent exclusion from the service's number — the owner's brief settled that, and the attribution
 // an operator needs lives in the reason, the region alert and the metrics instead.
+//
+// "Ordinary outcome" is now carried by the statement and not by this sentence (B2). It goes through
+// `RecordScheduledResult`, the same door every executor result uses, so the confirmation counter
+// counts it, the failure threshold decides the flip, the transition rides the outbox to the
+// alerting pipeline and the sample reaches the service bucket. It used to go through the bare
+// heartbeat insert, which does none of those: the row existed, the monitor stayed UP forever, and
+// the only trace was a log line.
+//
+// It carries NO canary run key, deliberately: the run key releases the in-flight slot, and a
+// shortage is a run that never took one. Reporting one here would delete a lease a DIFFERENT run
+// is holding.
 func (s *Scheduler) reportCanaryShortage(ctx context.Context, m domain.Monitor, reason string) {
 	hb := domain.Heartbeat{
 		MonitorID:         m.ID,
@@ -567,11 +614,19 @@ func (s *Scheduler) reportCanaryShortage(ctx context.Context, m domain.Monitor, 
 		// cause visible without making the number lie.
 		s.secretResolution.RecordCanaryDispatchRefused(reason)
 	}
-	if err := s.store.InsertHeartbeat(ctx, hb); err != nil && ctx.Err() == nil {
+	out, err := s.store.RecordScheduledResult(ctx, hb)
+	if err != nil && ctx.Err() == nil {
 		s.logger.Warn("canary_shortage_heartbeat_failed", "monitor_id", m.ID, "reason", reason, "error", err.Error())
 		return
 	}
-	s.logger.Info("canary_dispatch_refused", "monitor_id", m.ID, "region", m.Region, "reason", reason)
+	if err != nil {
+		return
+	}
+	// The pipeline's own verdict is logged rather than assumed: a shortage recorded against a stale
+	// revision, or one that arrived out of order, is REFUSED exactly as any other result would be,
+	// and an operator reading "refused" needs to know which rule refused it.
+	s.logger.Info("canary_dispatch_refused", "monitor_id", m.ID, "region", m.Region, "reason", reason,
+		"applied", out.Applied, "status", string(out.Cur), "result_reason", out.Reason)
 }
 
 type Scheduler struct {
@@ -598,10 +653,15 @@ type Scheduler struct {
 	// without this the common single-binary deployment would find no capable region and refuse every
 	// canary, which is the shape of defect the credential path already paid for once.
 	localCanaryRegions map[string]bool
-	pullRegions        map[string]bool // regions served over HTTP-pull (jobs go to pull_jobs, not AMQP)
-	pullMetrics        PullStatsSink
-	serviceMetrics     ServiceStatsSink
-	statsEvery         time.Duration // test override for the stats cadence
+	// localCanaryAnyRegion says this process executes canaries for EVERY non-pull region, which is
+	// what `role=all` does: the in-process dispatcher is handed the job and never looks at the
+	// region. It is separate from the set above because the set is an enumeration and this is a
+	// property of the role — see localCanaryTokenFor (B5).
+	localCanaryAnyRegion bool
+	pullRegions          map[string]bool // regions served over HTTP-pull (jobs go to pull_jobs, not AMQP)
+	pullMetrics          PullStatsSink
+	serviceMetrics       ServiceStatsSink
+	statsEvery           time.Duration // test override for the stats cadence
 	// alertSuccess is when each alerting arm last SUCCEEDED, and it is what makes a persistently
 	// failing evaluator visible. Readiness cannot be derived from lag alone: a pass that rolled
 	// back reports no lag at all, so an arm erroring every cadence would keep the last successful
@@ -629,8 +689,7 @@ type Scheduler struct {
 	changeMetrics        ChangeRetentionSink
 	// ledgerMetrics publishes FR-032 §11's HOT-update sample. Optional and nil-safe, like every
 	// other sink here: a role that runs no maintenance pass publishes nothing rather than zero.
-	ledgerMetrics            LedgerStatsSink
-	expectedRunRetentionDays int
+	ledgerMetrics LedgerStatsSink
 }
 
 // WithChangeRetention wires FR-025 D9's retention: once a day the leader removes change groups
@@ -789,6 +848,30 @@ func (s *Scheduler) WithLocalCanaryRegions(regions ...string) *Scheduler {
 	return s
 }
 
+// WithLocalCanaryAnyRegion declares that this process runs canaries for EVERY non-pull region, which
+// is what `role=all` actually does: the in-process dispatcher takes the job and never reads the
+// region off it.
+//
+// B5. `WithLocalCanaryRegions(domain.DefaultRegion)` was the whole of role=all's announcement, so a
+// canary in any other non-pull region was refused with `no_capable_runner` on every tick, forever,
+// while an ordinary monitor of that same region was probed by that same process. A capability
+// derived from a LIST has to be kept in step with the regions people create; one derived from the
+// role cannot fall behind them.
+func (s *Scheduler) WithLocalCanaryAnyRegion() *Scheduler {
+	s.localCanaryAnyRegion = true
+	return s
+}
+
+// WithLocalCanaryAnyRegionIf is the conditional form, so the caller keeps ONE builder chain rather
+// than branching around it: this binary announces only what its runner can actually execute, and a
+// build with no canary prober announces nothing at all.
+func (s *Scheduler) WithLocalCanaryAnyRegionIf(ok bool) *Scheduler {
+	if ok {
+		s.localCanaryAnyRegion = true
+	}
+	return s
+}
+
 // WithPullRegions marks regions served over the HTTP-pull transport: their check jobs
 // are enqueued to the pull queue (claimed by an agent over HTTP) instead of published
 // to RabbitMQ. Regions not listed keep using the AMQP dispatcher.
@@ -825,14 +908,6 @@ type LedgerStatsSink interface {
 // never wires it still purges rather than accumulating forever.
 func (s *Scheduler) WithLedgerMetrics(sink LedgerStatsSink) *Scheduler {
 	s.ledgerMetrics = sink
-	return s
-}
-
-func (s *Scheduler) WithExpectedRunRetention(days int) *Scheduler {
-	if days < domain.MinExpectedRunRetentionDays || days > domain.MaxExpectedRunRetentionDays {
-		days = domain.DefaultExpectedRunRetentionDays
-	}
-	s.expectedRunRetentionDays = days
 	return s
 }
 
@@ -1519,85 +1594,42 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 			// FR-029 invariant 6. Which capability TOKENS each region announced, resolved at most
 			// once per tick and only when a canary is actually due: an instance with no canaries
 			// must not pay a management-API call and a query every tick for an answer nothing reads.
+			// G1: ONE region-capability step. The three resolvers that used to answer this
+			// question separately — credential readiness inline, the ledger carrier as a closure,
+			// the canary announcement as a method — now share one record, one pull-region
+			// exclusion and one raise-never-assign rule. `internal/scheduler/regioncapability.go`
+			// states each of those once and says why.
+			//
+			// The record is built HERE, before the lazy announcement closure below, because that
+			// closure reads the exclusion through it. That order is the whole of what the third
+			// resolver needed: it was left holding its own copy of `s.pullRegions[...]` in a first
+			// pass of this item, and the comment above then said "three" while the code shared two.
+			// Building the record first costs nothing — it takes no context and reads no store.
+			//
+			// The RESOLUTION POINTS are unchanged: the ledger answer is still lazy, so an instance
+			// with the flag off pays nothing and stamps nothing, and the credential answer still
+			// runs after the plain loop, which is the only point at which the set of regions with a
+			// credentialed monitor due is known. Both have a recorded P0 behind them, and moving
+			// one would be a behaviour change wearing a refactor's clothes. The canary answer stays
+			// lazy for the same reason and by the same shape: the closure decides WHEN to resolve,
+			// the record decides what the resolver READS.
+			caps := newRegionCapabilities(s.pullRegions)
 			var canaryAnnounced map[string][]string
 			canaryResolved := false
 			announcedCanary := func() map[string][]string {
 				if !canaryResolved {
 					canaryResolved = true
-					canaryAnnounced = s.canaryAnnouncements(ctx)
+					canaryAnnounced = s.canaryAnnouncements(ctx, caps)
 				}
 				return canaryAnnounced
 			}
-			// carrierGeneration is the HIGHEST carrier a region may be emitted into. It is
-			// declared HERE, before the dispatch loop, because generation 4 is now a question the
-			// PLAIN path asks too: job identity applies to every monitor, so a secretless HTTP
-			// monitor's ledger eligibility must not depend on a credential capability (§13).
-			//
-			// It is raised and never assigned, through raiseCarrier. A map of "the highest
-			// generation this region proved" that any branch may overwrite is a map whose value
-			// depends on branch ORDER, and the ledger raise resolving before the credential ones
-			// would have been silently undone by `carrierGeneration[region] = ProtocolV3`.
-			carrierGeneration := map[string]int{}
-			raiseCarrier := func(region string, generation int) {
-				if carrierGeneration[region] < generation {
-					carrierGeneration[region] = generation
-				}
-			}
-			// FR-032 invariant 10k, resolved at most once per tick and only when a monitor with a
-			// standing expectation is actually due — the same discipline the canary announcement
-			// uses, for the same reason. With `ledger.carrier_enabled` false this body never runs,
-			// so nothing anywhere stamps 4: that is the whole safety proof in-process, where there
-			// is no announcement to withhold (§16.1).
 			ledgerResolved := false
 			resolveLedgerCarrier := func() {
 				if ledgerResolved {
 					return
 				}
 				ledgerResolved = true
-				if !s.ledgerCarrier {
-					return
-				}
-				// AMQP: something must be CONSUMING the v4 queue. Pull regions are excluded for
-				// the reason the generation-3 branch gives — an in-process or AMQP runner is no
-				// evidence about the agent that will claim the row.
-				if s.credentialLiveRegions != nil {
-					if ready, err := s.credentialLiveRegions.LiveLedgerJobRegions(ctx); err != nil {
-						s.logger.Warn("ledger_carrier_capability_lookup_failed", "error", err.Error())
-					} else {
-						for region := range ready {
-							if !s.pullRegions[region] {
-								raiseCarrier(region, dispatch.ProtocolV4)
-							}
-						}
-					}
-				}
-				// Pull: an AGENT must have declared it, which is a different question with a
-				// different source. Announced on the heartbeat as `capabilities->>'ledger'`.
-				if ready, err := s.store.LiveLedgerReadyAgentRegions(ctx, 45*time.Second); err != nil {
-					s.logger.Warn("ledger_agent_capability_lookup_failed", "error", err.Error())
-				} else {
-					for region := range ready {
-						if s.pullRegions[region] {
-							raiseCarrier(region, dispatch.ProtocolV4)
-						}
-					}
-				}
-				// In-process: a same-process executor IS this binary, so its capability is ours by
-				// construction — there is no wire, no version skew to discover and no announcement
-				// to withhold. §13.0 requires this rule and its converse AT THE SAME PLACE, and
-				// without it the ledger would be inert in the most common deployment, which is the
-				// second of the two V3 failures `scheduler.go` records.
-				//
-				// A pull-served region is executed by its AGENTS and never by this process, so the
-				// in-process executor is NO evidence about it — the first of those two failures,
-				// where core raised a generation "on the strength of a runner that will never see
-				// the job" and the monitor had no outcome at all until the row's TTL.
-				for region := range s.localLedgerRegions {
-					if s.pullRegions[region] {
-						continue
-					}
-					raiseCarrier(region, dispatch.ProtocolV4)
-				}
+				caps.resolveLedger(ctx, s)
 			}
 			// FR-032 §13.1. The due SET, then ONE batched read that mints an identity and reads
 			// the standing expectation for each of them. `dueForDispatch` is the same predicate
@@ -1673,6 +1705,37 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 				ledgerAdvances = append(ledgerAdvances, item)
 				return item
 			}
+			// admitCanary is the ONE canary admission sequence (G2). Both dispatch branches ran the
+			// same three steps in the same order — the capability check, then the in-flight slot
+			// claim, then the skip reason each produces — and a rule written twice is a rule that
+			// diverges the first time one copy is edited. FR-029 has already paid for that once:
+			// the in-flight claim shipped on the credentialed branch alone, so a canary with no
+			// binding kept every guarantee off.
+			//
+			// It returns the SKIP REASON, empty when the canary may run, because the reason is what
+			// both callers need: it names the advance they record and it is the shape a non-canary
+			// falls straight through. The ORDER is part of it — the capability check precedes the
+			// claim, so a region that cannot run the workflow never consumes a slot it can never
+			// release.
+			// It returns the MONITOR as well, because the run key is stamped inside the sequence:
+			// the slot is keyed by the run, and the job has to carry the same key so the result can
+			// release exactly that slot. `withCanaryRunKey` is a no-op on a monitor that already
+			// has one, which is how the credentialed branch — whose key comes from the materializer,
+			// where it joins the execution digest — passes through unchanged.
+			admitCanary := func(m domain.Monitor, at time.Time) (domain.Monitor, string) {
+				if m.Type != domain.MonitorAsyncCanary {
+					return m, ""
+				}
+				// FR-029 invariant 6: a canary goes only to a region that ANNOUNCED it can run one.
+				if !s.canaryRunnerAvailable(ctx, m, announcedCanary, caps) {
+					return m, store.SkipNoCapableRunner
+				}
+				m = withCanaryRunKey(m, at)
+				if !s.claimCanarySlot(ctx, m) {
+					return m, store.SkipNoInflightSlot
+				}
+				return m, ""
+			}
 			for _, m := range monitors {
 				if !dueForDispatch(m, nextRun, now) {
 					continue
@@ -1700,7 +1763,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					// or with no monitor carrying an expectation, must not pay a management-API
 					// call and a query for an answer nothing reads.
 					resolveLedgerCarrier()
-					regionGeneration = carrierGeneration[m.Region]
+					regionGeneration = caps.carrierFor(m.Region)
 				}
 				job := dispatch.CheckJob{Monitor: m}
 				if expectOK {
@@ -1710,30 +1773,27 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					// insist on all three.
 					job.JobID, job.IssuedAt, job.DueAt = expect.JobID, expect.IssuedAt, expect.DueAt
 				}
-				job = dispatch.WithCarrier(job, dispatch.CarrierFor(regionGeneration, false, expectOK, m.Type))
-				// FR-029 D9/D9a. BOTH dispatch paths take the lease: a canary with no binding never
-				// reaches the credential branch below, and the first version of this change put the
-				// claim only there — so a canary without secrets kept every guarantee off.
-				// FR-029 invariant 6: a canary goes only to a region that ANNOUNCED it can run one.
-				// Checked BEFORE the in-flight claim, so an incapable region does not consume a
-				// slot it can never release.
-				if !s.canaryRunnerAvailable(ctx, m, announcedCanary) {
+				// The carrier this publisher CHOSE, held as its own value. The ledger advance below
+				// takes it from here rather than from `job.ProtocolVersion`: the payload's own
+				// protocol version is body content, and a producer that reads its decision back
+				// through the body is the habit A2 removes — the same one that let a consumer
+				// answer a carrier question from a field.
+				carrier := dispatch.CarrierFor(regionGeneration, false, expectOK, m.Type)
+				job = dispatch.WithCarrier(job, carrier)
+				// FR-029 D9/D9a, through the ONE admission sequence both branches share (G2). Both
+				// dispatch paths take the lease: a canary with no binding never reaches the
+				// credential branch below, and the first version of that change put the claim only
+				// there — so a canary without secrets kept every guarantee off.
+				var skip string
+				if m, skip = admitCanary(m, now); skip != "" {
 					nextRun[m.ID] = now.Add(iv)
 					// FR-032 advance rule 3: cerbix CHOSE not to run this window, and the choice
 					// is a fact. The row carries a skip_reason and no job, so no terminal event
 					// can ever adopt it into coverage (invariant 10b).
-					recordAdvance(m, expect, expectOK, "", store.SkipNoCapableRunner, 0, now.Add(iv), iv, confirming)
+					recordAdvance(m, expect, expectOK, "", skip, 0, now.Add(iv), iv, confirming)
 					continue
 				}
-				// The run must be stamped BEFORE the claim: the slot is keyed by it, and the job
-				// carries it so the result can release exactly that slot.
-				m = withCanaryRunKey(m, now)
 				job.Monitor = m
-				if !s.claimCanarySlot(ctx, m) {
-					nextRun[m.ID] = now.Add(iv)
-					recordAdvance(m, expect, expectOK, "", store.SkipNoInflightSlot, 0, now.Add(iv), iv, confirming)
-					continue
-				}
 				// ONE publisher for both transports, shared with the credentialed branch. The
 				// plain path used to inline its own pull enqueue and its own PublishJob call, so
 				// generation 4 would have had to be taught to a third site — and a carrier taught
@@ -1746,7 +1806,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 				pending = append(pending, pendingDispatch{
 					monitor: m, job: job, interval: iv, nextRun: now.Add(iv),
 					ledgered: expectOK,
-					advance:  recordAdvance(m, expect, expectOK, job.JobID, "", job.ProtocolVersion, now.Add(iv), iv, confirming),
+					advance:  recordAdvance(m, expect, expectOK, job.JobID, "", carrier, now.Add(iv), iv, confirming),
 				})
 			}
 			regions := make([]string, 0, len(credentialByRegion))
@@ -1754,13 +1814,11 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 				regions = append(regions, region)
 			}
 			sort.Strings(regions)
-			credentialReadyPull := map[string]bool{}
-			credentialReadyAMQP := map[string]bool{}
-			// The carrier a region may be emitted into is resolved into `carrierGeneration`
-			// above — 3 once something there can open envelope v2, otherwise 2, and 4 once its
-			// executors announce the ledger carrier. It is derived from the same existential
-			// checks as readiness, never assumed, so core cannot emit a payload the region's
-			// executors are unable to open (§4.7, D-0160).
+			// The carrier a region may be emitted into is resolved into the capability record — 3
+			// once something there can open envelope v2, otherwise 2, and 4 once its executors
+			// announce the ledger carrier. It is derived from the same existential checks as
+			// readiness, never assumed, so core cannot emit a payload the region's executors are
+			// unable to open (§4.7, D-0160).
 			//
 			// The ledger answer is forced HERE even when no plain monitor needed it, because a
 			// credentialed monitor's window is eligible on exactly the same terms: job identity
@@ -1768,64 +1826,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 			// §13.0 forbids.
 			resolveLedgerCarrier()
 			if len(regions) > 0 {
-				// Capability 1 is the floor for the generation-2 carrier; the floor rises with
-				// the emitted generation, never independently of it.
-				if ready, err := s.store.LiveCredentialReadyAgentRegions(ctx, 45*time.Second, dispatch.EnvelopeV1); err != nil {
-					s.logger.Warn("credential_agent_capability_lookup_failed", "error", err.Error())
-				} else {
-					credentialReadyPull = ready
-				}
-				if ready, err := s.store.LiveCredentialReadyAgentRegions(ctx, 45*time.Second, dispatch.EnvelopeV2); err != nil {
-					s.logger.Warn("credential_agent_capability_lookup_failed", "error", err.Error())
-				} else {
-					for region := range ready {
-						if s.pullRegions[region] {
-							raiseCarrier(region, dispatch.ProtocolV3)
-						}
-					}
-				}
-				if s.credentialLiveRegions != nil {
-					if ready, err := s.credentialLiveRegions.LiveCredentialJobRegions(ctx); err != nil {
-						s.logger.Warn("credential_worker_capability_lookup_failed", "error", err.Error())
-					} else {
-						credentialReadyAMQP = ready
-					}
-					if ready, err := s.credentialLiveRegions.LiveCredentialV3JobRegions(ctx); err != nil {
-						s.logger.Warn("credential_worker_capability_lookup_failed", "error", err.Error())
-					} else {
-						for region := range ready {
-							if !s.pullRegions[region] {
-								raiseCarrier(region, dispatch.ProtocolV3)
-							}
-						}
-					}
-				}
-				for region := range s.localCredentialRegions {
-					// A pull-served region is executed by its AGENTS, never by this process, so the
-					// in-process executor is no evidence about it. Without this exclusion role=all with
-					// `pull.regions: [core]` raised core's carrier to generation 3 on the strength of a
-					// runner that will never see the job; a capability-1 agent could not claim the v3
-					// row, and the monitor had no outcome at all until the row's TTL. Same shape as
-					// the canary's [99], fixed at the same place: resolve time, so neither builder
-					// order nor configuration can restore it (reviewer [102]).
-					if s.pullRegions[region] {
-						continue
-					}
-					credentialReadyAMQP[region] = true
-					// A same-process executor IS this binary, so its capability is ours by
-					// construction — there is no wire and no version skew to discover. Without
-					// this the default single-binary role=all never moved past generation 2,
-					// which meant the execution binding and field-set rules — the whole point
-					// of the amendment — were inert in the most common deployment while the
-					// worker inside the same process could open them perfectly well.
-					//
-					// RAISED and not assigned: this branch used to overwrite, and with the ledger
-					// answer now resolved before the dispatch loop an assignment here would have
-					// silently pushed an announced generation 4 back down to 3 — a defect decided
-					// by branch order, which is exactly what the reviewer's "resolve time, so
-					// neither builder order nor configuration can restore it" rules out.
-					raiseCarrier(region, dispatch.ProtocolV3)
-				}
+				caps.resolveCredential(ctx, s)
 			}
 			for _, snapshotRegion := range regions {
 				ids := credentialByRegion[snapshotRegion]
@@ -1836,7 +1837,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					}
 					// The whole policy goes in: the batch is nominated by snapshot region,
 					// but each job's carrier is picked from its AUTHORITATIVE region.
-					items, err := s.store.MaterializeExecutionConfigs(ctx, ids[start:end], carrierGeneration)
+					items, err := s.store.MaterializeExecutionConfigs(ctx, ids[start:end], caps.carrier)
 					if err != nil {
 						if ctx.Err() != nil {
 							return false
@@ -1850,13 +1851,28 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 								credentialFailures[id]++
 								delay := credentialFailureRetry(snap.Interval(), credentialFailures[id])
 								nextRun[id] = now.Add(delay)
-								// FR-032 advance rule 4. The delayed instant moves, and the
-								// INTERVAL does not: a backoff delay that became
-								// `interval_in_force` would space every later gap window by a
-								// retry timer instead of by the monitor's cadence — invisibly,
-								// and permanently (invariant 2b).
+								// FR-032 advance rule 4, CORRECTED by C5. The column records the
+								// interval that PRODUCED the instant beside it — §6.2's own
+								// definition — and a backoff produces its instant from the delay.
+								//
+								// It used to write the snapshot's cadence, and the sentence here
+								// said the delay "would space every later gap window by a retry
+								// timer instead of by the monitor's cadence, invisibly and
+								// permanently". Neither half held. It is not permanent: the next
+								// successful advance writes the cadence back. And the grid it
+								// produced was the wrong one — the schedule jumps from T to
+								// T+delay while the column claims a cadence step, so the instants
+								// between are on no grid, materialized by nothing and fenced by
+								// nothing, and the window at T+delay carries a lateness threshold
+								// shorter than the span that actually spaced it.
+								//
+								// What the delay buys is one meaning for one column: while cerbix
+								// is backing off, the interval in force IS the backoff, and the
+								// windows it skipped are the one skip row it wrote at T rather
+								// than a cadence's worth of never-issued facts about runs cerbix
+								// chose not to attempt.
 								exp, ok := expectations[id]
-								recordAdvance(snap, exp, ok, "", store.SkipCredentialUnresolved, 0, now.Add(delay), snap.Interval(), false)
+								recordAdvance(snap, exp, ok, "", store.SkipCredentialUnresolved, 0, now.Add(delay), delay, false)
 							}
 						}
 						continue
@@ -1887,7 +1903,9 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 								delay := credentialFailureRetry(snap.Interval(), credentialFailures[item.MonitorID])
 								nextRun[item.MonitorID] = now.Add(delay)
 								exp, ok := expectations[item.MonitorID]
-								recordAdvance(snap, exp, ok, "", store.SkipCredentialUnresolved, 0, now.Add(delay), snap.Interval(), false)
+								// C5: the interval that produced the instant, which for a backoff
+								// is the delay. See the batch-failure branch above.
+								recordAdvance(snap, exp, ok, "", store.SkipCredentialUnresolved, 0, now.Add(delay), delay, false)
 							}
 							continue
 						}
@@ -1898,12 +1916,11 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 							// materialized for generation 3 must not be published into a region
 							// that only proved it can open generation 2, or it lands on a queue
 							// nobody there consumes and expires by TTL.
-							ready := credentialReadyAMQP[m.Region]
-							if s.pullRegions[m.Region] {
-								ready = credentialReadyPull[m.Region]
-							}
+							// The capability record answers on the transport that actually serves
+							// this region — one question, one owner (G1).
+							ready := caps.credentialReady(m.Region)
 							if ready && item.Job.ProtocolVersion >= dispatch.ProtocolV3 {
-								ready = carrierGeneration[m.Region] >= item.Job.ProtocolVersion
+								ready = caps.carrierFor(m.Region) >= item.Job.ProtocolVersion
 							}
 							if !ready {
 								if last := credentialLastLog[m.ID]; last.IsZero() || now.Sub(last) >= credentialFailureLogEvery {
@@ -1917,7 +1934,9 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 								delay := credentialFailureRetry(m.Interval(), credentialFailures[m.ID])
 								nextRun[m.ID] = now.Add(delay)
 								exp, ok := expectations[m.ID]
-								recordAdvance(m, exp, ok, "", store.SkipNoCapableExecutor, 0, now.Add(delay), m.Interval(), false)
+								// C5: the same correction on the third backoff site. All three
+								// move the instant by the delay, so all three record it.
+								recordAdvance(m, exp, ok, "", store.SkipNoCapableExecutor, 0, now.Add(delay), delay, false)
 								continue
 							}
 						}
@@ -1936,18 +1955,15 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 							expect.DueAt, expect.JobID, expect.IssuedAt = item.Job.DueAt, item.Job.JobID, item.Job.IssuedAt
 							expectOK = true
 						}
-						// FR-029 D9/D9a. A canary holds its delivery for the whole journey, so a
-						// second dispatch of the same monitor would submit a SECOND external
-						// transaction, and a region with several executors has no worker-local way
-						// to bound how many long journeys run at once. Both are decided here.
-						if !s.canaryRunnerAvailable(ctx, m, announcedCanary) {
+						// FR-029 D9/D9a, through the same admission sequence the plain branch uses
+						// (G2). A canary holds its delivery for the whole journey, so a second
+						// dispatch of the same monitor would submit a SECOND external transaction,
+						// and a region with several executors has no worker-local way to bound how
+						// many long journeys run at once. Both are decided in one place.
+						var skip string
+						if m, skip = admitCanary(m, now); skip != "" {
 							nextRun[m.ID] = now.Add(iv)
-							recordAdvance(m, expect, expectOK, "", store.SkipNoCapableRunner, 0, now.Add(iv), iv, confirming)
-							continue
-						}
-						if !s.claimCanarySlot(ctx, m) {
-							nextRun[m.ID] = now.Add(iv)
-							recordAdvance(m, expect, expectOK, "", store.SkipNoInflightSlot, 0, now.Add(iv), iv, confirming)
+							recordAdvance(m, expect, expectOK, "", skip, 0, now.Add(iv), iv, confirming)
 							continue
 						}
 						// The publish is DEFERRED past the reserve exactly as the plain branch's
@@ -1960,7 +1976,10 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 						pending = append(pending, pendingDispatch{
 							monitor: m, job: item.Job, interval: iv, nextRun: now.Add(iv),
 							ledgered: expectOK, credentialed: true,
-							advance: recordAdvance(m, expect, expectOK, item.Job.JobID, "", item.Job.ProtocolVersion, now.Add(iv), iv, confirming),
+							// The materializer reports the generation it stamped beside the job it
+							// stamped, so this records the producer's decision and not the body it
+							// wrote it into (A2).
+							advance: recordAdvance(m, expect, expectOK, item.Job.JobID, "", item.CarrierGeneration, now.Add(iv), iv, confirming),
 						})
 					}
 				}
@@ -1984,7 +2003,14 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 			// party [28]).
 			reserved := map[string]time.Time{}
 			if len(ledgerAdvances) > 0 {
-				written, err := s.store.ReserveExpectations(ctx, now, ledgerAdvances)
+				written, rejected, err := s.store.ReserveExpectations(ctx, now, ledgerAdvances)
+				for _, r := range rejected {
+					// An item the ledger cannot represent is this MONITOR's fault and nobody
+					// else's. It is named so an operator can find it, and its payload is dropped
+					// exactly as a fenced one is: re-submitting an invalid advance unchanged would
+					// fail identically for as long as the instance runs.
+					s.logger.Error("expectation_advance_rejected", "monitor_id", r.MonitorID, "reason", r.Reason)
+				}
 				if err != nil {
 					if ctx.Err() != nil {
 						return false
@@ -2267,11 +2293,11 @@ func (s *Scheduler) maintainPartitions(ctx context.Context, now time.Time) {
 	// FR-032 §12.3. The ledger's own retention, on its OWN window rather than the heartbeat one:
 	// a window's evidentiary value decays faster than a heartbeat's, which is why the default is
 	// 14 days against the heartbeats' 30 and the gate ledger's 90.
-	ledgerDays := s.expectedRunRetentionDays
-	if ledgerDays <= 0 {
-		ledgerDays = domain.DefaultExpectedRunRetentionDays
-	}
-	ledgerCutoff := now.UTC().Truncate(24*time.Hour).AddDate(0, 0, -ledgerDays)
+	// The cutoff comes from the STORE, which owns the formula (C8). It used to be computed here as
+	// well, and the store's correlation floor computed a rolling one — two answers to "how far back
+	// does the ledger reach", differing by up to a day, with windows in the gap stored and listed
+	// and refused.
+	ledgerCutoff := s.store.ExpectedRunRetentionCutoff(now)
 	if dropped, err := s.store.PurgeOldExpectedRuns(ctx, ledgerCutoff); err != nil {
 		s.logger.Error("purge_expected_runs_failed", "error", err.Error())
 	} else if dropped > 0 {
@@ -2429,7 +2455,14 @@ func (s *Scheduler) publishPending(ctx context.Context, st publishState) map[str
 				continue
 			}
 		}
-		if err := s.publishScheduledJob(ctx, pd.job, pd.interval); err != nil {
+		err := s.publishScheduledJob(ctx, pd.job, pd.interval)
+		// The instant THIS job left the process, taken here and carried to the confirm (C7). The
+		// tick's own clock is read before the snapshot refresh, the authoritative read, the reserve
+		// and every publish in this loop, so using it shrank every measured lateness — the one
+		// direction this design refuses. It is read after the attempt rather than before it so it
+		// bounds the publish rather than preceding it.
+		publishedAt := time.Now().UTC()
+		if err != nil {
 			if ctx.Err() != nil {
 				return held
 			}
@@ -2478,6 +2511,7 @@ func (s *Scheduler) publishPending(ctx context.Context, st publishState) map[str
 		if pd.ledgered {
 			confirms = append(confirms, store.ExpectationConfirm{
 				MonitorID: m.ID, DueAt: pd.advance.ExpectedDue, JobID: pd.job.JobID,
+				IssuedAt: publishedAt,
 			})
 		}
 	}

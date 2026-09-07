@@ -404,43 +404,22 @@ func buildCanaryMonitor(uid string, rm rawMonitor) (DesiredMonitor, error) {
 	}
 
 	m := domain.Monitor{
-		Name:         strings.TrimSpace(rm.Name),
-		Type:         domain.MonitorAsyncCanary,
-		Conditions:   rm.Conditions,
-		Tags:         rm.Tags,
-		Region:       orDefault(rm.Region, fmtDefaultRegion),
-		Enabled:      boolOr(rm.Enabled, true),
-		AutoIncident: boolOr(rm.AutoIncident, true),
-		DependsOn:    normStringSet(rm.DependsOn),
-		Config:       config,
+		Type:   domain.MonitorAsyncCanary,
+		Config: config,
 	}
-	if m.Name == "" {
-		return DesiredMonitor{}, rejectf(ReasonDomainInvalid, uid, "monitor `name` is required")
+	// The SHARED step (D1, G5). This builder used to restate the field mapping and dropped
+	// `description` on the way: the raw monitor accepts the key, strict field checking passed it,
+	// and the canonical hash folds a value that was always empty — so a description declared for an
+	// async_canary never reached the monitor, and every later edit of it was a permanent no-op the
+	// plan reported as "no change".
+	if err := applyCommonMonitorFields(uid, rm, &m); err != nil {
+		return DesiredMonitor{}, err
 	}
 	if strings.TrimSpace(rm.Target) != "" {
 		// A canary's target is its workflow. Accepting a target here would let a bundle carry a
 		// field nothing reads, which is how a document starts lying about what it configures.
 		return DesiredMonitor{}, rejectf(ReasonUnsupportedField, uid, "an async_canary has no `target`; its workflow names its URLs")
 	}
-
-	var derr error
-	if m.IntervalSeconds, derr = durSeconds(uid, "interval", rm.Interval, fmtDefaultIntervalSeconds); derr != nil {
-		return DesiredMonitor{}, derr
-	}
-	if m.TimeoutSeconds, derr = durSeconds(uid, "timeout", rm.Timeout, fmtDefaultTimeoutSeconds); derr != nil {
-		return DesiredMonitor{}, derr
-	}
-	if m.ConfirmIntervalSeconds, derr = durSeconds(uid, "confirm_interval", rm.ConfirmInterval, 0); derr != nil {
-		return DesiredMonitor{}, derr
-	}
-	if m.RenotifySeconds, derr = durSeconds(uid, "renotify", rm.Renotify, 0); derr != nil {
-		return DesiredMonitor{}, derr
-	}
-	if m.GraceSeconds, derr = durSeconds(uid, "grace", rm.Grace, 0); derr != nil {
-		return DesiredMonitor{}, derr
-	}
-	m.Retries = intOr(rm.Retries, fmtDefaultRetries)
-	m.FailureThreshold = intOr(rm.FailureThreshold, fmtDefaultFailureThreshold)
 
 	m.Normalize()
 	vm := m

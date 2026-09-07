@@ -2,10 +2,12 @@ package prober
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +22,22 @@ import (
 
 func canaryTestProber() canaryProber {
 	return canaryProber{dial: (&net.Dialer{}).DialContext}
+}
+
+// canaryTLSProber is the same seam for a case that exercises a REDIRECT. Since B1 every hop must be
+// `https`, so those fixtures are TLS servers and their throwaway certificates have to be trusted
+// somewhere; the prober's `roots` field is that somewhere, set here and nowhere in the product.
+//
+// A plain-HTTP fixture is still right for every case that makes no hop: the policy runs on
+// redirects, so an initial request to an http fixture exercises exactly what it always did, and
+// converting those too would have made the diff about TLS instead of about the rule.
+func canaryTLSProber(t *testing.T, servers ...*httptest.Server) canaryProber {
+	t.Helper()
+	pool := x509.NewCertPool()
+	for _, srv := range servers {
+		pool.AddCert(srv.Certificate())
+	}
+	return canaryProber{dial: (&net.Dialer{}).DialContext, roots: pool}
 }
 
 // canaryMonitor builds a monitor whose config is the canonical projection of a poll_json workflow
@@ -267,10 +285,10 @@ func TestCanaryDropsEveryBindingHeaderOnACrossHostRedirect(t *testing.T) {
 	targetMux.HandleFunc("/tasks/", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed", "s3_path": "canary/x.wav", "byte_size": 1})
 	})
-	target := httptest.NewServer(targetMux)
+	target := httptest.NewTLSServer(targetMux)
 	defer target.Close()
 
-	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, target.URL+"/files/upload", http.StatusTemporaryRedirect)
 	}))
 	defer redirector.Close()
@@ -283,7 +301,7 @@ func TestCanaryDropsEveryBindingHeaderOnACrossHostRedirect(t *testing.T) {
 		}
 		w.Completion.URL = target.URL + "/tasks/{{ correlation_id }}"
 	})
-	canaryTestProber().Probe(context.Background(), m)
+	canaryTLSProber(t, target, redirector).Probe(context.Background(), m)
 
 	if received == nil {
 		t.Fatal("the redirect target was never reached")
@@ -316,11 +334,11 @@ func TestCanaryKeepsBindingHeadersOnASameOriginRedirect(t *testing.T) {
 	mux.HandleFunc("/tasks/", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed", "s3_path": "canary/x.wav", "byte_size": 1})
 	})
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewTLSServer(mux)
 	defer srv.Close()
 
 	m := canaryMonitor(t, srv.URL, nil)
-	res := canaryTestProber().Probe(context.Background(), m)
+	res := canaryTLSProber(t, srv).Probe(context.Background(), m)
 	if res.Msg != "" {
 		t.Fatalf("a same-origin redirect must not break the journey: %s", res.Msg)
 	}
@@ -330,13 +348,23 @@ func TestCanaryKeepsBindingHeadersOnASameOriginRedirect(t *testing.T) {
 }
 
 // The correlation id is TARGET-controlled and lands in a URL we then request (D4).
+//
+// It is ESCAPED where escaping settles the question, and REFUSED where it does not. B8 moved the
+// second class: `url.PathEscape` is exactly right for a character that needs encoding and does
+// nothing at all to a dot segment — `PathEscape("..")` is `".."` — so an id of `..` pointed the
+// completion request one segment up, at a URL the author never wrote. A separator is the same
+// hazard by another route: `%2F` is safe until something on the way decodes it. Those are not
+// spellings to encode harder; they are segments that MEAN something, and the rule is the one the
+// write-time placeholder check already applies to the segment the id will occupy.
 func TestCanaryCorrelationIsBoundedAndEscaped(t *testing.T) {
 	var polledPath string
 	mux := http.NewServeMux()
-	nasty := "../../admin?x=1#f"
+	// Escaping is what settles this one: a space and a percent are ordinary content, and the
+	// journey must still address the resource.
+	escapable := "task 42%wip"
 	mux.HandleFunc("/files/upload", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(202)
-		_ = json.NewEncoder(w).Encode(map[string]any{"task_id": nasty})
+		_ = json.NewEncoder(w).Encode(map[string]any{"task_id": escapable})
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		polledPath = r.URL.EscapedPath()
@@ -353,12 +381,17 @@ func TestCanaryCorrelationIsBoundedAndEscaped(t *testing.T) {
 	if !strings.HasPrefix(polledPath, "/tasks/") {
 		t.Fatalf("the request escaped its path: %q", polledPath)
 	}
-	if strings.Contains(polledPath, "/admin") {
-		t.Fatalf("the correlation id changed the request's target: %q", polledPath)
+	if strings.Contains(polledPath, " ") || strings.Contains(polledPath[len("/tasks/"):], "/") {
+		t.Fatalf("the id was not escaped into ONE segment: %q", polledPath)
 	}
 
-	// Over-long, control characters and invalid UTF-8 are refused at `correlate` rather than used.
-	for _, bad := range []string{strings.Repeat("x", domain.CanaryMaxCorrelationBytes+1), "id\x00with-nul", "id\nwith-newline"} {
+	// Refused at `correlate` rather than used: over-long, control characters, and — since B8 — a
+	// relative path segment or anything carrying a separator. The last three are what escaping
+	// could not fix.
+	for _, bad := range []string{
+		strings.Repeat("x", domain.CanaryMaxCorrelationBytes+1), "id\x00with-nul", "id\nwith-newline",
+		"..", ".", "../../admin", "a/b", `a\b`,
+	} {
 		badID := bad
 		mux2 := http.NewServeMux()
 		mux2.HandleFunc("/files/upload", func(w http.ResponseWriter, r *http.Request) {
@@ -520,10 +553,10 @@ func TestCanaryProvenanceNeverReachesEitherTargetOnTheWire(t *testing.T) {
 	targetMux.HandleFunc("/tasks/", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed", "s3_path": "canary/x.wav", "byte_size": 1})
 	})
-	target := httptest.NewServer(targetMux)
+	target := httptest.NewTLSServer(targetMux)
 	defer target.Close()
 
-	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		firstHop = r.Header.Clone()
 		http.Redirect(w, r, target.URL+"/files/upload", http.StatusTemporaryRedirect)
 	}))
@@ -537,7 +570,7 @@ func TestCanaryProvenanceNeverReachesEitherTargetOnTheWire(t *testing.T) {
 		}
 		w.Completion.URL = target.URL + "/tasks/{{ correlation_id }}"
 	})
-	canaryTestProber().Probe(context.Background(), m)
+	canaryTLSProber(t, target, redirector).Probe(context.Background(), m)
 
 	if firstHop == nil {
 		t.Fatal("the first hop was never reached")
@@ -564,5 +597,174 @@ func TestCanaryProvenanceNeverReachesEitherTargetOnTheWire(t *testing.T) {
 	}
 	if got := secondHop.Get("x-tenant"); got != "canary" {
 		t.Fatalf("x-tenant = %q, want it preserved", got)
+	}
+}
+
+// B1 — a redirect that downgrades the scheme is REFUSED, and no header reaches the plaintext hop.
+//
+// This is the P0 the package opens with. The origin comparison normalized host and port and never
+// looked at the scheme, defaulting an absent port to 443 for both schemes, so `https://x` and
+// `http://x` were the SAME origin: an `https` → `http` redirect to the same host kept every
+// binding-backed header, and a project secret left the process in cleartext because a target
+// answered one redirect. `https` was enforced once, at write time, and never re-checked on a hop.
+//
+// The assertion is on WHAT THE SECOND HOP RECEIVED, not on what the policy decided. A test that
+// asserted the policy's verdict would pass for a version that dropped the headers and followed the
+// hop anyway — which is not the contract: the hop is not made at all, so nothing leaves the process,
+// and the stage FAILS rather than continuing without the credential. A canary that quietly succeeds
+// unauthenticated is a second false claim.
+//
+// The mutation that must kill this: drop the hop predicate and keep only the header stripping.
+func TestCanaryRefusesARedirectThatDowngradesTheScheme(t *testing.T) {
+	var plaintextHop http.Header
+	var reached bool
+	plaintext := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		plaintextHop = r.Header.Clone()
+		w.WriteHeader(202)
+		_ = json.NewEncoder(w).Encode(map[string]any{"task_id": "task-42"})
+	}))
+	defer plaintext.Close()
+
+	// The same HOST as the secure origin, which is precisely the case the old comparison called
+	// "the same origin": only the scheme and the port differ.
+	redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plaintext.URL+"/files/upload", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	m := canaryMonitor(t, redirector.URL, func(w *domain.CanaryWorkflow) {
+		w.Submit.Headers = []domain.CanaryHeader{
+			{Name: "authorization", SecretRef: "upload"},
+			{Name: "x-api-key", SecretRef: "upload"},
+		}
+	})
+	res := canaryTLSProber(t, redirector).Probe(context.Background(), m)
+
+	if reached {
+		t.Errorf("the plaintext hop was REQUESTED; it carried %v. The refusal must happen before the "+
+			"request is made, so no header — credential-bearing or not — leaves the process",
+			plaintextHop)
+	}
+	if res.Msg == "" {
+		t.Error("the journey reported success after a refused hop: a canary that succeeds without " +
+			"its credential is a second false claim")
+	}
+	if !strings.Contains(res.Msg, "redirect refused") {
+		t.Errorf("the failure reads %q, want a bounded reason naming the refused hop rule", res.Msg)
+	}
+	// The reason names the rule and never the URL, which is the standing contract for a canary
+	// stage failure (NFR-024).
+	for _, leak := range []string{plaintext.URL, redirector.URL, "://", "s3cr3t-canary-token"} {
+		if strings.Contains(res.Msg, leak) {
+			t.Errorf("the failure message carries %q: %s", leak, res.Msg)
+		}
+	}
+}
+
+// The same predicate, on the other two rules it states. A hop carrying userinfo is refused for the
+// reason the write-time validator refuses one: `https://user:pass@host` puts a credential in a URL,
+// and following it would put one there at run time after the write gate had ruled it out.
+func TestCanaryRefusesAHopThatCarriesUserinfo(t *testing.T) {
+	var reached bool
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(202)
+		_ = json.NewEncoder(w).Encode(map[string]any{"task_id": "task-42"})
+	}))
+	defer target.Close()
+
+	withUserinfo := strings.Replace(target.URL, "https://", "https://someone:secret@", 1)
+	redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, withUserinfo+"/files/upload", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	m := canaryMonitor(t, redirector.URL, nil)
+	res := canaryTLSProber(t, redirector, target).Probe(context.Background(), m)
+
+	if reached {
+		t.Error("a hop carrying userinfo was followed")
+	}
+	if !strings.Contains(res.Msg, "redirect refused") {
+		t.Errorf("the failure reads %q, want the bounded hop refusal", res.Msg)
+	}
+}
+
+// And the write gate and the hop policy answer from ONE predicate, so they cannot drift again. The
+// write-time wording is unchanged — the messages an author reads are the ones the API has always
+// produced — while the same rules decide a hop.
+func TestTheHopPredicateIsTheWriteValidatorsSubset(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want domain.CanaryHopRule
+	}{
+		{"https://api.example.com/x", domain.CanaryHopOK},
+		{"http://api.example.com/x", domain.CanaryHopNotHTTPS},
+		{"ftp://api.example.com/x", domain.CanaryHopNotHTTPS},
+		{"https:///x", domain.CanaryHopNoHost},
+		{"https://someone:secret@api.example.com/x", domain.CanaryHopUserinfo},
+	} {
+		u, err := url.Parse(tc.raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.raw, err)
+		}
+		if got := domain.CanaryHopViolation(u); got != tc.want {
+			t.Errorf("CanaryHopViolation(%q) = %v, want %v", tc.raw, got, tc.want)
+		}
+		if tc.want != domain.CanaryHopOK {
+			if tc.want.WriteMessage() == "" || tc.want.HopReason() == "" {
+				t.Errorf("rule %v has no wording for one of its two surfaces", tc.want)
+			}
+		}
+	}
+}
+
+// B6 — a completion document missing the block its own kind names is REFUSED, not dereferenced.
+//
+// The two await paths read `Completion.Poll` and `Completion.SSE` without a nil check, two lines
+// below a comment saying a schema-invalid document can reach them on a crafted carrier. Neither the
+// AMQP worker nor the pull agent installs a recover, so one such payload panics the goroutine and
+// takes the region's whole prober pool with it: a denial of service against every monitor in that
+// region, from one message.
+//
+// The refusal is at the structural gate — `ParseCanaryConfig`, the one door every reader crosses —
+// so the dereference is never reached rather than guarded at each site. The probe below would panic
+// on the unfixed tree; `go test` reports a panic as a failure of the test that caused it, which is
+// what makes this a killing case rather than a description.
+func TestACanaryWithNoCompletionBlockIsRefusedRatherThanDereferenced(t *testing.T) {
+	for _, tc := range []struct{ name, kind string }{
+		{"poll_json with no poll block", domain.CanaryCompletionPollJSON},
+		{"sse with no sse block", domain.CanaryCompletionSSE},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCanaryFixture(t)
+			m := canaryMonitor(t, f.URL, nil)
+			// The document a crafted carrier delivers: legal JSON, the right shape, and the block
+			// its kind requires simply removed. Built by editing the stored document rather than by
+			// a workflow literal, because a literal would go back through the builder that adds it.
+			var doc map[string]any
+			if err := json.Unmarshal([]byte(m.Config[domain.CanaryWorkflowKey]), &doc); err != nil {
+				t.Fatalf("stored document does not parse: %v", err)
+			}
+			completion, _ := doc["completion"].(map[string]any)
+			completion["kind"] = tc.kind
+			delete(completion, "poll")
+			delete(completion, "sse")
+			raw, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.Config[domain.CanaryWorkflowKey] = string(raw)
+
+			res := canaryTestProber().Probe(context.Background(), m)
+			if res.Msg == "" {
+				t.Fatalf("a %s document with no block produced a SUCCESS", tc.kind)
+			}
+			if !strings.Contains(res.Msg, "workflow unreadable") {
+				t.Errorf("the failure reads %q, want the bounded reason a document the gate cannot "+
+					"read already has", res.Msg)
+			}
+		})
 	}
 }

@@ -94,11 +94,28 @@ func insertProjectAudit(ctx context.Context, tx pgx.Tx, projectID string, actor 
 	if err := actor.valid(); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (org_id, actor_user_id, via_token, action, target)
 		SELECT p.org_id, $2, $3, $4, $5 FROM projects p WHERE p.id = $1`,
-		projectID, actor.userID(), actor.ViaToken, action, target); err != nil {
+		projectID, actor.userID(), actor.ViaToken, action, target)
+	if err != nil {
 		return fmt.Errorf("store: audit %s: %w", action, err)
+	}
+	// D2. A write that produced NO audit row FAILS, and the check is here rather than in the
+	// sentence above it.
+	//
+	// This is an `INSERT … SELECT`, so a project that does not resolve inserts zero rows and
+	// returns no error: the audit silently did not happen while the mutation went on to commit —
+	// exactly what the header of this file says cannot occur ("an incident write that cannot be
+	// attributed does not happen"). It is unreachable today, because the foreign keys make an
+	// incident's project exist. That is precisely why it is worth a statement: the guarantee was
+	// carried by two other tables' constraints and by a comment, and a schema change that relaxed
+	// either would have taken it away with no test failing.
+	//
+	// Rows-affected rather than resolving the tenant first: both are the same property, and this
+	// one keeps the single round trip the comment above already promises.
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("store: audit %s: project %s resolved no tenant, so the write is not attributable", action, projectID)
 	}
 	return nil
 }

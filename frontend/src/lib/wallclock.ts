@@ -228,7 +228,26 @@ export function utcDayRangeLabel(
   if (!a || !b) return ABSENT;
   const pa = partsAt(a, "UTC", { day: "2-digit", month: "2-digit", year: "numeric" });
   const pb = partsAt(b, "UTC", { day: "2-digit", month: "2-digit", year: "numeric" });
-  return `${dmy(pa)} → ${dmy(pb)} UTC`;
+  // E6: the extent this range ACTUALLY has, to the precision that distinguishes two of them.
+  //
+  // Truncating to whole days made two reliability segments split by revision boundaries hours apart
+  // on one day render the identical label — "05.09.2026 → 05.09.2026 UTC" for both — so a
+  // per-segment label could not tell an operator which segment they were reading. Definition
+  // changes minutes apart are the ordinary case here, not an edge: the strip beside this label
+  // clusters them for exactly that reason.
+  //
+  // The clock appears only when an end is NOT midnight, so an ordinary whole-day segment reads
+  // exactly as it always did and the noise is spent only where it buys a distinction. Minute
+  // precision, because that is what distinguishes two boundaries a reader can act on; two inside
+  // one minute are a cluster, which the strip already renders as one mark carrying its count.
+  const midnight = (d: Date) => d.getTime() % 86_400_000 === 0;
+  if (midnight(a) && midnight(b)) return `${dmy(pa)} → ${dmy(pb)} UTC`;
+  const ta = hm(partsAt(a, "UTC", { hour: "2-digit", minute: "2-digit" }));
+  const tb = hm(partsAt(b, "UTC", { hour: "2-digit", minute: "2-digit" }));
+  // Inside one day the date is stated once: two dates that are the same are the noise, not the
+  // information.
+  if (dmy(pa) === dmy(pb)) return `${dmy(pa)} ${ta} → ${tb} UTC`;
+  return `${dmy(pa)} ${ta} → ${dmy(pb)} ${tb} UTC`;
 }
 
 /**
@@ -348,6 +367,36 @@ export function localInputZoneHint(value: string | null | undefined, zone?: stri
   const typed = value ? new Date(value) : null;
   const at = typed && !Number.isNaN(typed.getTime()) ? typed : new Date();
   return `local time (${offsetAt(at, zone)})`;
+}
+
+/**
+ * The value a `<input type="datetime-local">` must carry to show an INSTANT in the viewer's zone.
+ *
+ * A `datetime-local` control has no zone: its value is a bare wall clock, the browser reads it as
+ * LOCAL, and a save path that parses it with `new Date(value)` gets the instant that wall clock
+ * names in the viewer's zone. So the only correct pre-fill is the instant RENDERED in that zone.
+ *
+ * E1 is what happens without this. `EscalationView` filled an on-call schedule's rotation anchor by
+ * slicing the zone marker off the RFC-3339 instant — `"2026-09-06T12:00:00Z".slice(0, 16)` — and the
+ * control then displayed 12:00 as a local time it is not. Saving re-read it as local, so the anchor
+ * moved by the viewer's offset on every save: editing a schedule's NAME silently re-ordered who gets
+ * paged, by five hours at UTC+05. The zone hint beside the control made it worse rather than
+ * catching it — it asserts "local time (UTC+05:00)" about a value that was in UTC.
+ *
+ * MINUTE precision, because that is what the control's default step carries. An instant with
+ * non-zero seconds is therefore truncated by the round trip, which is unchanged by this function and
+ * was equally true of the slice it replaces; naming it here is cheaper than a reader rediscovering
+ * it.
+ *
+ *   at UTC+05:  localInputValue("2026-09-06T12:00:00Z")  ->  "2026-09-06T17:00"
+ */
+export function localInputValue(iso: string | null | undefined, zone?: string): string {
+  const d = parse(iso);
+  if (!d) return "";
+  const p = partsAt(d, zone, {
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+  });
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
 }
 
 /**

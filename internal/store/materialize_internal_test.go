@@ -436,3 +436,140 @@ func TestEveryMaterializedJobCarriesItsOwnIdentity(t *testing.T) {
 		t.Error("the same monitor materialized twice produced the same job id — every dispatch is its own job")
 	}
 }
+
+// TestACredentialedSchemaWithNoCredentialCrossesTheCarrierStamp is A1's regression.
+//
+// The materializer had three exits and stamped the carrier on two. A type that is credentialed
+// BY SCHEMA but yields no envelope field — `promql` with `auth_mode: none`, `rabbitmq` with
+// `mode: amqp`, both `CredentialForbidden` variants — took neither the no-envelope exit (it is
+// a credentialed type) nor the sealed exit (`len(fields) == 0`), and fell out of the loop with
+// the protocol version it was born with and `DueAt` still populated from the schedule.
+//
+// Both halves matter and both fail on the unfixed tree. Below generation 4 the job carries the
+// field that DEFINES generation 4, which the core then correlates: the window records
+// `carrier_generation = 4` for a run that rode generation 1 — invariant 10c's `unknown` read as
+// `covered`. At generation 4 the job is published as generation 1 and loses the window it was
+// entitled to carry. The window instant is selected unconditionally, so the first half
+// reproduces with `ledger.carrier_enabled: false` as well, which is what makes this a defect of
+// the stamp and not of the ledger.
+func TestACredentialedSchemaWithNoCredentialCrossesTheCarrierStamp(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "promql-no-auth", Type: domain.MonitorPromQL,
+		Target: "https://prometheus.internal", IntervalSeconds: 60, TimeoutSeconds: 5,
+		FailureThreshold: 1, Enabled: true,
+		Config: map[string]string{"auth_mode": "none", "query": "up"},
+	})
+	if err != nil {
+		t.Fatalf("create promql monitor: %v", err)
+	}
+	if !domain.CredentialedType(mon.Type) {
+		t.Fatalf("%s is not a credentialed type — this test no longer reaches the exit it is about", mon.Type)
+	}
+
+	// A region that never proved the ledger carrier. The monitor has a schedule row, so the
+	// materializer selected a window instant for it; generation 1 must not carry it.
+	items, err := st.MaterializeExecutionConfigs(ctx, []string{mon.ID}, map[string]int{mon.Region: dispatch.ProtocolV1})
+	if err != nil {
+		t.Fatalf("materialize below the ledger carrier: %v", err)
+	}
+	if len(items) != 1 || items[0].Reason != "" {
+		t.Fatalf("materialize: %+v", items)
+	}
+	if got := items[0].Job.ProtocolVersion; got != dispatch.ProtocolV1 {
+		t.Errorf("carrier = %d, want 1 — a job with no envelope and a generation-1 region rides generation 1", got)
+	}
+	if !items[0].Job.DueAt.IsZero() {
+		t.Errorf("a generation-%d job carries DueAt = %s — the field that DEFINES generation 4 rode a "+
+			"generation-1 carrier, and the core correlates it into a `covered` window for a run that "+
+			"never had one", items[0].Job.ProtocolVersion, items[0].Job.DueAt)
+	}
+
+	// And the other direction: a ledger-ready region publishes the same monitor on generation 4,
+	// WITH the window. Unstamped, it left as generation 1 and the window went unrecorded.
+	items, err = st.MaterializeExecutionConfigs(ctx, []string{mon.ID}, map[string]int{mon.Region: dispatch.ProtocolV4})
+	if err != nil {
+		t.Fatalf("materialize on a ledger-ready region: %v", err)
+	}
+	if len(items) != 1 || items[0].Reason != "" {
+		t.Fatalf("materialize at generation 4: %+v", items)
+	}
+	if got := items[0].Job.ProtocolVersion; got != dispatch.ProtocolV4 {
+		t.Errorf("carrier = %d, want 4 — a windowed job in a ledger-ready region rides generation 4", got)
+	}
+	if items[0].Job.DueAt.IsZero() {
+		t.Error("a generation-4 job with no window is a protocol violation the executor dead-letters")
+	}
+}
+
+// TestTheMaterializerReportsTheCarrierItStamped is A2's store half.
+//
+// Three consumers used to infer the generation from the SHAPE of the payload — the presence of the
+// window field — rather than from the producer's decision, and the scheduler recorded the ledger's
+// `carrier_generation` by reading `Job.ProtocolVersion` back off the body it had just written. The
+// materializer now reports the generation beside the job, from the same constructor that stamped
+// it, so the two cannot disagree and the recorder never consults the body.
+//
+// The mutation that must kill this: report a constant, or drop the field and let the caller read
+// `Job.ProtocolVersion` again.
+func TestTheMaterializerReportsTheCarrierItStamped(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
+	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
+	mon, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "plain-http", Type: domain.MonitorHTTP, Target: "https://x",
+		IntervalSeconds: 60, TimeoutSeconds: 5, FailureThreshold: 1, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create monitor: %v", err)
+	}
+	// Disabled monitors are the refusal half of the biconditional below.
+	off, err := st.CreateMonitor(ctx, domain.Monitor{
+		ProjectID: proj.ID, Name: "disabled", Type: domain.MonitorHTTP, Target: "https://y",
+		IntervalSeconds: 60, TimeoutSeconds: 5, FailureThreshold: 1, Enabled: false,
+	})
+	if err != nil {
+		t.Fatalf("create disabled monitor: %v", err)
+	}
+
+	for _, tc := range []struct {
+		region, name string
+		policy, want int
+	}{
+		{mon.Region, "below the ledger carrier", dispatch.ProtocolV1, dispatch.ProtocolV1},
+		{mon.Region, "on the ledger carrier", dispatch.ProtocolV4, dispatch.ProtocolV4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items, err := st.MaterializeExecutionConfigs(ctx, []string{mon.ID}, map[string]int{tc.region: tc.policy})
+			if err != nil || len(items) != 1 {
+				t.Fatalf("materialize: %v (%d items)", err, len(items))
+			}
+			if items[0].CarrierGeneration != tc.want {
+				t.Errorf("the materializer reported carrier %d, want %d — this is the value the ledger "+
+					"records, and it must be the producer's decision rather than a reading of the body",
+					items[0].CarrierGeneration, tc.want)
+			}
+			if items[0].CarrierGeneration != items[0].Job.ProtocolVersion {
+				t.Errorf("the reported carrier %d and the stamped one %d disagree; one constructor "+
+					"produces both", items[0].CarrierGeneration, items[0].Job.ProtocolVersion)
+			}
+		})
+	}
+
+	// A refused monitor has no job, so it reports no carrier. §6.1's `expected_runs_carrier_iff_job`
+	// says the same thing in the database, and the scheduler's advance would fail Validate with a
+	// carrier on a skip.
+	items, err := st.MaterializeExecutionConfigs(ctx, []string{off.ID}, map[string]int{off.Region: dispatch.ProtocolV4})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("materialize disabled: %v (%d items)", err, len(items))
+	}
+	if items[0].Reason == "" {
+		t.Fatalf("a disabled monitor was materialized: %+v", items[0])
+	}
+	if items[0].CarrierGeneration != 0 {
+		t.Errorf("a refused monitor reported carrier %d, want 0 — it carries no job to have ridden one",
+			items[0].CarrierGeneration)
+	}
+}

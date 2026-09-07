@@ -12,20 +12,55 @@ import (
 	"strings"
 	"time"
 
+	"github.com/teamlead-com/cerbix/internal/dispatch"
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 const (
-	jobsQueuePrefix   = "checks.jobs."
-	jobsV2QueuePrefix = "checks.jobs.v2."
-	jobsV3QueuePrefix = "checks.jobs.v3."
-	jobsV4QueuePrefix = "checks.jobs.v4."
 	// FR-029: the per-workflow-kind queue. Additive by construction — a new queue and a new
 	// binding, with every existing queue and consumer untouched, so an executor that does not
 	// announce the capability simply never sees a canary job.
 	canaryQueuePrefix = "checks.canary."
 	canaryV3Infix     = "v3."
 )
+
+// The jobs-queue names come from `internal/dispatch`, which owns them, rather than being restated
+// here (A6). This package's whole job is to read names a publisher wrote, so a second copy of the
+// naming rule is a copy that can be one generation behind — and was: `LiveJobRegions` subtracted
+// the generation-2 and -3 prefixes and not generation 4, so a v4 consumer registered the phantom
+// region `v4.<region>` in the union that feeds the region-worker alert.
+var (
+	jobsQueuePrefix   = dispatch.LegacyJobsQueuePrefix()
+	jobsV2QueuePrefix = dispatch.JobsQueuePrefixes()[dispatch.ProtocolV2]
+	jobsV3QueuePrefix = dispatch.JobsQueuePrefixes()[dispatch.ProtocolV3]
+	jobsV4QueuePrefix = dispatch.JobsQueuePrefixes()[dispatch.ProtocolV4]
+	// generationalJobsPrefixes is every jobs prefix that is NOT the legacy region queue. It is
+	// DERIVED: a generation added to the dispatcher's table is subtracted here without anyone
+	// editing this file, which is the property the hand-written exclusion did not have.
+	generationalJobsPrefixes = func() []string {
+		var out []string
+		for _, prefix := range dispatch.JobsQueuePrefixes() {
+			if prefix != jobsQueuePrefix {
+				out = append(out, prefix)
+			}
+		}
+		return out
+	}()
+)
+
+// isLegacyJobsQueue reports whether a queue name is the generation-1 per-region jobs queue, and not
+// one of the generational queues whose names extend the same prefix.
+func isLegacyJobsQueue(name string) bool {
+	if !strings.HasPrefix(name, jobsQueuePrefix) {
+		return false
+	}
+	for _, prefix := range generationalJobsPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return false
+		}
+	}
+	return true
+}
 
 // Client queries the RabbitMQ management API.
 type Client struct {
@@ -85,8 +120,7 @@ func (c *Client) LiveJobRegions(ctx context.Context) (map[string]bool, error) {
 	}
 	live := map[string]bool{}
 	for _, q := range queues {
-		if q.Consumers > 0 && strings.HasPrefix(q.Name, jobsQueuePrefix) &&
-			!strings.HasPrefix(q.Name, jobsV2QueuePrefix) && !strings.HasPrefix(q.Name, jobsV3QueuePrefix) {
+		if q.Consumers > 0 && isLegacyJobsQueue(q.Name) {
 			live[strings.TrimPrefix(q.Name, jobsQueuePrefix)] = true
 		}
 	}

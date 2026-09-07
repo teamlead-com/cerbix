@@ -138,3 +138,58 @@ func TestACanaryBindingKeyIsRefusedOnAnotherType(t *testing.T) {
 		t.Fatalf("the refusal must name the key: %s", rec.Body.String())
 	}
 }
+
+// B4 — an executor-owned config key is refused on every canary write surface.
+//
+// `async_canary` has no credential schema, so the registry's unknown-key rejection never ran for it
+// and both handlers passed the config map through verbatim. A client could therefore set
+// `canary_run`, the key the scheduler otherwise mints per window: the plain dispatch path YIELDS to
+// a value already present, the executor derives its `Idempotency-Key` from it, and a target
+// honouring that key returns the first task's answer forever. The canary then reports UP on a
+// transaction it stopped performing — an unlimited, silent false claim from one legal-looking write.
+//
+// A whitelist and not a blacklist, so a key nobody has thought of yet is refused as well; the two
+// executor-owned shapes are named individually so the refusal says which rule was met.
+//
+// The mutation that must kill this: refuse `canary_run` alone. The injected binding VALUE key then
+// walks in — and that one puts a caller-chosen string where the gate puts a decrypted secret.
+func TestACanaryRefusesAnExecutorOwnedConfigKey(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   string
+		value string
+		want  string
+	}{
+		{"the scheduler's run key", domain.CanaryRunKey, "1788400000", "set by the scheduler"},
+		{"an injected binding value", domain.CanaryBindingField("upload"), "pinned-secret", "injected by the dispatch gate"},
+		{"a key of no known shape", "canary_debug", "1", "unknown key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHandler(seededStore())
+			body := canaryCreateBody(t, canaryWorkflowJSON(t, nil), map[string]string{tc.key: tc.value})
+			rec := do(h, o1Admin, http.MethodPost, "/api/v1/projects/p1/monitors", body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("create with %s = %d, want 400 (%s)", tc.key, rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.want) {
+				t.Fatalf("body = %s, want a refusal naming %q", rec.Body.String(), tc.want)
+			}
+			if strings.Contains(rec.Body.String(), tc.value) {
+				t.Errorf("the refusal echoed the submitted value: %s", rec.Body.String())
+			}
+		})
+	}
+
+	// The legal keys are still legal: a whitelist that refused the author's own document would be a
+	// worse defect than the one it closes.
+	h := newHandler(seededStore())
+	doc := canaryWorkflowJSON(t, func(w *domain.CanaryWorkflow) {
+		w.Secrets = map[string]string{"upload": "upload-token"}
+		w.Submit.Headers = []domain.CanaryHeader{{Name: "authorization", SecretRef: "upload"}}
+	})
+	body := canaryCreateBody(t, doc, map[string]string{domain.CanarySecretRefKey("upload"): "upload-token"})
+	rec := do(h, o1Admin, http.MethodPost, "/api/v1/projects/p1/monitors", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("a canary with a binding ref was refused: %d (%s)", rec.Code, rec.Body.String())
+	}
+}

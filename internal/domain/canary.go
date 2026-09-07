@@ -714,11 +714,84 @@ const CanaryCorrelationPlaceholder = "{{ correlation_id }}"
 
 var canaryPlaceholderAny = regexp.MustCompile(`\{\{[^}]*\}\}`)
 
-// validateCanaryURL enforces the URL rules that can be decided at WRITE time: https only, a parseable
-// absolute URL, no userinfo, and — for the completion URL — exactly one `{{ correlation_id }}`
-// occupying one whole path segment. The address-level policy (loopback, link-local, private,
-// metadata, rebinding) is the executor's and is enforced after resolution, because a name's address
-// is not knowable here.
+// CanaryHopRule names one address-independent, non-template URL rule.
+//
+// It exists because the write-time validator and the RUNTIME redirect policy have to enforce the
+// SAME rules and used to enforce different ones. `https` was checked once, when the workflow was
+// saved, and never again: the redirect policy compared a normalized host and port and did not look
+// at the scheme at all, so an `https` → `http` redirect to the same host was "the same origin" and
+// every binding-backed header survived it. A canary's project secret could therefore leave the
+// process in cleartext because a target answered one redirect (B1).
+//
+// "The same rules" was not implementable as written, which is why this is a named SUBSET rather
+// than a shared call to the whole validator: the write-time rules also cover template placeholders,
+// which have no meaning on the wire, where substitution has already happened. These three are the
+// address-independent, non-template subset, and they are all of it. The write validator's
+// parseability rule has no runtime half — the client has already parsed the hop URL and would not
+// call the policy at all if it could not — so stating it here would be a condition that cannot fail.
+//
+// The address-level policy (loopback, link-local, private, metadata, rebinding) is NOT here: it
+// lives in the executor's dialer, after resolution, because a name's address is not knowable at
+// write time.
+type CanaryHopRule int
+
+const (
+	// CanaryHopOK means the URL breaks none of the three rules.
+	CanaryHopOK CanaryHopRule = iota
+	CanaryHopNotHTTPS
+	CanaryHopNoHost
+	CanaryHopUserinfo
+)
+
+// CanaryHopViolation reports the first rule u breaks, or CanaryHopOK.
+func CanaryHopViolation(u *url.URL) CanaryHopRule {
+	switch {
+	case u.Scheme != "https":
+		return CanaryHopNotHTTPS
+	case u.Host == "":
+		return CanaryHopNoHost
+	case u.User != nil:
+		return CanaryHopUserinfo
+	}
+	return CanaryHopOK
+}
+
+// WriteMessage is the wording an author sees when a saved workflow breaks the rule. It is the
+// message this validator has always produced, kept verbatim so one predicate serving two surfaces
+// does not change what the API says.
+func (r CanaryHopRule) WriteMessage() string {
+	switch r {
+	case CanaryHopNotHTTPS:
+		return "must be https in v1"
+	case CanaryHopNoHost:
+		return "must name a host"
+	case CanaryHopUserinfo:
+		return "must not carry credentials in its URL userinfo"
+	}
+	return ""
+}
+
+// HopReason is the bounded reason an OPERATOR sees when a redirect hop breaks the rule at run time.
+// It names the rule and never the URL, which is the standing contract for a canary stage failure —
+// a hop URL is target-controlled text, and a failure message that quoted it would put that text on
+// an operator's screen and in the heartbeat.
+func (r CanaryHopRule) HopReason() string {
+	switch r {
+	case CanaryHopNotHTTPS:
+		return "redirect refused: hop is not https"
+	case CanaryHopNoHost:
+		return "redirect refused: hop names no host"
+	case CanaryHopUserinfo:
+		return "redirect refused: hop carries userinfo"
+	}
+	return ""
+}
+
+// validateCanaryURL enforces the URL rules that can be decided at WRITE time: the three
+// address-independent rules above, a parseable absolute URL, and — for the completion URL — exactly
+// one `{{ correlation_id }}` occupying one whole path segment. The address-level policy (loopback,
+// link-local, private, metadata, rebinding) is the executor's and is enforced after resolution,
+// because a name's address is not knowable here.
 func validateCanaryURL(pos, raw string, allowCorrelation bool) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("%s: a URL is required", pos)
@@ -748,14 +821,8 @@ func validateCanaryURL(pos, raw string, allowCorrelation bool) error {
 	if err != nil {
 		return fmt.Errorf("%s: is not a valid URL", pos)
 	}
-	if u.Scheme != "https" {
-		return fmt.Errorf("%s: must be https in v1", pos)
-	}
-	if u.Host == "" {
-		return fmt.Errorf("%s: must name a host", pos)
-	}
-	if u.User != nil {
-		return fmt.Errorf("%s: must not carry credentials in its URL userinfo", pos)
+	if violation := CanaryHopViolation(u); violation != CanaryHopOK {
+		return fmt.Errorf("%s: %s", pos, violation.WriteMessage())
 	}
 	return nil
 }

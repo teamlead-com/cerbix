@@ -497,44 +497,6 @@ func TestTheCanonicalDocumentCarriesNoProjectSecretName(t *testing.T) {
 	}
 }
 
-func TestSemanticHashMovesOnIdentityAndNotOnRotation(t *testing.T) {
-	base, err := CanaryConfig(validMultipartWorkflow())
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := CanarySemanticHash(base)
-
-	// Re-deriving the same workflow is a no-op: nothing reschedules.
-	again, _ := CanaryConfig(validMultipartWorkflow())
-	if CanarySemanticHash(again) != h {
-		t.Fatal("an unchanged workflow must hash the same")
-	}
-
-	// Rotating a secret's VALUE never touches the config, so it cannot move the hash: the value is
-	// not in the document and not in the ref key.
-	if CanarySemanticHash(base) != h {
-		t.Fatal("rotation must not move the hash")
-	}
-
-	// Pointing the binding at a DIFFERENT project secret is a semantic change.
-	remapped := map[string]string{}
-	for k, v := range base {
-		remapped[k] = v
-	}
-	remapped[CanarySecretRefKey("upload")] = "another-secret"
-	if CanarySemanticHash(remapped) == h {
-		t.Fatal("re-pointing a binding at another secret must move the hash")
-	}
-
-	// So is any semantic edit of the document itself.
-	w := validMultipartWorkflow()
-	w.Result.MaxLatency = 120
-	edited, _ := CanaryConfig(w)
-	if CanarySemanticHash(edited) == h {
-		t.Fatal("a changed promise must move the hash")
-	}
-}
-
 func TestParseCanaryConfigRoundTrips(t *testing.T) {
 	for _, w := range []CanaryWorkflow{validMultipartWorkflow(), validPollWorkflow()} {
 		cfg, err := CanaryConfig(w)
@@ -668,10 +630,6 @@ func TestBothWriteSurfacesStoreTheSameCanonicalDocument(t *testing.T) {
 		t.Fatalf("the two write surfaces disagree about the stored document.\n api      = %s\n provider = %s",
 			m.Config[CanaryWorkflowKey], viaProvider[CanaryWorkflowKey])
 	}
-	// And therefore the hash a re-apply compares is the same one.
-	if CanarySemanticHash(m.Config) != CanarySemanticHash(viaProvider) {
-		t.Fatal("same workflow, two surfaces, different semantic hash — a re-apply would read as CHANGED forever")
-	}
 }
 
 // A document that does not parse must survive Normalize untouched, so the refusal is Validate's to
@@ -743,5 +701,71 @@ func TestABodyNumberSurvivesCanonicalisationExactly(t *testing.T) {
 				t.Fatalf("a second normalize rewrote it: %q", got)
 			}
 		})
+	}
+}
+
+// B3 — the type REFUSES a retry count, and the refusal lives in the validator every write surface
+// crosses rather than in each surface.
+//
+// The runner applies `retries + 1` attempts, each bounded by the monitor's own timeout, while the
+// in-flight lease is ONE timeout plus a fixed slack and the pull claim lease is the same. A second
+// attempt therefore outlives the lease: the job is re-claimed while the first journey is still
+// running, and one legal configuration produces two concurrent external transactions. Retries were
+// bounded only by the generic maximum of 10, and the create form offered the control.
+//
+// Sizing the lease from `attempts × timeout` was the alternative and it is refused rather than
+// deferred: it makes a canary journey re-runnable, and a journey is a transaction whose retry is a
+// second side effect at someone else's expense — an upload stored twice, a payment submitted twice.
+//
+// The mutation that must kill this: move the check into the API handler. The file provider and the
+// bundle path would then accept what the API refuses, which is the per-surface shape this replaces.
+func TestAnAsyncCanaryRefusesARetryCount(t *testing.T) {
+	base := func() Monitor {
+		w := validPollWorkflow()
+		cfg, err := CanaryConfig(w)
+		if err != nil {
+			t.Fatalf("build config: %v", err)
+		}
+		for binding, secret := range w.Secrets {
+			cfg[CanarySecretRefKey(binding)] = secret
+		}
+		return Monitor{
+			ProjectID: "p", Name: "canary", Type: MonitorAsyncCanary, Region: "core",
+			IntervalSeconds: 300, TimeoutSeconds: 300, Enabled: true, Config: cfg,
+		}
+	}
+
+	ok := base()
+	ok.Normalize()
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("a canary with no retries must be legal: %v", err)
+	}
+
+	// Every value the generic bound used to admit, not just one: the rule is "no retries", and a
+	// test naming a single number would pass for a check that only refused that number.
+	for _, retries := range []int{1, 2, 10} {
+		bad := base()
+		bad.Retries = retries
+		bad.Normalize()
+		err := bad.Validate()
+		if err == nil {
+			t.Errorf("a canary with retries=%d was accepted: the second attempt outlives the "+
+				"in-flight lease, so the job is re-claimed while the first journey is still "+
+				"running and the target sees two transactions", retries)
+			continue
+		}
+		if !strings.Contains(err.Error(), "retries") {
+			t.Errorf("retries=%d was refused for the wrong reason: %v", retries, err)
+		}
+	}
+
+	// The rule is TYPE-SCOPED. An ordinary monitor's retry count is legal and common, and writing
+	// this as a general rule would refuse configurations nobody meant it to.
+	other := Monitor{
+		ProjectID: "p", Name: "http", Type: MonitorHTTP, Target: "https://x", Region: "core",
+		IntervalSeconds: 60, TimeoutSeconds: 5, Retries: 3, Enabled: true,
+	}
+	if err := other.Validate(); err != nil {
+		t.Errorf("the canary rule reached an http monitor: %v", err)
 	}
 }

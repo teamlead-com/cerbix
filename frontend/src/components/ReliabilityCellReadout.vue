@@ -20,7 +20,24 @@ import { isoInstant } from "@/lib/datekeys";
 
 const props = defineProps<{ cell: Cell; slices: Slice[]; compact?: boolean }>();
 
+// E9: a duration carries the precision its own label promises.
+//
+// This rounded to whole seconds, so a marked sub-second outage — precisely the case the marker
+// exists for, since "too small to draw" and "under a second" are the same population — read as
+// "0s" under the sentence "marked, too small to draw at this size". The reader was told a state
+// exists and then shown a duration saying it does not, which is the one thing the marker was added
+// to prevent.
+//
+// Sub-second values keep milliseconds; everything above a second is unchanged, because a 3-hour
+// outage rendered as "3h 0m 0.000s" would spend precision where nobody is looking for it.
 const usToText = (us: number): string => {
+  if (us > 0 && us < 1_000_000) {
+    // Two decimals of a millisecond is the floor a bucket can hold; trailing zeros go, so a round
+    // 40 ms reads "40ms" rather than "40.00ms".
+    const ms = us / 1000;
+    const text = ms >= 1 ? ms.toFixed(2).replace(/\.?0+$/, "") : ms.toFixed(3).replace(/\.?0+$/, "");
+    return `${text}ms`;
+  }
   const total = Math.round(us / 1_000_000);
   const h = Math.floor(total / 3600);
   const m = Math.floor((total % 3600) / 60);

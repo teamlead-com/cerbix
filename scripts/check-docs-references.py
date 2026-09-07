@@ -82,6 +82,39 @@ PATH_RE = re.compile(r'`([A-Za-z0-9_./{},\-]+\.(?:go|ts|vue|sql|ya?ml|md|json|sh
 # weeks. Absolute urls and pure anchors are excluded — this is about repo-relative files.
 LINK_RE = re.compile(r'\]\((?!https?:|#|mailto:)([A-Za-z0-9_./{},\-]+\.(?:go|ts|vue|sql|ya?ml|md|json|sh|html))(?:#[^)]*)?\)')
 TEST_RE = re.compile(r'`(Test[A-Za-z0-9_]{4,})`')
+# The same name written WITHOUT backticks. D6's first pass matched the backticked spelling only,
+# which is the guard-idiom hole: it guarded the CONVENTION and not the citation. Three bare
+# citations sat in product comments while the guard was green, one of them added by the change that
+# introduced the guard. A bare match needs the declared-identifier filter below, because a Go type
+# may legitimately be named `TestRunner`; a backticked one does not, because nobody spells a type
+# that way in prose.
+BARE_TEST_RE = re.compile(r'(?<![`\w])(Test[A-Z][A-Za-z0-9_]{3,})(?![`\w])')
+# A sentence that marks its subject as removed. Naming a test that is gone, and SAYING it is gone,
+# is a note about history; the guard exists for the reader sent after something they cannot find.
+HISTORICAL_RE = re.compile(r'\b(former|superseded|used to be|no longer|replaced by)\b', re.I)
+# Clause boundaries. The historical rule has to be read in the CLAUSE the name stands in and not
+# over the whole line: applied line-wide, one unrelated "former" anywhere in a comment forgave every
+# bare citation beside it — a marker governing a name it has nothing to do with (reviewer P2 on the
+# first version of this rule). A comma is deliberately NOT a boundary: "the former X, now gone" is
+# one clause about one thing.
+CLAUSE_BREAK_RE = re.compile(r'(?:[.;:]\s)|(?:\s[—–-]\s)|(?:\)\s)|(?:\s\()')
+
+
+def clause_around(line, start, end):
+    """The stretch of `line` the name at [start:end) stands in, cut at clause boundaries.
+
+    Scoping matters more than the marker list: a rule that reads the whole line answers a question
+    about a DIFFERENT part of the sentence, which is how a guard ends up forgiving what it exists to
+    catch.
+    """
+    left = 0
+    for b in CLAUSE_BREAK_RE.finditer(line[:start]):
+        left = b.end()
+    right = len(line)
+    m = CLAUSE_BREAK_RE.search(line, end)
+    if m:
+        right = m.start()
+    return line[left:right]
 BRACE_RE = re.compile(r'\{([^{}]*)\}')
 
 def expand(tok):
@@ -171,6 +204,110 @@ def test_tokens(src):
     if _TEST_TOKENS is None:
         _TEST_TOKENS = set(re.findall(r'\bTest[A-Za-z0-9_]{3,}', src))
     return _TEST_TOKENS
+
+_DECLARED_TESTS = None
+
+_DECLARED_GO_IDENTS = None
+
+
+def declared_go_identifiers():
+    """Every `Test…`-shaped name the tree DECLARES as a Go identifier that is not a test function.
+
+    `internal/dispatch/amqp.go` declares `type TestRunner func(...)`, and a comment naming it is
+    describing its own package, not citing a test. Without this set the bare-citation half of D6
+    would report it forever, and the fix would have been an ALLOWED entry — an exception in the
+    checker standing in for a rule, which is the shape a reviewer already refused once in this
+    package's design round.
+    """
+    global _DECLARED_GO_IDENTS
+    if _DECLARED_GO_IDENTS is None:
+        names = set()
+        for pat in ('internal/**/*.go', 'cmd/**/*.go'):
+            for f in glob.glob(pat, recursive=True):
+                names |= set(re.findall(r'^(?:type|func|var|const)\s+(Test[A-Za-z0-9_]+)',
+                                        read(f, errors='ignore'), re.M))
+        _DECLARED_GO_IDENTS = names
+    return _DECLARED_GO_IDENTS
+
+
+def declared_test_names():
+    """Every `func TestX(...)` declared anywhere in the tree.
+
+    Separate from `test_tokens`, and the difference is the whole point of the Go-comment guard
+    (audit-gap package 3, item D6). `test_tokens` answers "does this name appear in the source",
+    which is the right question for a citation in a DOCUMENT — a doc is not part of the source, so
+    it cannot satisfy itself. A citation inside a Go COMMENT is part of the source, so the same
+    question would always answer yes: the comment would resolve against its own text.
+
+    `internal/api/api.go` cited `TestAPIneverCallsASystemDoor`, which has never existed — the test
+    is `TestTheAPINeverCallsASystemDoor` — and `internal/store/monitorschedule.go` cited
+    `TestEveryGenerationSyncsTheSchedule` for `TestEveryGenerationCreatingSiteSyncsTheSchedule`.
+    Both are a reader sent after a test that is not there, and neither was catchable by a name check
+    until this set existed.
+    """
+    global _DECLARED_TESTS
+    if _DECLARED_TESTS is None:
+        names = set()
+        for f in glob.glob('**/*_test.go', recursive=True):
+            names |= set(re.findall(r'func\s+(Test[A-Za-z0-9_]+)\s*\(', read(f, errors='ignore')))
+        _DECLARED_TESTS = names
+    return _DECLARED_TESTS
+
+
+GO_COMMENT_RE = re.compile(r'^\s*//.*$', re.M)
+
+
+def cited_test_names(line):
+    """The `Test…` names ONE comment line cites, with the rules about what a citation is applied.
+
+    One function so the guard and its fixtures decide identically. Written as a separate function
+    after the fixtures were first drafted with their own copy of these rules: a fixture that
+    re-implements the logic it guards passes while the logic is deleted, which is the failure this
+    whole package is about.
+
+    Three RULES, each a property of what a citation IS rather than a list of names the checker
+    forgives — an exception list is the shape a reviewer refused in this package's design round:
+
+      - an identifier the tree declares itself: `type TestRunner func(...)` named in a comment is a
+        package describing itself, not a citation;
+      - a FAMILY, written `TestGuardedDial*`: it names a prefix on purpose, and its members resolve;
+      - a name the sentence marks as GONE ("the former X was superseded"): the reader is told it is
+        gone, which is the opposite of being sent after it.
+
+    The rules loosen the BARE half only. A backticked citation is a citation whatever the sentence
+    around it says, because widening the historical rule to it would let a real dangling name hide
+    behind one word.
+    """
+    names = set(TEST_RE.findall(line))
+    for m in BARE_TEST_RE.finditer(line):
+        name = m.group(1)
+        if name in declared_go_identifiers():
+            continue
+        if line[m.end():m.end() + 1] == '*':
+            continue
+        if HISTORICAL_RE.search(clause_around(line, m.start(), m.end())):
+            continue
+        names.add(name)
+    return names
+
+
+def check_go_comment_citations():
+    """A `Test…` name cited in a Go comment must resolve, exactly as one cited in a living document
+    must (D6). Same rule, same reason: a citation a reader cannot follow is a claim about the tree
+    that the tree does not support."""
+    bad = []
+    for pat in ('internal/**/*.go', 'cmd/**/*.go'):
+        for path in sorted(glob.glob(pat, recursive=True)):
+            src = read(path, errors='ignore')
+            for num, line in enumerate(src.splitlines(), 1):
+                if not line.lstrip().startswith('//'):
+                    continue
+                for name in sorted(cited_test_names(line)):
+                    if name in ALLOWED or name in declared_test_names():
+                        continue
+                    bad.append((path, num, 'test', name))
+    return bad
+
 
 def source_text():
     parts = []
@@ -737,6 +874,163 @@ def setnull_migrations():
                   if re.search(r'ON DELETE SET NULL \(', read(p)))
 
 
+# Every list of migration numbers stated NEAR the phrase this rule is about. Selected by CONTENT and
+# not by phrasing, which is F3: the guard used to match one sentence — "N migrations use PostgreSQL
+# 15's column-list `ON DELETE SET NULL (col)` form (…)" — so it covered the project README and the
+# code COMMENT and missed the operator-facing refusal string beside that comment, which says the same
+# thing in different words. That is how D5 drifted: the comment was corrected to six when 00093
+# arrived, the message stayed at five, and the person reading the refusal was handed the short list.
+# The SUBJECT is the PostgreSQL-15 column-list form, not the plain clause. Widening the site set
+# showed why that distinction has to be in the pattern: `docs/specs/func-project-deletion.md`
+# discusses plain `ON DELETE SET NULL` in `00007`/`00009`, a different feature of a different age,
+# and a guard that read it as a claim about the PG15 requirement would be reporting a sentence that
+# is entirely correct.
+SETNULL_PHRASE_RE = re.compile(r'column-list[^.]{0,80}?ON DELETE SET NULL|ON DELETE SET NULL[^.]{0,80}?column-list')
+# Backticks are allowed around the numbers, because the documents write them that way and the guard
+# is about the CLAIM rather than its markup.
+#
+# TWO or more numbers, and that is a stated rule rather than a convenience: a single parenthesised
+# number beside the phrase is a narrative reference — "died on (`00070`)" — and reading it as a
+# one-item list made the guard report `docs/status.md` for a sentence describing the failure that
+# started all of this.
+SETNULL_LIST_RE = re.compile(r'\((?:migrations\s+)?`?(\d{5}`?(?:\s*,\s*`?\d{5}`?){1,})\)')
+SETNULL_COUNT_WORDS = {
+    'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6,
+    'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10, 'eleven': 11, 'twelve': 12,
+}
+# The sites are DERIVED, not listed. A hardcoded pair made the docstring's "EVERY site" false, and
+# the guard stayed green over five live statements that had drifted (reviewer P2, party [334]): the
+# schema grew a sixth column-list migration at `00093`, README and `migrate.go` were corrected, and
+# nothing checked the rest of the tree.
+#
+# ONE exclusion, and it is a RULE rather than a list of names: a closed iteration report is
+# immutable by AGENTS.md, so a count that was true when it was written stays there and is history
+# rather than drift. Every other file that mentions the phrase is in scope, including Go comments.
+# The rule for what is NOT checked: a RECORD OF A PAST EVENT. A closed iteration report is immutable
+# by AGENTS.md and a CHANGELOG entry is a dated statement about a release that shipped; both were
+# true when written, and a count that has since grown belongs in the document that describes the
+# tree TODAY, not rewritten into history. Everything that speaks in the present tense is in scope,
+# Go comments included.
+SETNULL_HISTORY = ('docs/iterations/', 'CHANGELOG.md')
+# The sites that must never STOP stating it, as opposed to those merely checked when they do.
+SETNULL_MUST_STATE = ('README.md', 'internal/store/migrate.go')
+
+
+def setnull_sites(root='.'):
+    """Every tracked file stating something about the column-list form, minus records of the past.
+
+    `root` exists so the derivation itself can be driven over a synthetic tree. Without it the only
+    thing a fixture could reach was the site LIST it passed in, which is how the first version's
+    hardcoded pair went unexercised (reviewer P2, party [334]).
+    """
+    out = []
+    for pat in ('*.md', 'docs/**/*.md', 'internal/**/*.go', 'cmd/**/*.go'):
+        for full in glob.glob(os.path.join(root, pat), recursive=True):
+            path = os.path.relpath(full, root)
+            if path.startswith(SETNULL_HISTORY) or path.startswith('scripts/check'):
+                continue
+            if SETNULL_PHRASE_RE.search(flatten(read(full, errors='ignore'))):
+                out.append(full if root != '.' else path)
+    return sorted(set(out))
+
+
+def setnull_site_findings(mig, word, sites=None):
+    """Check EVERY stated list of migration numbers near the ON DELETE SET NULL phrase.
+
+    A site may state a COUNT, a LIST, or both; whichever it states must agree with the tree. A file
+    that mentions the phrase and states neither is not a finding — the sentence in the README says
+    only how many, and a future one may say only which.
+
+    `sites` is injectable for the fixtures; it defaults to every file in the tree that mentions the
+    phrase. It used to default to a hardcoded pair, and "EVERY site" was then a claim the code did
+    not make good on.
+    """
+    bad = []
+    for path in (setnull_sites() if sites is None else sites):
+        if not os.path.exists(path):
+            continue
+        text = flatten(read(path))
+        found_any = False
+        for m in SETNULL_PHRASE_RE.finditer(text):
+            # The window reaches BOTH ways around the phrase. Forward only was another version of
+            # this guard's own hole: `runbook.md` writes the list BEFORE the phrase — "five
+            # migrations (`00070`, …) use the column-list `ON DELETE SET NULL (col)` form" — so the
+            # stale list sat outside a window that started at the phrase. Short enough, in both
+            # directions, not to reach the next paragraph's numbers.
+            window = text[max(0, m.start() - 200):m.start() + 400]
+            for lst in SETNULL_LIST_RE.finditer(window):
+                found_any = True
+                listed = sorted(x.strip().strip('`') for x in lst.group(1).split(','))
+                if listed != mig:
+                    bad.append((path, 1, 'enum',
+                                f'states the ON DELETE SET NULL migrations as ({", ".join(listed)}); '
+                                f'the tree has {len(mig)} ({", ".join(mig)})'))
+            # "five migrations USE" was the only shape read before, and `overview.md` says "in five
+            # migrations" — so the count drifted there in full view of a guard that could not see the
+            # sentence. The verb is gone from the pattern and a number word is required instead,
+            # which is what makes it a COUNT rather than any adjective.
+            cm = None
+            for c in re.finditer(r'\b(\w+)\s+migrations\b', text[max(0, m.start() - 160):m.start() + 200]):
+                if c.group(1).lower() in SETNULL_COUNT_WORDS or c.group(1).isdigit():
+                    cm = c
+                    break
+            if cm:
+                found_any = True
+                if cm.group(1).lower() != word:
+                    bad.append((path, 1, 'enum',
+                                f'says "{cm.group(1)} migrations" use the column-list ON DELETE SET '
+                                f'NULL form; {len(mig)} do ({", ".join(mig)})'))
+        if not found_any and path.endswith(SETNULL_MUST_STATE):
+            # Only the sites whose whole purpose is to STATE the requirement must keep stating it:
+            # the README, which is where an operator learns the server floor, and the refusal in
+            # `migrate.go`, which is what they read when it bites. Any other file may mention the
+            # phrase in passing — a schema comment, a test's rationale — and demanding a count from
+            # it would turn the guard into a style rule.
+            #
+            # Matched by SUFFIX so a fixture can drive this branch from a temporary directory. The
+            # branch had no reachable test at all while the comparison was against a repo-relative
+            # path that a fixture cannot produce.
+            bad.append((path, 1, 'enum',
+                        'no longer states the ON DELETE SET NULL count or list; the guard cannot check it'))
+    return bad
+
+
+def expected_run_retention_default(src=None):
+    """The domain's default expected-run retention, in days."""
+    src = read('internal/domain/expectedrun.go') if src is None else src
+    m = re.search(r'DefaultExpectedRunRetentionDays\s*=\s*(\d+)', src)
+    return int(m.group(1)) if m else None
+
+
+def openapi_retention_findings(domain_src=None, openapi_doc=None):
+    """E10 — `openapi.yaml` states the expected-run retention default, and it must be the domain's.
+
+    The document hardcoded "at most the retention window (14 days)" while documenting the bound as
+    configurable in the same file, so an instance that had changed it read its own API reference and
+    was told the wrong number. A static schema cannot READ a runtime value, so this is not derived:
+    the two are held equal by a check that fails when they disagree, which is a discharge somebody
+    can actually perform.
+
+    Both sources are INJECTABLE, and that is the discharge rather than a convenience (reviewer P2,
+    party [325]). The fixtures for the first version asserted only that today's two numbers agree,
+    which is a fact about the tree and not about the guard: a checker that always returned `[]` would
+    have passed every one of them. A guard is only discharged by a case where it FAILS.
+    """
+    want = expected_run_retention_default(domain_src)
+    if want is None:
+        return [('internal/domain/expectedrun.go', 1, 'enum',
+                 'DefaultExpectedRunRetentionDays is gone; the openapi retention check has nothing to compare')]
+    doc = flatten(read('openapi.yaml')) if openapi_doc is None else flatten(openapi_doc)
+    m = re.search(r'the retention\s+window,\s+whose DEFAULT is (\d+) days', doc)
+    if not m:
+        return [('openapi.yaml', 1, 'enum',
+                 'the expected-run retention sentence no longer states its default; the guard cannot check it')]
+    if int(m.group(1)) != want:
+        return [('openapi.yaml', 1, 'enum',
+                 f'states a retention default of {m.group(1)} days; the domain default is {want}')]
+    return []
+
+
 def mac_supported_types(src=None):
     """Wire values of fileSupportedTypes — what a Monitoring-as-Code bundle may declare."""
     src = read('internal/fileprovider/bundle.go') if src is None else src
@@ -974,15 +1268,20 @@ def check_iteration_finding_counts(iteration='docs/iterations/iter-0177.md',
     body = read(iteration)
     # The findings table: rows whose first cell is a finding number, `| 0 |` through `| 9 |`.
     rows = re.findall(r'^\| (\d+) \|', body, re.M)
-    if not rows:
-        out.append(f'{iteration} states findings but has no numbered findings table to derive the '
-                   f'count from; a total beside no rows is a number nobody can check')
-        return out
     derived = len(rows)
     words = {1: 'one', 2: 'two', 3: 'three', 4: 'four', 5: 'five', 6: 'six', 7: 'seven',
              8: 'eight', 9: 'nine', 10: 'ten'}
     name = os.path.basename(iteration).removesuffix('.md')
     spelled = words.get(derived)
+    # THE STATED COUNTS FIRST, and the no-table complaint only when one exists (F4).
+    #
+    # The set of iterations is derived from the directory now rather than enumerated call by call,
+    # which immediately showed that this guard's early return was written for the two reports that
+    # HAVE a findings table: it fired for every report that simply does not use that shape. Most do
+    # not, and iteration reports are immutable, so the complaint was unanswerable as well as wrong.
+    # The subject is a count that disagrees with its rows — a document with neither is silent, and a
+    # document with a count and no rows is the case the complaint is actually for.
+    stated: list[tuple[str, str, int]] = []
     for doc in (iteration,) + tuple(readers):
         if not os.path.exists(doc):
             continue
@@ -992,16 +1291,25 @@ def check_iteration_finding_counts(iteration='docs/iterations/iter-0177.md',
             scoped = unquoted(' '.join(regions_naming(line, name)))
             # "one findings TABLE" counts tables, not findings. Without the exclusion the guard
             # reports the very sentence that explains how it derives its number.
-            for stated in re.findall(r'\b(\d+|' + '|'.join(words.values()) +
-                                     r')\s+findings\b(?!\s+(?:table|tables|row|rows|ledger))',
-                                     scoped, re.I):
-                low = stated.lower()
+            for text in re.findall(r'\b(\d+|' + '|'.join(words.values()) +
+                                   r')\s+findings\b(?!\s+(?:table|tables|row|rows|ledger))',
+                                   scoped, re.I):
+                low = text.lower()
                 value = int(low) if low.isdigit() else next(
                     (n for n, w in words.items() if w == low), None)
-                if value is not None and value != derived:
-                    out.append(f'{doc} says {stated} findings for {name}; its findings table holds '
-                               f'{derived}{" (" + spelled + ")" if spelled else ""}. A count that '
-                               f'drifts from its own rows is the one number nobody re-derives')
+                if value is not None:
+                    stated.append((doc, text, value))
+    # No table, no derived number, so nothing to compare against. The early return that used to
+    # complain here was written for the two reports that DO carry a findings table and became a
+    # complaint about every report that does not — most of them, and all of them immutable. A guard
+    # that cannot be satisfied is a guard its readers learn to skip.
+    if not rows or not stated:
+        return out
+    for doc, text, value in stated:
+        if value != derived:
+            out.append(f'{doc} says {text} findings for {name}; its findings table holds '
+                       f'{derived}{" (" + spelled + ")" if spelled else ""}. A count that '
+                       f'drifts from its own rows is the one number nobody re-derives')
     return out
 
 def check_status_counts_are_anchored(status='docs/status.md'):
@@ -1508,18 +1816,8 @@ def check_enumerations():
                     f'says "{m.group(1)} migrations" use the column-list ON DELETE SET NULL form; '
                     f'{len(mig)} do ({", ".join(mig)})'))
 
-    go = flatten(read('internal/store/migrate.go'))
-    m = re.search(r"(\w+) migrations use PostgreSQL 15's column-list "
-                  r"`ON DELETE SET NULL \(col\)` form \(([0-9, ]+)\)", go)
-    if not m:
-        bad.append(('internal/store/migrate.go', 1, 'enum',
-                    'the version-check comment no longer states the count and the file list'))
-    else:
-        listed = sorted(x.strip() for x in m.group(2).split(','))
-        if m.group(1) != word or listed != mig:
-            bad.append(('internal/store/migrate.go', 1, 'enum',
-                        f'comment says "{m.group(1)}" ({", ".join(listed)}); the tree has '
-                        f'{len(mig)} ({", ".join(mig)})'))
+    bad += setnull_site_findings(mig, word)
+    bad += openapi_retention_findings()
 
     # 3. the spec index against the spec directory, as a SET in both directions.
     idx = read('docs/specs/README.md')
@@ -1543,10 +1841,15 @@ def check_enumerations():
     if os.path.exists(spec):
         for msg in check_fr032_audit_totals(read(spec), spec):
             bad.append((spec, 1, 'enum', msg))
-    for msg in check_iteration_finding_counts():
-        bad.append(('docs/iterations/iter-0177.md', 1, 'enum', msg))
-    for msg in check_iteration_finding_counts('docs/iterations/iter-0178.md'):
-        bad.append(('docs/iterations/iter-0178.md', 1, 'enum', msg))
+    # F4: the SET is derived from the directory, not enumerated here.
+    #
+    # It was one call per iteration, hand-written, so the next iteration report was unguarded until
+    # somebody remembered to add a line — and remembering is what this whole family of guards exists
+    # to stop depending on. An iteration with no findings table contributes nothing (the guard says
+    # so itself), so scanning them all costs nothing and covers the one nobody has written yet.
+    for iteration in sorted(glob.glob('docs/iterations/iter-*.md')):
+        for msg in check_iteration_finding_counts(iteration):
+            bad.append((iteration, 1, 'enum', msg))
     for msg in check_iter0178_findings():
         bad.append(('docs/iterations/iter-0178.md', 1, 'enum', msg))
     for msg in check_status_counts_are_anchored():
@@ -1674,6 +1977,7 @@ def main():
     bad += check_enumerations()
     bad += check_partial_claims()
     bad += check_line_citations()
+    bad += check_go_comment_citations()
     if not bad:
         print('docs references: OK — every path and Test* name in the living documents resolves, '
               'and every acceptance map is complete (FR-021 invariants compared as a SET against '
@@ -1683,7 +1987,7 @@ def main():
               'every requirement row states one of the three statuses, and no spec calls itself '
               'unbuilt while its requirement is DONE; and every hand-written enumeration about the '
               'tree agrees with it — the check-type count, the column-list ON DELETE SET NULL '
-              'migrations in both places that name them, the spec index as a SET, and the '
+              'migrations in EVERY present-tense place that names them, the spec index as a SET, and the '
               'Monitoring-as-Code supported types, and FR-032 §17.3\'s discharge citation against '
               'the test file it discharges from, BOTH of its counts against the artefacts they '
               'summarise, §17.2\'s own totals DERIVED from its discharge table in both '

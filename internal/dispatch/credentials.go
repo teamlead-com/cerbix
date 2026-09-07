@@ -270,16 +270,28 @@ func ProbeErrorHeartbeat(job CheckJob, reason string) domain.Heartbeat {
 // executors publish results — the AMQP worker pool, the pull agent's batch and the probe-error
 // path — and a message each of them assembled separately would drift the first time one was edited.
 //
-// It returns `ok == false` for a job that carries no window, and that refusal is the whole of the
-// carrier rule on this side: a claim exists to fill `claimed_at` on ONE row, identified by
-// `(monitor_id, due_at)` plus the job's id, so a job below generation 4 has nothing to correlate to
-// and the message would be pure cost. The caller therefore never has to know what a carrier is.
+// It takes a DeliveredJob and not a CheckJob, which is A3's fix and not a signature preference.
+// The refusal below is described as "the whole of the carrier rule on this side", and it used to be
+// decided from three PAYLOAD fields — a body an executor must not trust for a carrier question
+// (invariant 10i is the same point about the same pair of sources). A generation-1 job carrying
+// `DueAt` would have produced a claim, which is the consumer half of the slip A1 closed on the
+// producer side; the two halves are one property and this is where the consuming half lives.
+//
+// The carrier decides, and the identity check that follows is the payload's own contract: a
+// generation-4 delivery missing any of the three fields is a protocol violation the gate has
+// already dead-lettered, so reaching that branch means the caller published a claim for a job it
+// was about to refuse. It stays because this is an exported function and the next caller may not
+// have crossed the gate first.
 //
 // The instant comes from the caller rather than from `time.Now()` inside, so the value a test
 // asserts is the value the caller observed — and so a batch of claims taken in one poll can share
 // the instant the poll actually happened at.
-func ClaimHeartbeat(job CheckJob, at time.Time) (domain.Heartbeat, bool) {
-	if job.JobID == "" || job.DueAt.IsZero() || job.IssuedAt.IsZero() {
+func ClaimHeartbeat(delivered DeliveredJob, at time.Time) (domain.Heartbeat, bool) {
+	if !RequireLedgerFields(delivered.CarrierGeneration) {
+		return domain.Heartbeat{}, false
+	}
+	job := delivered.Job
+	if job.LedgerFieldsMissing() != "" {
 		return domain.Heartbeat{}, false
 	}
 	return StampResult(domain.Heartbeat{

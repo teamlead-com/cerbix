@@ -1549,7 +1549,11 @@ paths:
 
 
         The range is half-open `[from, to)`, both REQUIRED, `from < to`, at most the retention
-        window (14 days). Order is `due_at DESC`; no tiebreak is needed and the reason is
+        window, whose DEFAULT is 14 days and which an instance may configure through
+        `ledger.expected_run_retention_days` — the bound this endpoint enforces is the instance's,
+        not this number. The figure here is checked against `domain.DefaultExpectedRunRetentionDays`
+        by `make docs-check`: a static document cannot read a runtime value, so it is not derived,
+        and the two are held equal instead. Order is `due_at DESC`; no tiebreak is needed and the reason is
         structural — the route is monitor-scoped and the primary key is `(monitor_id, due_at)`, so
         `due_at` is unique within one monitor. `cursor` is an opaque keyset of the LAST RETURNED
         item, the next page is bound strictly below it, and `next_cursor` is null on the last page.

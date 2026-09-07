@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -287,6 +288,37 @@ func (m Monitor) Validate() error {
 		// as a general rule would refuse configurations nobody meant it to.
 		if m.IntervalSeconds < m.TimeoutSeconds {
 			return fmt.Errorf("monitor: interval_seconds must be at least timeout_seconds for async_canary monitors (one probe may not overlap the next)")
+		}
+		// B3. A canary REFUSES a retry count, and the type is what refuses it rather than a
+		// per-surface check: the create form offered the control, the generic maximum was the only
+		// bound, and the runner applies `retries + 1` attempts each bounded by the monitor's own
+		// timeout — while the in-flight lease and the pull claim lease are ONE timeout plus a fixed
+		// slack. Two attempts therefore outlive the lease, the job is re-claimed while the first
+		// journey is still running, and a monitor with one legal configuration produces two
+		// concurrent transactions at someone else's expense.
+		//
+		// Sizing the lease from `attempts × timeout` was the alternative and it is refused, not
+		// deferred: it would make a canary journey RE-RUNNABLE, and a journey is a transaction
+		// whose retry is a second external side effect — an upload stored twice, a payment
+		// submitted twice. A canary that fails is a canary that reports DOWN.
+		if m.Retries != 0 {
+			return fmt.Errorf("monitor: async_canary monitors must not set retries: a journey is one external transaction and retrying it is a second side effect")
+		}
+		// B4. Every config key is checked against the canary's own whitelist, here rather than per
+		// surface: `async_canary` has no credential schema, so the registry's unknown-key rejection
+		// never ran for it and both handlers passed the map through verbatim.
+		//
+		// Sorted, so the message an operator meets is the same one every time rather than whichever
+		// key the map happened to yield first.
+		badKeys := make([]string, 0, len(m.Config))
+		for k := range m.Config {
+			if refusal := CanaryConfigKeyRefusal(k); refusal != "" {
+				badKeys = append(badKeys, refusal)
+			}
+		}
+		if len(badKeys) > 0 {
+			sort.Strings(badKeys)
+			return fmt.Errorf("monitor: %s", badKeys[0])
 		}
 		w, err := ParseCanaryConfig(m.Config)
 		if err != nil {

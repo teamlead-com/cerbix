@@ -190,7 +190,7 @@ func TestTheCapabilityLookupIsSkippedWhenNoCanaryIsDue(t *testing.T) {
 // left role=all a credential generation behind until D-0160's local wiring existed.
 func TestTheInProcessExecutorAnnouncesItsOwnRegion(t *testing.T) {
 	s := New(&fakeStore{}, dispatch.NewInProc(1), testLogger()).WithLocalCanaryRegions(domain.DefaultRegion)
-	got := s.canaryAnnouncements(context.Background())
+	got := s.canaryAnnouncements(context.Background(), newRegionCapabilities(s.pullRegions))
 	if !domain.CanaryCapabilityAnnounced(got[domain.DefaultRegion], domain.CanaryCapabilityOfThisBinary()) {
 		t.Fatalf("role=all announced %#v, want this binary's own token", got)
 	}

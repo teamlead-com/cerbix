@@ -339,9 +339,14 @@ function segmentLane(seg: Segment): { state: "pending" | "failed" | "ready"; cel
 // no code identity (party [176]): a client may derive presentation from the series it holds, but
 // it may not manufacture a wire verdict whose canonical meaning belongs server-side, so this never
 // leaves the component, never enters metrics, audit or the API, and never drives reliability state.
+// One sentence per shape, and a shape with no sentence would render an empty clause — so the map is
+// exhaustive over the union rather than a partial lookup (E2, E5).
 const STORAGE_EXPLANATION: Record<string, string> = {
   prefix: "records begin later in this segment",
+  suffix: "records stop before the end of this segment",
   interior: "missing records inside this segment",
+  unknown: "this segment's records have not been read yet",
+  complete: "",
 };
 function segmentStorage(seg: Segment) {
   const pts = segmentPoints.value[segKey(seg)] ?? [];
@@ -664,8 +669,12 @@ const pillClass: Record<string, string> = {
               <!-- §11.2: storage continuity and decidable coverage are independent, and BOTH must
                    pass. An incomplete segment quotes no availability; the explanation is display
                    grammar with no code identity and never leaves this component ([176]). -->
+              <!-- E5: an ABSENT series carries no storage verdict. While the strip is loading or
+                   its request failed, the line below would be a claim about where the records are
+                   drawn from no records at all — and it sat directly above "Loading this segment's
+                   timeline…", saying two different things about the same segment. -->
               <p
-                v-if="!segmentStorage(seg).complete"
+                v-if="!segmentStorage(seg).complete && segmentStorage(seg).shape !== 'unknown'"
                 class="mt-1 text-[11.5px] text-degraded"
                 data-testid="svc-segment-storage-note"
               >

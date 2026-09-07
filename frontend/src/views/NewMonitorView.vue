@@ -126,6 +126,17 @@ function removeTag(t: string) {
 const isComposite = computed(() => form.type === "composite");
 const isSynthetic = computed(() => form.type === "synthetic");
 const isCanary = computed(() => form.type === "async_canary");
+// B3: a canary REFUSES a retry count. The runner applies `retries + 1` attempts each bounded by the
+// monitor's own timeout, while the in-flight lease is ONE timeout plus a fixed slack — so two
+// attempts outlive the lease and the job is re-claimed while the first journey is still running. A
+// journey is an external transaction: retrying it is a second side effect at someone else's
+// expense, not a second look at the same fact.
+//
+// ONE owner for the submitted value, used by every payload this view builds. The control is hidden
+// for the type as well, but hiding a control is not a rule — a type switch would otherwise carry
+// the previous type's value into the request, and the API would refuse it with a message about a
+// field the operator can no longer see.
+const submittedRetries = computed(() => (isCanary.value ? 0 : form.retries));
 
 // FR-029 phase F. The workflow is a NESTED TYPED document; this is the flat form behind it, and every
 // rule is the server's from `internal/domain/canary.go`, mirrored in `lib/canaryWorkflow.ts` so the
@@ -421,7 +432,7 @@ async function createMultiRegionSet(): Promise<void> {
     target: form.target.trim(),
     interval_seconds: form.interval_seconds,
     timeout_seconds: form.timeout_seconds,
-    retries: form.retries,
+    retries: submittedRetries.value,
     failure_threshold: form.failure_threshold,
     confirm_interval_seconds: form.confirm_interval_seconds,
     renotify_seconds: form.renotify_seconds,
@@ -672,6 +683,10 @@ const previewConds = computed(() => {
 const summary = computed(() => {
   if (form.type === "push") return `Expects a heartbeat every ${form.interval_seconds}s${form.grace_seconds ? ` (+${form.grace_seconds}s grace)` : ""}.`;
   if (form.type === "composite") return `Up when ${mode.value === "all" ? "all" : "any"} of ${childIds.value.size} member${childIds.value.size === 1 ? "" : "s"} ${mode.value === "all" ? "are" : "is"} up; re-evaluated every ${form.interval_seconds}s.`;
+  // A canary has no retry count to summarise: the type refuses one, and the control is not shown.
+  // Reciting "0 retries" beside a control the operator cannot see would describe a setting rather
+  // than the rule.
+  if (isCanary.value) return `Runs one journey every ${form.interval_seconds}s, giving up after ${form.timeout_seconds}s.`;
   const r = form.retries;
   return `Checks every ${form.interval_seconds}s, times out after ${form.timeout_seconds}s, ${r} ${r === 1 ? "retry" : "retries"}.`;
 });
@@ -695,7 +710,7 @@ async function submit() {
         description: form.description.trim(),
         interval_seconds: form.interval_seconds,
         timeout_seconds: form.timeout_seconds,
-        retries: form.retries,
+        retries: submittedRetries.value,
         failure_threshold: form.failure_threshold,
         confirm_interval_seconds: form.confirm_interval_seconds,
         depends_on: [...depIds.value],
@@ -745,7 +760,7 @@ async function submit() {
       type: form.type,
       interval_seconds: form.interval_seconds,
       timeout_seconds: form.timeout_seconds,
-      retries: form.retries,
+      retries: submittedRetries.value,
       failure_threshold: form.failure_threshold,
       confirm_interval_seconds: form.confirm_interval_seconds,
       depends_on: [...depIds.value],
@@ -1748,7 +1763,7 @@ const selectCls =
                     <span class="pointer-events-none absolute right-[11px] top-1/2 -translate-y-1/2 font-mono text-[12px] text-ink-3">sec</span>
                   </span>
                 </label>
-                <label class="flex flex-col gap-[6px]">
+                <label v-if="!isCanary" class="flex flex-col gap-[6px]" data-testid="monitor-retries">
                   <span class="text-[12px] font-semibold text-ink-2">Retries</span>
                   <span class="relative">
                     <input v-model.number="form.retries" type="number" min="0" :class="[inputCls, 'pr-[38px] font-mono']" />

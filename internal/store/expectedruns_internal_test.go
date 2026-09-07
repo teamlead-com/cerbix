@@ -156,7 +156,7 @@ func mustAdvance(t *testing.T, st *Store, ctx context.Context, now time.Time, it
 			items[i].ReservedAt = now
 		}
 	}
-	reserved, err := st.ReserveExpectations(ctx, now, items)
+	reserved, _, err := st.ReserveExpectations(ctx, now, items)
 	if err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
@@ -179,6 +179,15 @@ func mustDispatch(t *testing.T, st *Store, ctx context.Context, now time.Time, i
 // never writes it.
 func mustConfirm(t *testing.T, st *Store, ctx context.Context, now time.Time, items ...ExpectationConfirm) int {
 	t.Helper()
+	// C7: a successful confirm carries the instant its job was PUBLISHED, and the store refuses one
+	// without it. Fixtures that do not care which instant it is get `now` — the same value they
+	// used to get implicitly — so this helper says where that default comes from instead of the
+	// statement inventing it.
+	for i := range items {
+		if items[i].WithheldReason == "" && items[i].IssuedAt.IsZero() {
+			items[i].IssuedAt = now
+		}
+	}
 	n, err := st.ConfirmExpectations(ctx, now, items)
 	if err != nil {
 		t.Fatalf("confirm: %v", err)
@@ -553,12 +562,24 @@ func TestTheRetentionClipBoundsTheGapAndWritesItsOwnFence(t *testing.T) {
 		ExpectedRevision: m.ExecutionRevision, Region: m.Region})
 
 	windows := readWindows(t, st, ctx, m.ID)
-	floor := now.Add(-48 * time.Hour)
+	// The floor comes from the STORE, which owns the formula, rather than being recomputed here
+	// (C8). It used to be `now - 48h`; the statement's own bound is MIDNIGHT-ALIGNED, the same
+	// instant the purge enforces, so a hand-computed rolling floor was up to a day tighter than the
+	// rule and this test asserted the tighter one. A window between the two is kept by the purge,
+	// listed by the read API and answered by the correlation, so refusing to materialize it was the
+	// disagreement C8 removes.
+	floor := st.ExpectedRunRetentionCutoff(now)
 	for _, w := range windows {
 		if w.JobID == nil && w.DueAt.Before(floor) {
 			t.Errorf("window %s is older than the retention floor %s and would be dropped unread",
 				w.DueAt, floor)
 		}
+	}
+	// And the clip still BITES: a ten-day absence under a two-day retention must lose most of its
+	// windows, or this fixture would prove nothing about a bound that never applied.
+	if len(windows) > 24*4 {
+		t.Errorf("%d windows were materialized for a ten-day absence under a two-day retention: the "+
+			"clip did not bind, so the fence below is asserting nothing", len(windows))
 	}
 	sched := readSchedule(t, st, ctx, m.ID)
 	if sched.Truncated == nil {
@@ -569,9 +590,14 @@ func TestTheRetentionClipBoundsTheGapAndWritesItsOwnFence(t *testing.T) {
 	}
 }
 
-// An item the caller could not have meant is refused by NAME, before the statement runs. A single
-// bad element aborts one statement for the whole tick, so it would take every other monitor's
-// evidence down with it — and the error has to say which monitor.
+// An item the caller could not have meant is refused by NAME, before the statement runs — and
+// refused ALONE, which is C1.
+//
+// The refusal used to be a batch error, and `Validate`'s own comment said why that was wrong: "a
+// single bad element aborts the whole tick's statement and would take every other monitor's
+// evidence down with it". The scheduler reads a batch error as "hold every ledgered dispatch this
+// tick", and re-submits the held payload unchanged on the next tick — so one unrepresentable item
+// stopped all ledgered probing for as long as the instance ran.
 func TestAnUnrepresentableAdvanceIsRefusedByName(t *testing.T) {
 	st, ctx := ledgerStore(t)
 	proj := seedLedgerProject(t, st, ctx, "validate")
@@ -602,15 +628,69 @@ func TestAnUnrepresentableAdvanceIsRefusedByName(t *testing.T) {
 			item := base
 			item.ReservedAt = now
 			tc.mutate(&item)
-			_, err := st.ReserveExpectations(ctx, now, []ExpectationAdvance{item})
-			if err == nil {
-				t.Fatalf("%s was accepted", tc.name)
+			reserved, rejected, err := st.ReserveExpectations(ctx, now, []ExpectationAdvance{item})
+			if err != nil {
+				t.Fatalf("%s produced a BATCH error: %v — an unrepresentable item is a fact about "+
+					"one monitor, and an error here holds every ledgered dispatch this tick", tc.name, err)
 			}
-			if !strings.Contains(err.Error(), m.ID) {
-				t.Errorf("the refusal does not name the monitor: %v", err)
+			if len(reserved) != 0 {
+				t.Fatalf("%s reserved a window: %+v", tc.name, reserved)
+			}
+			if len(rejected) != 1 {
+				t.Fatalf("%s produced %d rejections, want 1", tc.name, len(rejected))
+			}
+			if rejected[0].MonitorID != m.ID {
+				t.Errorf("the rejection names %q, want the monitor %q", rejected[0].MonitorID, m.ID)
+			}
+			if !strings.Contains(rejected[0].Reason, m.ID) {
+				t.Errorf("the reason does not name the monitor: %v", rejected[0].Reason)
 			}
 		})
 	}
+
+	// C1's other half, and the one the batch error destroyed: the GOOD items in the same batch are
+	// reserved. A test that only asserted the refusal would pass on the version that refused
+	// everything beside it.
+	t.Run("a bad item does not take the batch with it", func(t *testing.T) {
+		good := ledgerMonitor(t, st, ctx, proj, "good-neighbour", 60)
+		// The fence compares against the schedule's OWN instant, so the good item has to carry it:
+		// an advance built from the test's clock would be refused by the fence and this case would
+		// then prove nothing about the bad item beside it.
+		goodDue := readSchedule(t, st, ctx, good.ID).NextDueAt
+		bad := base
+		bad.ReservedAt = now
+		bad.Region = "" // unrepresentable
+		ok := ExpectationAdvance{
+			MonitorID: good.ID, JobID: ledgerJobB, NextDue: goodDue.Add(time.Minute), IntervalInForce: 60,
+			CarrierGeneration: domain.LedgerMinCarrier, ExpectedDue: goodDue, ReservedAt: goodDue,
+			ExpectedRevision: good.ExecutionRevision, Region: good.Region,
+		}
+		reserved, rejected, err := st.ReserveExpectations(ctx, now, []ExpectationAdvance{bad, ok})
+		if err != nil {
+			t.Fatalf("a batch holding one bad item errored: %v", err)
+		}
+		if len(rejected) != 1 || rejected[0].MonitorID != m.ID {
+			t.Fatalf("rejections = %+v, want exactly the bad monitor", rejected)
+		}
+		if len(reserved) != 1 || reserved[0].MonitorID != good.ID {
+			t.Fatalf("reservations = %+v, want the good monitor's window — its evidence went down "+
+				"with its neighbour's", reserved)
+		}
+	})
+
+	// And a batch of nothing BUT bad items runs no statement and still reports each one.
+	t.Run("every item bad", func(t *testing.T) {
+		bad := base
+		bad.ReservedAt = now
+		bad.Region = ""
+		reserved, rejected, err := st.ReserveExpectations(ctx, now, []ExpectationAdvance{bad, bad})
+		if err != nil {
+			t.Fatalf("a batch of only bad items errored: %v", err)
+		}
+		if len(reserved) != 0 || len(rejected) != 2 {
+			t.Fatalf("reserved=%+v rejected=%+v, want none reserved and both reported", reserved, rejected)
+		}
+	})
 }
 
 // The fence moves FORWARD and is never erased — the monotonicity `GREATEST` carries, and the one

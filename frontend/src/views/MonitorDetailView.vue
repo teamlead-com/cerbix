@@ -15,6 +15,8 @@ import {
 } from "@/lib/latencypanel";
 import { instantLabel, utcDayLabel, utcInstantLabel } from "@/lib/wallclock";
 import { isoInstant, utcDayBefore, utcDayKey } from "@/lib/datekeys";
+// G3: the server's own ledger bounds, mirrored from a published fixture rather than re-typed here.
+import { EXPECTED_RUN_RETENTION_DEFAULT_DAYS, EXPECTED_RUN_RETENTION_MIN_DAYS } from "@/lib/expectedRunBounds";
 
 type Monitor = components["schemas"]["Monitor"];
 type WindowSLA = components["schemas"]["WindowSLA"];
@@ -145,6 +147,22 @@ const expectedRuns = ref<ExpectedRunAnswer | null>(null);
 
 const strokeRuns = computed(() => strokeSegments(panelPoints.value, expectedRuns.value));
 
+/**
+ * What the panel is actually SHOWING, in one sentence, derived from whether it drew any stroke (E3).
+ *
+ * The subtitle used to be a constant: "points only, no stroke and no fill — every interval between
+ * adjacent points is time cerbix did not observe, and this panel makes no claim about whether a
+ * check was due there". That was FR-031's true sentence and it survived FR-032 phase E, which put
+ * expectation strokes on this very chart and a legend underneath explaining them. So on a
+ * ledger-carrying monitor the panel drew strokes, drew a ruler of due windows, explained both — and
+ * printed a line denying all three.
+ *
+ * Derived rather than switched on the fetch: the stroke may be absent because the answer was null,
+ * because the monitor is a push type, or because no run in view was continuous with its neighbour.
+ * The sentence follows what was DRAWN, so it cannot disagree with the picture whatever the reason.
+ */
+const panelDrawsStrokes = computed(() => strokeRuns.value.length > 0);
+
 /** The polylines, one per segment. Nothing is drawn BETWEEN them, which is the whole rule. */
 const strokePaths = computed(() => {
   const c = chart.value;
@@ -220,12 +238,37 @@ const expectationCells = computed(() => {
   const answer = expectedRuns.value;
   if (!c || !answer) return [];
   const ledgerFrom = answer.ledger_from == null ? Number.POSITIVE_INFINITY : Date.parse(answer.ledger_from);
-  const pts = panelPoints.value;
-  const cw = Math.max(1.2, ((c.W - 16) / Math.max(1, pts.length - 1)) * 0.62);
+  // E4: the width comes from the WINDOW GRID, not from the number of points.
+  //
+  // A cell is positioned at its window's instant and was sized from the point spacing — so whenever
+  // windows outnumbered points, every cell was wider than the window it belonged to and painted
+  // over its neighbours. The windows arrive newest-first, so the OLDEST painted last: a covered
+  // cell could cover the missed windows beside it, and the hit rectangles overlapped identically,
+  // which made the readout name a window the pointer was not over. Two windows and one point is not
+  // an edge case — it is any monitor whose probes are sparser than its schedule, which is what a
+  // missed run IS.
+  //
+  // Each cell is bounded by its own neighbours rather than by a single batch width: a grid with an
+  // interval change in it has two spacings, and one width for both would overlap on the tighter
+  // half or leave a gap on the looser one.
+  const inView = answer.windows
+    .map((w) => ({ w, ms: Date.parse(w.due_at) }))
+    .filter((e) => !Number.isNaN(e.ms) && e.ms >= c.t0 && e.ms <= c.t1)
+    .sort((a, b) => a.ms - b.ms);
+  const xs = inView.map((e) => c.x(e.ms));
+  const widthAt = (i: number): number => {
+    const gaps: number[] = [];
+    if (i > 0) gaps.push(xs[i] - xs[i - 1]);
+    if (i < xs.length - 1) gaps.push(xs[i + 1] - xs[i]);
+    // A single window in view has no neighbour to be bounded by, and the drawn span is the only
+    // thing it can be measured against.
+    const span = gaps.length ? Math.min(...gaps) : c.W - 16;
+    return Math.max(1.2, span * 0.62);
+  };
   const out: ExpectationCell[] = [];
-  for (const w of answer.windows) {
-    const ms = Date.parse(w.due_at);
-    if (Number.isNaN(ms) || ms < c.t0 || ms > c.t1) continue;
+  for (let i = 0; i < inView.length; i++) {
+    const { w, ms } = inView[i];
+    const cw = widthAt(i);
     // Before `ledger_from` the ledger holds nothing, and the cell says exactly that — not
     // covered, and not missed either (§12.3). It outranks the verdict because it is a fact about
     // the LEDGER rather than about the window.
@@ -242,8 +285,21 @@ const expectationCells = computed(() => {
     const kind = beforeLedger ? "notStored" : cellFor(w.verdict);
     out.push({
       x: c.x(ms) - cw / 2, w: cw, kind, verdict: w.verdict, ms, beforeLedger,
+      hx: 0, hw: 0,
       reservedAt: w.reserved_at ?? null, withheldReason: w.withheld_reason ?? "",
     });
+  }
+  // The hit targets, in a SECOND pass because each one is bounded by its neighbours and those are
+  // not known while the first is being built. `HIT_PAD` is the comfortable target on an ordinary
+  // grid; the clamp is what makes overlap impossible on any grid.
+  const HIT_PAD = 2.5;
+  for (let i = 0; i < out.length; i++) {
+    const freeLeft = i > 0 ? out[i].x - (out[i - 1].x + out[i - 1].w) : Infinity;
+    const freeRight = i < out.length - 1 ? out[i + 1].x - (out[i].x + out[i].w) : Infinity;
+    const padL = Math.max(0, Math.min(HIT_PAD, freeLeft / 2));
+    const padR = Math.max(0, Math.min(HIT_PAD, freeRight / 2));
+    out[i].hx = out[i].x - padL;
+    out[i].hw = out[i].w + padL + padR;
   }
   return out;
 });
@@ -259,6 +315,20 @@ function outlined(kind: string): boolean {
 
 type ExpectationCell = {
   x: number; w: number; kind: string; verdict: string; ms: number;
+  /**
+   * The POINTER target, which is wider than the painted cell and must still belong to one window.
+   *
+   * E4's second half. The hit rectangle was `x - 2.5` by `w + 5` unconditionally, while the painted
+   * cell takes 0.62 of its window gap — so the free space between two cells is 0.38 of the gap and
+   * the two expansions consume 5px of it. Below a gap of about 13px the targets OVERLAP, and the
+   * readout can name a window the pointer is not over: the exact defect E4 exists to remove,
+   * surviving in the half the fixture never asserted (reviewer P1, party [346]).
+   *
+   * The padding is bounded by HALF the space to each neighbour, so two adjacent targets can at
+   * worst touch. Bounded rather than made smaller: a constant that happens to fit today's densest
+   * fixture is the same defect waiting for a denser grid.
+   */
+  hx: number; hw: number;
   /** The window is before `ledger_from`, which outranks its stored verdict in the words too. */
   beforeLedger: boolean;
   reservedAt: string | null; withheldReason: string;
@@ -352,13 +422,13 @@ const expectedRunMaxPages = 16;
  *
  * Module-scoped because it is a property of the instance, not of a panel.
  */
-let expectedRunRetentionDays = 14;
+let expectedRunRetentionDays = EXPECTED_RUN_RETENTION_DEFAULT_DAYS;
 
 /**
  * The enforced MINIMUM of `ledger.expected_run_retention_days`. A range this narrow is answerable on
  * every instance, which is what makes it the fallback below.
  */
-const expectedRunMinRetentionDays = 2;
+const expectedRunMinRetentionDays = EXPECTED_RUN_RETENTION_MIN_DAYS;
 
 /** Whether `expectedRunRetentionDays` above came from the server rather than from the default. */
 let expectedRunRetentionLearned = false;
@@ -945,18 +1015,32 @@ watch(
           </span>
           <span class="flex-1"></span>
           <span class="font-mono text-[11.5px] text-ink-3" data-testid="lat-timeout">
-            timeout {{ monitor?.timeout_seconds }}s<template v-if="!stats.timeoutInScale && stats.avg != null"> — outside this scale</template>
+            <!-- E8: gated on whether the timeout is ON the scale, and on nothing else. The extra
+                 `stats.avg != null` meant that when no check recorded a latency the timeout was
+                 neither drawn nor declared off the scale — the one case where a reader has no other
+                 way to tell, and the panel said nothing at all. -->
+            timeout {{ monitor?.timeout_seconds }}s<template v-if="!stats.timeoutInScale"> — outside this scale</template>
           </span>
         </div>
         <div class="px-4 pt-3">
-          <!-- The invariant, stated once (§6.2): the space between points is unobserved time, and
-               this panel makes no claim about whether a check was due there. -->
+          <!-- §6.2's invariant, and only when it is TRUE of what was drawn (E3). With no stroke the
+               space between points is unobserved time the panel says nothing about; with a stroke
+               the ledger has said those runs were expected and answered, and the ruler below names
+               each window. One sentence per picture, chosen by the picture. -->
           <p class="mb-2 text-[11.5px] text-ink-3" data-testid="lat-subtitle">
             <template v-if="chart">
               last {{ stats.drawn }} checks · {{ instantLabel(isoInstant(new Date(chart.t0))) }} →
-              {{ instantLabel(isoInstant(new Date(chart.t1))) }} · points only, no stroke and no fill —
-              every interval between adjacent points is time cerbix did not observe, and this panel makes
-              no claim about whether a check was due there.
+              {{ instantLabel(isoInstant(new Date(chart.t1))) }} ·
+              <template v-if="panelDrawsStrokes">
+                a stroke joins adjacent points only where the ledger records that every window between
+                them was answered; everywhere else the points stand alone, and the band below names
+                what was due.
+              </template>
+              <template v-else>
+                points only, no stroke and no fill — every interval between adjacent points is time
+                cerbix did not observe, and this panel makes no claim about whether a check was due
+                there.
+              </template>
             </template>
           </p>
           <svg
@@ -1097,7 +1181,7 @@ watch(
             <rect
               v-for="(c, i) in expectationCells"
               :key="'eh' + i"
-              :x="c.x - 2.5" y="0" :width="c.w + 5" height="14"
+              :x="c.hx" y="0" :width="c.hw" height="14"
               fill="transparent" tabindex="0" role="button"
               :aria-label="cellLabel(c)"
               data-testid="lat-expect-hit"
@@ -1112,7 +1196,11 @@ watch(
         <div class="flex flex-wrap gap-x-4 gap-y-1 px-4 pb-3 pt-2 text-[12px] text-ink-3">
           <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[8px] w-[8px] rounded-full bg-accent"></i> a recorded check</span>
           <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[9px] w-[3px] rounded-xs bg-down"></i> down with no latency recorded — drawn on the baseline, not dropped</span>
-          <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-0 w-[14px] border-t-2 border-dashed border-degraded"></i> p95 · last {{ stats.drawn }} checks</span>
+          <!-- E7: the MEASURED population, because that is the one the statistic is over. `p95` is
+               computed from the checks that recorded a latency, and this named the checks that were
+               DRAWN — which includes the failures that recorded none. The two differ exactly when a
+               monitor has been failing, which is when a reader is most likely to be reading it. -->
+          <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-0 w-[14px] border-t-2 border-dashed border-degraded"></i> p95 · last {{ stats.measured }} checks with a recorded latency</span>
           <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-[11px] w-[2px] bg-ink-2"></i> observation ruler — its empty spans ARE unobserved time</span>
           <template v-if="expectedRuns">
             <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-0 w-[14px] border-t-2 border-accent"></i> stroke — every window across it is <span class="font-mono">covered</span></span>

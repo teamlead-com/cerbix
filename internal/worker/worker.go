@@ -121,7 +121,7 @@ func (p *Pool) loop(ctx context.Context) {
 			// about. It is emitted after the gate rather than before it because a job the gate
 			// refuses was never claimed for execution: it produced a probe_error, which is a
 			// terminal outcome of its own.
-			p.publishClaim(ctx, job)
+			p.publishClaim(ctx, delivered)
 			// The result carries the job it answers (func-result-protocol §9): the core stamped the
 			// id and the issue instant from its own clock, and copying them here is what lets the
 			// core compare `observed_at` against `job_issued_at` instead of against itself.
@@ -150,15 +150,16 @@ func (p *Pool) setCredentialReady(ready bool, reason string) {
 // is logged at DEBUG for the same reason — a broker hiccup on a diagnostic must not fill an
 // operator's log with lines about checks that ran perfectly well.
 //
-// A job carrying no window produces no message at all: `ClaimHeartbeat` refuses it, so a fleet
-// running below the ledger carrier pays nothing for a feature it cannot feed.
-func (p *Pool) publishClaim(ctx context.Context, job dispatch.CheckJob) {
-	claim, ok := dispatch.ClaimHeartbeat(job, time.Now().UTC())
+// A delivery below the ledger carrier produces no message at all: `ClaimHeartbeat` refuses it on
+// the CARRIER the message arrived on — the queue this consumer is bound to, not a field in the body
+// — so a fleet running below that carrier pays nothing for a feature it cannot feed.
+func (p *Pool) publishClaim(ctx context.Context, delivered dispatch.DeliveredJob) {
+	claim, ok := dispatch.ClaimHeartbeat(delivered, time.Now().UTC())
 	if !ok {
 		return
 	}
 	if err := p.dispatcher.PublishResult(ctx, claim); err != nil && ctx.Err() == nil {
-		p.logger.Debug("publish_run_claim_failed", "monitor_id", job.Monitor.ID, "error", err.Error())
+		p.logger.Debug("publish_run_claim_failed", "monitor_id", delivered.Job.Monitor.ID, "error", err.Error())
 	}
 }
 

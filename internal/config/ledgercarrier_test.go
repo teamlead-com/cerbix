@@ -101,3 +101,29 @@ func TestTheLedgerBoundsAreEnforcedAndZeroMeansDefault(t *testing.T) {
 		t.Fatalf("zero was treated as out of range: %v", err)
 	}
 }
+
+// F1 — the LOADER supplies the ledger's defaults, like every sibling sub-config's.
+//
+// It was the one block missing from `defaults()`: `Validate`'s message promised a default it did
+// not supply, and the value was re-derived instead at five runtime call sites across the store and
+// the scheduler. No behavioural defect — every reader went through a setter that defaulted — but
+// one number written in five places is one number that can be edited in four, and a default that
+// lives in the loader is the rule this breached.
+//
+// The mutation that must kill this: remove the `Ledger` block from `defaults()`.
+func TestTheLoaderSuppliesTheLedgerDefaults(t *testing.T) {
+	c := defaults()
+	if c.Ledger.ExpectedRunRetentionDays != domain.DefaultExpectedRunRetentionDays {
+		t.Errorf("the loader defaults the retention to %d, want the domain's %d",
+			c.Ledger.ExpectedRunRetentionDays, domain.DefaultExpectedRunRetentionDays)
+	}
+	if c.Ledger.ExpectedRunGapWindowsMax != domain.DefaultExpectedRunGapWindowsMax {
+		t.Errorf("the loader defaults the gap cap to %d, want the domain's %d",
+			c.Ledger.ExpectedRunGapWindowsMax, domain.DefaultExpectedRunGapWindowsMax)
+	}
+	// And what the loader supplies is inside the bounds it enforces, or the default would be a
+	// value the validator refuses.
+	if err := c.Validate(); err != nil && strings.Contains(err.Error(), "expected_run") {
+		t.Errorf("the loader's own default is out of range: %v", err)
+	}
+}

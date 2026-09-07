@@ -417,3 +417,50 @@ func TestALateTerminalCompletesAnUnfinishedWindowRatherThanReplacingIt(t *testin
 		t.Error("the late window lost its claim")
 	}
 }
+
+// C8 — a window the purge still keeps is a window the correlation still accepts.
+//
+// There were two answers to "how far back does the ledger reach". The purge drops a dated partition
+// once its whole range is past a MIDNIGHT-ALIGNED cutoff; the correlation floor was a rolling
+// `now - retention`. Between them sat up to a day of windows — widest just before midnight — that
+// were stored, returned by the read API, and refused here: a result answering one of them was
+// rejected as "outside retention" for a row the operator could see on the screen beside it.
+//
+// The fixture puts a window INSIDE that band deliberately: one second past the rolling floor and
+// comfortably inside the aligned one.
+//
+// The mutation that must kill this: subtract the retention from `now` again.
+func TestAWindowInsideTheAlignedCutoffStillCorrelates(t *testing.T) {
+	st, ctx := ledgerStore(t)
+	proj := seedLedgerProject(t, st, ctx, "alignedfloor")
+	m := ledgerMonitor(t, st, ctx, proj, "banded", 60)
+
+	// The two cutoffs, as the code computes them.
+	now := time.Now().UTC()
+	aligned := st.ExpectedRunRetentionCutoff(now)
+	rolling := now.Add(-time.Duration(st.ExpectedRunRetentionDays()) * 24 * time.Hour)
+	if !aligned.Before(rolling) {
+		t.Skip("the run started exactly at midnight, so the two cutoffs coincide and there is no band")
+	}
+	// Inside the band: kept by the purge, refused by the old floor.
+	due := aligned.Add(time.Minute)
+	if !due.Before(rolling) {
+		t.Fatalf("the fixture instant %s is not inside the band [%s, %s)", due, aligned, rolling)
+	}
+
+	backdateSchedule(t, st, ctx, m.ID, due)
+	mustDispatch(t, st, ctx, due, ExpectationAdvance{
+		MonitorID: m.ID, JobID: ledgerJobA, NextDue: due.Add(time.Minute), IntervalInForce: 60,
+		CarrierGeneration: domain.LedgerMinCarrier, ExpectedDue: due,
+		ExpectedRevision: m.ExecutionRevision, Region: m.Region, ReservedAt: due,
+	})
+
+	matched, err := st.RecordRunClaim(ctx, claimHeartbeat(m, due, ledgerJobA, due.Add(time.Second)))
+	if err != nil {
+		t.Fatalf("record run claim: %v", err)
+	}
+	if !matched {
+		t.Fatalf("a claim for a window at %s was refused, while the purge keeps everything from %s "+
+			"onward: the ledger stores and lists a row it will not correlate", due, aligned)
+	}
+}

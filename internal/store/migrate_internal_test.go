@@ -9,7 +9,7 @@ import (
 )
 
 // A production upgrade to v0.1.5-beta.1 died on 00070 with `syntax error at or near "("` because the
-// server was PostgreSQL 14 and five migrations use the column-list `ON DELETE SET NULL (col)` form
+// server was PostgreSQL 14 and six migrations use the column-list `ON DELETE SET NULL (col)` form
 // that arrived in 15. The schema requirement was real all along; nothing enforced it where an
 // operator would see it, and the failure surfaced as a parser error naming a file.
 //

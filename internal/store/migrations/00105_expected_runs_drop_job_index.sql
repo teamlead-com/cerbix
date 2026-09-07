@@ -1,0 +1,42 @@
+-- +goose Up
+-- C3: drop the partial index on the job identity. It serves no query in the tree and costs a
+-- non-HOT update on the ledger's hottest table.
+--
+-- 00102 built it "for exactly one query: a terminal event whose due_at is not trusted". No such
+-- query exists. Every event statement — the terminal upsert, the refusal note, the claim, the
+-- confirm — binds (monitor_id, due_at) and hits the PRIMARY KEY; the fallback the index was built
+-- for was never written. Producing that query now to justify the index would be backwards: if a
+-- future read needs it, the index returns with that read and is justified by it.
+--
+-- The cost is not theoretical. expected_runs is fillfactor = 70 so its updates stay HOT
+-- (invariant 12), and an index over job_id makes every write that sets it non-HOT — against the
+-- storage argument the spec itself rests on.
+--
+-- A NEW forward migration rather than an edit to 00102: 00102 is applied, so deleting the
+-- CREATE INDEX from its text would move only the fresh-install schema and leave the index in place
+-- on every deployed database.
+--
+-- PLAIN, and it carries no no-transaction annotation. expected_runs is PARTITION BY RANGE (due_at),
+-- so this is a PARTITIONED index, and CONCURRENTLY is not available in either direction —
+-- PostgreSQL 16.14 answers `cannot drop partitioned index ... concurrently` and, for the rollback,
+-- `cannot create index on partitioned table ... concurrently`. With no CONCURRENTLY there is
+-- nothing for the no-transaction pattern to enable, and the invalid-index hazard that would make
+-- `IF NOT EXISTS` a silent no-op over a broken index does not arise: it belongs to interrupted
+-- CONCURRENTLY builds, and a plain CREATE INDEX that fails rolls back leaving nothing behind.
+--
+-- `IF EXISTS` is for re-runnability and for a database where an operator already dropped it by
+-- hand. It is NOT because a fresh install lacks it — 00102 runs first, so a fresh install has it.
+--
+-- The cost stated plainly: a plain DROP on a partitioned index takes ACCESS EXCLUSIVE on the parent
+-- and on each partition. It is brief, because dropping an index rewrites no data, but it is a lock,
+-- and this is the ledger's busiest table.
+--
+-- The adaptive-storage rule does not apply here: expected_runs is declaratively partitioned in BOTH
+-- storage modes — internal/store/expectedrunretention.go says so where it explains why its
+-- retention has no TimescaleDB branch — so a second run in the other mode would prove nothing.
+DROP INDEX IF EXISTS expected_runs_job_idx;
+
+-- +goose Down
+-- The same statement 00102 used, so a rollback lands on the schema 00102 described.
+CREATE INDEX IF NOT EXISTS expected_runs_job_idx ON expected_runs (monitor_id, job_id)
+    WHERE job_id IS NOT NULL;

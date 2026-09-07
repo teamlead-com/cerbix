@@ -142,11 +142,24 @@ jobs:
       - name: Type-check + build
         run: npm run build
       - name: Unit tests
-        # These 463 tests used to run only on a developer's machine: this job type-checked and built
-        # and never executed them, so a red suite reached `main` unnoticed. It also runs the
-        # cross-surface SEAM check, which fails when the typed canary form starts producing something
-        # different from the committed Go fixture — the drift `internal/domain` cannot see by itself.
+        # The suite used to run only on a developer's machine: this job type-checked and built and
+        # never executed it, so a red suite reached `main` unnoticed. It also runs the cross-surface
+        # SEAM check, which fails when the typed canary form starts producing something different
+        # from the committed Go fixture — the drift `internal/domain` cannot see by itself.
+        #
+        # No figure here (F5). This comment stated a test COUNT, and the count drifted the first
+        # time anyone added a test. Deriving it would mean teaching a guard to read a CI workflow
+        # and count vitest files — a number nobody needs, bought with a guard nobody would maintain.
+        # A comment that says what the job does has nothing to drift.
         run: npm test
+      - name: Unit tests at a non-UTC zone
+        # The same suite in a zone with a HALF-HOUR offset, because a whole class of defect is
+        # invisible at UTC: a `datetime-local` pre-fill that slices the zone marker off an instant
+        # round-trips perfectly at UTC+00:00 and moves an on-call rotation anchor by five and a half
+        # hours here (E1), and a label that truncates an extent to whole days reads the same either
+        # way until a boundary falls inside one (E6). Kolkata rather than a whole-hour zone so a
+        # rendering that assumes whole-hour offsets fails too.
+        run: TZ=Asia/Kolkata npm test
       - name: API schema drift (openapi.yaml changed without regenerating schema.d.ts?)
         run: |
           npm run gen:api

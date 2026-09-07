@@ -885,3 +885,62 @@ func TestAnAuditInsertFailureAbortsTheMutation(t *testing.T) {
 		t.Fatalf("audit rows exist: %+v", rows)
 	}
 }
+
+// D2 — an audit insert that wrote NO row fails, rather than reporting success.
+//
+// `insertProjectAudit` is an `INSERT … SELECT … FROM projects WHERE p.id = $1`. A project that does
+// not resolve inserts zero rows and returns no error, so the audit silently did not happen while
+// the mutation it belongs to went on to commit — the exact outcome this file's header says cannot
+// occur. It is unreachable through the product's own doors, because an incident's foreign keys make
+// its project exist; the guarantee was therefore carried by two other tables' constraints and by a
+// sentence, and a schema change that relaxed either would have taken it away with nothing failing.
+//
+// The function is reached directly because that is where the property lives. A test routed through
+// a door could not build the state at all, which is the reason this was never covered.
+//
+// The mutation that must kill this: drop the rows-affected check.
+func TestAnAuditInsertThatWroteNothingFails(t *testing.T) {
+	st, ctx, orgID, _ := auditIncidentFixture(t)
+	actor := AuditActor{ActorUserID: "", ViaToken: true, Label: "token:ops"}
+
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // the test asserts the error, not the commit
+
+	// A well-formed id that resolves to no project: the SELECT yields nothing and the INSERT
+	// therefore writes nothing.
+	missing := "00000000-0000-4000-8000-000000000000"
+	err = insertProjectAudit(ctx, tx, missing, actor, string(IncidentAuditCreate), "incident x")
+	if err == nil {
+		t.Fatal("an audit insert that produced no row reported success: the mutation it belongs to " +
+			"would commit unattributed, which is what this file promises cannot happen")
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("the failure does not name the project that resolved nothing: %v", err)
+	}
+	_ = tx.Rollback(ctx)
+
+	// Nothing was written anywhere.
+	if rows := auditRows(t, st, ctx, orgID); len(rows) != 0 {
+		t.Fatalf("an audit row survived a refused insert: %+v", rows)
+	}
+
+	// And the ordinary path still writes exactly one row, so the check refuses only the case it is
+	// about: a guard that refused everything would pass the assertion above and break the product.
+	st2, ctx2, orgID2, projID2 := auditIncidentFixture(t)
+	tx2, err := st2.pool.Begin(ctx2)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := insertProjectAudit(ctx2, tx2, projID2, actor, string(IncidentAuditCreate), "incident y"); err != nil {
+		t.Fatalf("a resolvable project was refused: %v", err)
+	}
+	if err := tx2.Commit(ctx2); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if rows := auditRows(t, st2, ctx2, orgID2); len(rows) != 1 {
+		t.Fatalf("the ordinary path wrote %d audit rows, want 1", len(rows))
+	}
+}

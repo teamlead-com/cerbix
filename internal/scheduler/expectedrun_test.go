@@ -237,13 +237,19 @@ func TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoWithholds(t *testing.T
 		}
 	})
 	// Rule 4 on the CREDENTIALED branch: the authoritative read could not resolve this monitor's
-	// secrets, so the instant moves by a BACKOFF while the interval does not. FR-029 shipped an
-	// in-flight claim on one branch only, and rules 1, 3 and 4 all going through one primitive on
-	// both branches is the structure arranged to make that unrepeatable.
+	// secrets, so the instant moves by a BACKOFF — and the interval moves WITH it (C5). FR-029
+	// shipped an in-flight claim on one branch only, and rules 1, 3 and 4 all going through one
+	// primitive on both branches is the structure arranged to make that unrepeatable.
 	t.Run("rule 4, a backoff on the credentialed branch", func(t *testing.T) {
+		// A SHORT interval, because that is the only shape in which the delay and the cadence
+		// differ at all: `credentialFailureRetry` starts at the interval and doubles toward
+		// `refreshEvery`, so a 60-second monitor's first backoff IS 60 seconds and a fixture built
+		// on one could not tell the fixed code from the broken code. C5's own wording — "for
+		// intervals below the delay floor" — names this shape, and the assertion has to be written
+		// in it.
 		monitor := domain.Monitor{
 			ID: "unresolvable", Type: domain.MonitorPostgres, Target: "db:5432",
-			Region: domain.DefaultRegion, Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
+			Region: domain.DefaultRegion, Enabled: true, IntervalSeconds: 5, TimeoutSeconds: 5,
 			ExecutionRevision: 4,
 		}
 		fs := &fakeStore{leader: true, monitors: []domain.Monitor{monitor},
@@ -264,20 +270,36 @@ func TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoWithholds(t *testing.T
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		go s.Run(ctx)
-		waitUntil(t, 3*time.Second, "the backoff to be recorded", func() bool {
-			return len(advancesFrom(fs)) > 0
+		// TWO backoffs: the first delay equals the interval by construction, and only the second
+		// has doubled away from it.
+		waitUntil(t, 20*time.Second, "a second backoff to be recorded", func() bool {
+			return len(advancesFrom(fs)) > 1
 		})
-		advance := advancesFrom(fs)[0]
+		all := advancesFrom(fs)
+		advance := all[len(all)-1]
 		if advance.SkipReason != store.SkipCredentialUnresolved {
 			t.Fatalf("the backoff records reason %q, want %q", advance.SkipReason, store.SkipCredentialUnresolved)
 		}
-		if advance.IntervalInForce != monitor.IntervalSeconds {
-			t.Fatalf("the backoff recorded interval %d, want the monitor's %d — a delay that became "+
-				"interval_in_force would space every later gap window by a retry timer, invisibly "+
-				"and permanently (invariant 2b)", advance.IntervalInForce, monitor.IntervalSeconds)
+		// C5: the column records the interval that PRODUCED the instant beside it, which is §6.2's
+		// own definition of it. This used to assert the monitor's cadence, on the reasoning that a
+		// delay in `interval_in_force` "would space every later gap window by a retry timer,
+		// invisibly and permanently". It is not permanent — the next successful advance writes the
+		// cadence back — and the cadence was the wrong grid: the schedule jumps from T to T+delay
+		// while the column claims a cadence step, so the instants between sit on no grid at all and
+		// the window at the far end carries a threshold shorter than the span that spaced it.
+		//
+		// The mutation that must kill this: pass the snapshot's interval again.
+		wantInterval := int(credentialFailureRetry(monitor.Interval(), len(all)) / time.Second)
+		if wantInterval == monitor.IntervalSeconds {
+			t.Fatalf("after %d failures the delay is still the cadence (%ds), so this fixture cannot "+
+				"tell the two apart", len(all), wantInterval)
 		}
-		if !advance.NextDue.After(time.Now().UTC().Add(time.Duration(monitor.IntervalSeconds-5) * time.Second)) {
-			t.Errorf("the next expectation is %s, which is not a backoff away", advance.NextDue)
+		if advance.IntervalInForce != wantInterval {
+			t.Fatalf("the backoff recorded interval %d, want the delay %d that produced its instant "+
+				"(the cadence is %ds)", advance.IntervalInForce, wantInterval, monitor.IntervalSeconds)
+		}
+		if !advance.NextDue.After(time.Now().UTC()) {
+			t.Errorf("the next expectation is %s, which is not in the future", advance.NextDue)
 		}
 	})
 	// Rule 2 on the plain branch, AMENDED by phase F (§7.4). The dispatch fails AFTER the window

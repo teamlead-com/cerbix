@@ -540,6 +540,15 @@ func defaults() *Config {
 		Heartbeats: HeartbeatsConfig{
 			RetentionDays: 30,
 		},
+		// F1. The ledger's defaults belong HERE, beside every sibling sub-config's, and they were
+		// the one block missing: `Validate`'s message promised a default it did not supply, and the
+		// value was instead re-derived at five runtime call sites across the store and the
+		// scheduler. No behavioural defect — every reader went through a setter that defaulted —
+		// but one number written in five places is one number that can be edited in four.
+		Ledger: LedgerConfig{
+			ExpectedRunRetentionDays: domain.DefaultExpectedRunRetentionDays,
+			ExpectedRunGapWindowsMax: domain.DefaultExpectedRunGapWindowsMax,
+		},
 		Services: ServicesConfig{
 			MaxServicesPerProject: domain.DefaultMaxServicesPerProject,
 			MaxMembersPerRevision: domain.DefaultMaxMembersPerRevision,
@@ -574,16 +583,17 @@ func defaults() *Config {
 
 // Validate enforces the config contract. Each rule has a single owner here at
 // the infra/bootstrap boundary; business rules live in their own layers.
-// ledgerCarrierPayloadPhase names the phase whose change makes `ledger.carrier_enabled: true`
-// admissible. It is a constant rather than a comment so the refusal below cannot drift from the
-// reason it gives.
-const ledgerCarrierPayloadPhase = "B2"
-
 func (c *Config) Validate() error {
 	// FR-032 phase B2: the payload that DEFINES generation 4 now exists, so `carrier_enabled` is
 	// an admissible input and this refusal is retired. It is retired rather than deleted from the
-	// record: `ledgerCarrierPayloadPhase` remains below with the phase it named, because the
-	// contract was VERSIONED and a reader needs to know which build changed the answer.
+	// record — the contract was VERSIONED and a reader needs to know which build changed the answer,
+	// and B2 is that build.
+	//
+	// The phase used to be a CONSTANT here, `ledgerCarrierPayloadPhase = "B2"`, introduced "so the
+	// refusal cannot drift from the reason it gives". The refusal it belonged to is gone, and the
+	// constant then had exactly one reference: the sentence above naming it. Go does not fail a
+	// build over an unused constant, so nothing said so. It is deleted and the sentence keeps the
+	// phase, which is what the sentence was for (F2).
 	//
 	// The versioned half that survives is the direction of the change. B1 refused `true` and did
 	// not coerce it, so an operator who set the key learned that it did nothing. B2 accepts the

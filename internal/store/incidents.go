@@ -94,10 +94,23 @@ func scanIncident(row pgx.Row) (domain.Incident, error) {
 // and a system door here would widen the unaudited surface for a caller that does not exist (D3). A
 // future machine acknowledgement adds its door in the change that adds the caller.
 func (s *Store) AcknowledgeIncidentByPrincipal(ctx context.Context, id, by string, actor AuditActor) (domain.Incident, error) {
-	return s.acknowledgeIncident(ctx, id, by, &actor)
+	return s.acknowledgeIncident(ctx, id, by, actor)
 }
 
-func (s *Store) acknowledgeIncident(ctx context.Context, id, by string, actor *AuditActor) (domain.Incident, error) {
+// acknowledgeIncident takes the actor BY VALUE, which is D3 and not a signature preference.
+//
+// It used to take a pointer with a live `actor != nil` branch, while its only caller passed the
+// address of a value parameter — so the branch was unreachable and the guard that enumerates system
+// doors could not see it, because that guard counts DECLARATIONS and there is no
+// `AcknowledgeIncidentBySystem` to count. An unaudited acknowledgement was one in-package caller
+// away, and review is what stood between them.
+//
+// Deleting the branch would have earned nothing: the parameter would still accept `nil`, the future
+// caller would still compile, and the failure would move from an unaudited write to a nil
+// dereference. With the value parameter `nil` is a compile error, which is what makes this a
+// property rather than a promise. Its two siblings keep the pointer because their `…BySystem` doors
+// are real callers that legitimately pass none.
+func (s *Store) acknowledgeIncident(ctx context.Context, id, by string, actor AuditActor) (domain.Incident, error) {
 	// Same row, same rule as `AddIncidentUpdate`: lock, then read the clock, then write. A single
 	// UPDATE looks atomic and is — but its `now()` is fixed when the statement's transaction began,
 	// so an acknowledgement that waited behind a timeline update stamps `updated_at` BEFORE the
@@ -145,10 +158,12 @@ func (s *Store) acknowledgeIncident(ctx context.Context, id, by string, actor *A
 	if err != nil {
 		return domain.Incident{}, fmt.Errorf("store: acknowledge incident: %w", err)
 	}
-	// An audit row means a change HAPPENED (D8): a retry must not manufacture history.
-	if actor != nil && firstAck {
-		if err := insertIncidentAudit(ctx, tx, inc.ProjectID, *actor,
-			IncidentAuditAcknowledge, IncidentAcknowledgeTarget(*actor, inc.ID)); err != nil {
+	// An audit row means a change HAPPENED (D8): a retry must not manufacture history. The
+	// `actor != nil` half of this condition is gone with the pointer (D3) — there was never a
+	// caller that could satisfy it, and the parameter no longer admits one.
+	if firstAck {
+		if err := insertIncidentAudit(ctx, tx, inc.ProjectID, actor,
+			IncidentAuditAcknowledge, IncidentAcknowledgeTarget(actor, inc.ID)); err != nil {
 			return domain.Incident{}, err
 		}
 	}

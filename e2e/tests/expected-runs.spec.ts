@@ -208,6 +208,57 @@ test.describe("the expected-run ledger", () => {
     await expect(page.getByTestId("lat-ruler")).toBeVisible();
   });
 
+  // A1, on the live stack — a monitor credentialed BY SCHEMA whose variant forbids a credential
+  // rides the same carrier as every other monitor of its region.
+  //
+  // The materializer had three exits and stamped the carrier on two. `promql` with
+  // `auth_mode: none` takes neither the no-envelope exit (it IS a credentialed type) nor the sealed
+  // one (it yields no envelope field), and left with the protocol version it was born with while
+  // the window field stayed populated. On a carrier-ON stack like this one that means its windows
+  // record generation 1 for a job the region publishes at generation 4 — so the run happens, its
+  // result correlates, and invariant 10c then reads the window `unknown`: coverage silently lost
+  // for one class of monitor and no surface saying why.
+  //
+  // The class is the point, so the fixture is that class and not a plain HTTP monitor: the existing
+  // case above cannot see this, because a plain monitor takes the exit that always stamped.
+  test("a credentialed schema with no credential rides its region's carrier", async ({ page }) => {
+    test.skip(!ledgerCarrierOn, "the ledger carrier is off on this stack, so no window records 4");
+    const { projectID } = await firstProject(page);
+    const r = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors`, {
+      name: "e2e-ledger-promql", type: "promql", target: "http://prometheus.invalid:9090",
+      region: "core", interval_seconds: 10, timeout_seconds: 5, retries: 0,
+      failure_threshold: 1, renotify_seconds: 3600,
+      // The API takes `config`; `settings` is the FILE provider's spelling, and a create body
+      // carrying it silently drops the query the type requires.
+      config: { auth_mode: "none", query: "up" },
+    });
+    expect(r.status(), await r.text()).toBe(201);
+    const mon = await r.json();
+
+    const now = () => new Date();
+    let dispatched: any[] = [];
+    for (let i = 0; i < 40; i++) {
+      const from = new Date(now().getTime() - 10 * 60_000).toISOString();
+      const to = new Date(now().getTime() + 60_000).toISOString();
+      const answer = await apiGet(
+        page,
+        `/api/v1/projects/${projectID}/monitors/${mon.id}/expected-runs?from=${from}&to=${to}&limit=200`,
+      );
+      dispatched = (answer.windows ?? []).filter((w: any) => w.job_id);
+      if (dispatched.length > 0) break;
+      await page.waitForTimeout(1000);
+    }
+    expect(dispatched.length, "no window was dispatched within 40s").toBeGreaterThan(0);
+    for (const w of dispatched) {
+      expect(
+        w.carrier_generation,
+        `window ${w.due_at} of a credentialed-schema monitor records carrier ` +
+          `${w.carrier_generation} on a stack whose ledger carrier is ON: this class left the ` +
+          `materializer without crossing the stamp, so its windows can never read covered`,
+      ).toBe(4);
+    }
+  });
+
   test("a push monitor has no expectation at all", async ({ page }) => {
     // §15, the owner's ruling: `checkStalePush` already detects a push that did not arrive, and a
     // window would be a SECOND mechanism for one obligation. The API says so by answering with a

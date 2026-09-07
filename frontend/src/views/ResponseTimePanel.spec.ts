@@ -38,7 +38,7 @@ const MONITOR = {
 };
 
 /** 60 checks a minute apart with a REAL six-minute hole and one failure carrying no latency. */
-function heartbeats(opts?: { withTimeout?: boolean }) {
+function heartbeats(opts?: { withTimeout?: boolean; noLatencies?: boolean }) {
   const t0 = Date.UTC(2026, 8, 3, 14, 12, 0);
   const out: Record<string, unknown>[] = [];
   for (let i = 0, m = 0; i < 60; i++, m++) {
@@ -46,6 +46,9 @@ function heartbeats(opts?: { withTimeout?: boolean }) {
     const ts = new Date(t0 + m * 60_000).toISOString();
     if (m === 29) { out.push({ monitor_id: "m1", ts, up: false, latency_ms: 0, code: 0, msg: "bad request: unsupported scheme" }); continue; }
     if (opts?.withTimeout && m === 40) { out.push({ monitor_id: "m1", ts, up: false, latency_ms: 10_000, code: 0, msg: "timeout" }); continue; }
+    // E8's fixture: every check failed and recorded no latency at all, so the panel has points and
+    // no measured population.
+    if (opts?.noLatencies) { out.push({ monitor_id: "m1", ts, up: false, latency_ms: 0, code: 0, msg: "connect: connection refused" }); continue; }
     out.push({ monitor_id: "m1", ts, up: true, latency_ms: 70 + (i % 9), code: 200, msg: "ok" });
   }
   return out.reverse(); // the API returns newest first
@@ -57,7 +60,7 @@ type LedgerFixture = {
   ledger_from: string | null;
 };
 
-async function mountPanel(opts?: { withTimeout?: boolean; ledger?: LedgerFixture }) {
+async function mountPanel(opts?: { withTimeout?: boolean; noLatencies?: boolean; ledger?: LedgerFixture }) {
   for (const fn of Object.values(apiMock)) fn.mockReset();
   apiMock.GET.mockImplementation((path: string) => {
     if (path.endsWith("/monitors/{monitorID}")) return Promise.resolve({ data: MONITOR });
@@ -130,6 +133,25 @@ describe("the Response time panel", () => {
     expect(note).not.toMatch(/\b(missed|missing)\s+\d+/);
   });
 
+  // E8 — the out-of-scale note is gated on the SCALE, not on whether an average exists.
+  //
+  // It carried `&& stats.avg != null`, so a panel where no check recorded a latency showed
+  // "timeout 10s" with no rule drawn and no note: the one case where the reader has nothing else to
+  // go on, and the panel said neither that the timeout was on the scale nor that it was off it.
+  //
+  // The mutation that must kill this: require an average again.
+  it("declares the timeout off the scale even when nothing recorded a latency", async () => {
+    const w = await mountPanel({ noLatencies: true });
+    expect(w.find('[data-testid="lat-header"]').text()).toContain("no check recorded a latency");
+    const timeout = w.find('[data-testid="lat-timeout"]').text();
+    expect(timeout).toContain("timeout 10s");
+    expect(
+      timeout,
+      "the timeout is neither drawn nor declared off the scale, so the reader is told nothing",
+    ).toContain("outside this scale");
+    expect(w.find('[data-testid="lat-timeout-rule"]').exists()).toBe(false);
+  });
+
   it("states the timeout always and draws it only when it falls inside the computed extent", async () => {
     const off = await mountPanel();
     expect(off.find('[data-testid="lat-timeout"]').text()).toContain("timeout 10s");
@@ -147,8 +169,104 @@ describe("the Response time panel", () => {
     const header = w.find('[data-testid="lat-header"]').text();
     // 59 of 60 carried a latency, and the header says exactly that rather than implying all 60
     expect(header).toContain("59 of 60 checks with a recorded latency");
+    // E7 — the p95 legend names the MEASURED population, because that is what p95 is over.
+    //
+    // It named the DRAWN one — "p95 · last 60 checks" — while the statistic is computed from the
+    // 59 that recorded a latency. The two differ exactly when a monitor has been failing, which is
+    // when this panel is most likely to be read.
+    //
+    // The mutation that must kill this: name `stats.drawn` in the legend again.
+    const legend = w.text();
+    expect(legend).toContain("p95 · last 59 checks with a recorded latency");
+    expect(legend).not.toContain("p95 · last 60 checks");
     expect(w.find('[data-testid="lat-subtitle"]').text()).toContain("no claim about whether a check was due");
     expect(w.find('[data-testid="lat-subtitle"]').text()).toContain("points only, no stroke and no fill");
+  });
+
+  // E4 — an expectation cell covers only the window it belongs to.
+  //
+  // The width came from the number of POINTS while the cells are positioned at WINDOW instants, so
+  // whenever windows outnumbered points every cell was wider than its window and painted over its
+  // neighbours. The windows arrive newest-first, so the oldest paints last: a covered cell could
+  // cover the missed windows beside it, and because the hit rectangles overlapped identically the
+  // readout named a window the pointer was not over. Windows outnumbering points is not an edge
+  // case — it is exactly what a missed run looks like.
+  //
+  // The fixture is that shape: a window per minute across a span the series covers with far fewer
+  // points, including the six-minute hole.
+  //
+  // The mutation that must kill this: size the cells from `panelPoints.length` again.
+  it("gives each expectation cell a width its own window can hold", async () => {
+    // A window every THIRTY seconds across the drawn span: more than twice as many windows as
+    // points, which is what a monitor whose probes are sparser than its schedule produces — and
+    // what the point-derived width cannot fit. A grid as sparse as the points hides the defect,
+    // because the 0.62 factor absorbs a small excess.
+    const instants = fixtureInstants();
+    const windows: { due_at: string; verdict: string }[] = [];
+    for (let ms = instants[0], i = 0; ms <= instants[instants.length - 1]; ms += 30_000, i++) {
+      windows.push({
+        due_at: new Date(ms).toISOString(),
+        verdict: i % 7 === 0 ? "expected_never_issued" : "covered",
+      });
+    }
+    expect(windows.length, "the grid is not denser than the series, so this case sees nothing")
+      .toBeGreaterThan(2 * instants.length);
+    const w = await mountPanel({ ledger: { windows, ledger_from: new Date(0).toISOString() } });
+    const cells = w.findAll('[data-testid="lat-expect-cell"]');
+    expect(cells.length, "no cells were drawn, so this case sees nothing").toBeGreaterThan(2);
+
+    const noneOverlap = (found: ReturnType<typeof w.findAll>, what: string) => {
+      const boxes = found
+        .map((c) => ({ x: Number(c.attributes("x")), w: Number(c.attributes("width")) }))
+        .sort((a, b) => a.x - b.x);
+      for (let i = 1; i < boxes.length; i++) {
+        const prevEnd = boxes[i - 1].x + boxes[i - 1].w;
+        expect(
+          prevEnd,
+          `${what} ${i - 1} ends at ${prevEnd} and ${what} ${i} starts at ${boxes[i].x}`,
+        ).toBeLessThanOrEqual(boxes[i].x + 0.001);
+      }
+    };
+    // The PAINTED cell: a covered cell painting over the window beside it.
+    noneOverlap(cells, "cell");
+    // And the POINTER TARGET, which this test claimed in prose and never asserted (reviewer P1,
+    // party [346]). The painted cells took 0.62 of the gap while every hit rect grew by 2.5 on each
+    // side, so below a gap of ~13px the targets overlapped and the readout could name a window the
+    // pointer was not over — E4's second half, alive under a green test that said otherwise.
+    const hits = w.findAll('[data-testid="lat-expect-hit"]');
+    expect(hits.length, "no hit targets were drawn, so this case sees nothing").toBe(cells.length);
+    noneOverlap(hits, "hit target");
+    // And the target is still USABLE: it must be at least as wide as the cell it belongs to, or the
+    // fix would have bought non-overlap by making the panel harder to point at.
+    const cellW = cells.map((c) => Number(c.attributes("width"))).sort((a, b) => a - b);
+    const hitW = hits.map((c) => Number(c.attributes("width"))).sort((a, b) => a - b);
+    for (let i = 0; i < cellW.length; i++) expect(hitW[i]).toBeGreaterThanOrEqual(cellW[i]);
+  });
+
+  // E3 — the subtitle describes the picture the panel DREW, in BOTH mounts.
+  //
+  // It was a constant, and it survived phase E: on a ledger-carrying monitor the panel drew
+  // strokes, drew a ruler of due windows, printed a legend explaining both — and beneath them the
+  // line "points only, no stroke and no fill … this panel makes no claim about whether a check was
+  // due there". The legend and the subtitle described two different pictures, and only one of them
+  // was on the screen.
+  //
+  // Asserted in the ledger-ON mount, which is where the defect lives; the ledger-OFF assertion above
+  // is what keeps the fix from becoming an unconditional swap. A test written only in the mount the
+  // suite already had could not have seen this at all.
+  //
+  // The mutation that must kill this: make the subtitle a constant again, either way round.
+  it("stops denying the strokes it draws once the ledger answers", async () => {
+    const w = await mountPanel({
+      ledger: { windows: windowsForFixture("covered"), ledger_from: new Date(0).toISOString() },
+    });
+    expect(w.findAll('[data-testid="lat-stroke"]').length, "this mount draws no stroke, so it cannot see E3").toBeGreaterThan(0);
+    const subtitle = w.find('[data-testid="lat-subtitle"]').text();
+    expect(subtitle).not.toContain("points only, no stroke and no fill");
+    expect(subtitle).not.toContain("makes no claim about whether a check was due");
+    expect(subtitle).toContain("a stroke joins adjacent points");
+    // It still names the window it drew, which the old sentence also did.
+    expect(subtitle).toMatch(/last \d+ checks/);
   });
 
   it("gives a point a readout in local time over the canonical UTC instant, and highlights its row", async () => {

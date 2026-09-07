@@ -53,6 +53,35 @@ func CanaryBindingFromRefKey(key string) (string, bool) {
 	return name, true
 }
 
+// CanaryConfigKeyRefusal reports why a canary config key may not be WRITTEN, or "" when it may.
+//
+// B4. `async_canary` is not a credentialed type, so `validateCredentialSettings`' unknown-key
+// rejection never ran for it and the create/update handlers passed the config map through verbatim.
+// A client could therefore set `canary_run` — the key the scheduler otherwise mints per window —
+// and the dispatch path YIELDS to a value already present. The executor derives the idempotency key
+// from it, so a target honouring that key returns the first task's answer forever: the canary
+// reports UP on a transaction it stopped performing.
+//
+// A whitelist and not a blacklist, because the hazard is the SET of keys an executor owns and a
+// blacklist covers only the ones someone remembered. The two executor-owned shapes are still named
+// individually, so the refusal tells an operator which rule they met rather than "unknown key" for
+// a key the product itself writes.
+func CanaryConfigKeyRefusal(key string) string {
+	if key == CanaryWorkflowKey {
+		return ""
+	}
+	if _, ok := CanaryBindingFromRefKey(key); ok {
+		return ""
+	}
+	if key == CanaryRunKey {
+		return "`" + CanaryRunKey + "` is set by the scheduler for each run and must not be written: pinning it makes the target return the first task's answer forever"
+	}
+	if _, ok := CanaryBindingFromField(key); ok {
+		return "`" + key + "` is injected by the dispatch gate for one execution and must not be written: the stored document carries a `" + canarySecretSuffix[1:] + "` marker, never a value"
+	}
+	return "unknown key `" + key + "` for an async_canary monitor"
+}
+
 // CanarySecretRefKeys returns the ref keys a config carries, sorted — the store's single source for
 // normalizing `monitor_secret_refs` without knowing anything about workflows.
 func CanarySecretRefKeys(config map[string]string) []string {
@@ -296,19 +325,17 @@ func CanaryConfig(w CanaryWorkflow) (map[string]string, error) {
 	return cfg, nil
 }
 
-// CanarySemanticHash is what the file provider compares to decide create / update / no-op. It covers
-// the canonical document AND the flat refs, so the two halves cannot disagree about identity:
-// pointing a binding at a DIFFERENT project secret moves it, and rotating that secret's VALUE does
-// not. Renaming a secret referenced by a file-managed monitor is refused outright by the store, which
-// is why the name being part of this hash cannot leave it stale (D3g).
-func CanarySemanticHash(config map[string]string) string {
-	h := sha256.New()
-	h.Write([]byte(config[CanaryWorkflowKey]))
-	for _, k := range CanarySecretRefKeys(config) {
-		h.Write([]byte("\x00" + k + "\x00" + config[k]))
-	}
-	return hex.EncodeToString(h.Sum(nil))
-}
+// B7: `CanarySemanticHash` stood here and was documented as "what the file provider compares to
+// decide create / update / no-op". It had no non-test caller and never had one. The file provider
+// hashes its own canonical projection in `internal/fileprovider/canonical.go`, whose `Config` field
+// covers the canonical document and the flat refs together with every other bundle-owned field — so
+// the property the deleted function claimed is real, is enforced, and is enforced somewhere else.
+// `TestCanaryBundleHashSemantics` asserts it against that hash, on decoded bundles.
+//
+// It is deleted rather than given a caller. Giving it one would mean hashing a canary's identity
+// differently from every other type's, dropping the name, the interval and the region from the
+// comparison — a regression bought to make a sentence true. Deleting it is the experiment: any
+// surviving reference fails the build with an undefined name.
 
 // ── Reading the persisted form back ────────────────────────────────────────────────────────────
 
@@ -390,6 +417,28 @@ func ParseCanaryConfig(config map[string]string) (CanaryWorkflow, error) {
 			MaxAttempts: cw.Completion.Poll.MaxAttempts,
 			Success:     CanaryPollMatch{Path: cw.Completion.Poll.SuccessPath, Value: cw.Completion.Poll.SuccessValue},
 			Failure:     CanaryPollMatch{Path: cw.Completion.Poll.FailurePath, Values: cw.Completion.Poll.FailureValues},
+		}
+	}
+	// B6. A completion whose KIND names a sub-document must carry it, and that is refused HERE
+	// rather than dereferenced later.
+	//
+	// The executor's two await paths read `Completion.Poll` and `Completion.SSE` without a nil
+	// check, two lines below a comment stating that a schema-invalid document can reach them on a
+	// crafted carrier. Neither the AMQP worker nor the pull agent installs a recover, so one such
+	// payload panics the goroutine and takes the region's whole prober pool with it — a
+	// denial-of-service against every monitor in that region, from one message.
+	//
+	// The gate is this function because it is the one door every reader crosses: the executor, the
+	// API and the UI all parse through it, and a refusal here reaches the executor as "workflow
+	// unreadable", which is the bounded reason a document it cannot read already has.
+	switch w.Completion.Kind {
+	case CanaryCompletionPollJSON:
+		if w.Completion.Poll == nil {
+			return CanaryWorkflow{}, fmt.Errorf("workflow: completion kind %q carries no `poll` block", w.Completion.Kind)
+		}
+	case CanaryCompletionSSE:
+		if w.Completion.SSE == nil {
+			return CanaryWorkflow{}, fmt.Errorf("workflow: completion kind %q carries no `sse` block", w.Completion.Kind)
 		}
 	}
 	// The binding → project-secret mapping lives ONLY in the flat keys (D3f).

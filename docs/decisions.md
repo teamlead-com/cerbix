@@ -4276,7 +4276,9 @@ service that is STILL FIRING`.
 
 ## D-0183 — PostgreSQL 14 is not supported, and that is decided rather than pending (2026-08-27)
 
-**Context.** iter-0161 opened on a production upgrade that died on PostgreSQL 14: five migrations use
+**Context.** iter-0161 opened on a production upgrade that died on PostgreSQL 14: six migrations use
+(five at the time of this decision; `00093` added the sixth, and the count is corrected here rather
+than left to read as a claim about a schema that has changed)
 the column-list `ON DELETE SET NULL (col)` form that arrived in 15, and the plain form cannot
 substitute — on a composite FK it nulls EVERY referencing column including the NOT NULL `project_id`,
 which is the bug `00070` exists to fix. `cerbix migrate` was made to refuse 14 before touching a file,
@@ -4289,7 +4291,7 @@ leave it indefinitely — an open question in a status document reads as work so
 **Decision (owner, 2026-08-27): no.** PostgreSQL 15 is the floor and stays there.
 
 The cost of the alternative is what makes this easy: supporting 14 means emulating column-list
-`ON DELETE SET NULL` with triggers across five migrations and maintaining those triggers indefinitely,
+`ON DELETE SET NULL` with triggers across six migrations and maintaining those triggers indefinitely,
 in the exact code path whose correctness the composite FKs exist to guarantee. A hand-written trigger
 that nulls one column of a composite key on delete is precisely the kind of thing that works until a
 cascade arrives from an unexpected direction — and it would carry the tenancy invariants.
@@ -8047,7 +8049,9 @@ Two sentences above are superseded by this one and are left standing as the reco
 true when they were written: this decision says the top section "is `[Unreleased]` now", and the
 closure note says the file "opens with `[Unreleased]`, which is accurate". Both were true through
 the whole of `iter-0178`. **After the closure the owner asked for the section to be versioned**, and
-it now reads `## [v0.1.9] - 2026-09-06`.
+it was set to `## [v0.1.9] - 2026-09-06`. The date moved to `2026-09-07` when the release was cut,
+which is the day the tag was authorized; the heading is the only place that date lives, because
+`build.yml` publishes that section as the release body.
 
 `iter-0178`'s lifecycle line still says the top section is `[Unreleased]`. That is deliberate: it
 was true at the moment of closure, and a closed report is a record of a moment rather than a live
@@ -8065,3 +8069,69 @@ The section's own preamble says the same in the file itself, so a reader who ope
 without this record still learns that the number is a heading and not yet a release. The option was
 presented with that consequence named, and the owner chose it knowing it; the alternative offered —
 deleting the section — would have discarded the record of everything since `v0.1.8`.
+
+## D-0247 — a sentence is not a mechanism: fifty-two seams, and two decisions that did not survive contact with the tree (iter-0179, 2026-09-06)
+
+**Context.** A two-axis review of `v0.1.8..main` — 133 commits, ~34,700 added lines outside
+`internal/web/dist` — produced `docs/specs/func-audit-gaps-3.md`: 52 findings in seven clusters,
+each with a severity, a confidence, a decision and a discharge row. The independent reviewer passed
+the SPEC as a design at party [272], a technical result that explicitly did not approve it, assign a
+number or authorize a commit. This decision records the implementation.
+
+**No requirement number, by precedent.** Neither `func-audit-gaps.md` (iter-0044) nor
+`func-audit-gaps-2.md` (iter-0055) has an `FR-`/`NFR-` number, and neither appears in
+`traceability.md`. An audit-gap package adds no requirement; it repairs the ones that exist —
+here FR-020, FR-026, FR-029, FR-030, FR-031/NFR-025 and FR-032.
+
+**The decided property, one line per P0.** An unstamped job is UNCONSTRUCTIBLE — `stampedJob` has
+one constructor and a branch that skips it does not compile (A1). Every redirect hop is
+re-validated against the write validator's address-independent, non-template subset, and a failing
+hop is refused rather than followed with headers stripped, because a canary that quietly succeeds
+without its credential is a second false claim (B1). A dispatch shortage is an ORDINARY result
+through `RecordScheduledResult`, and `InsertHeartbeat` is gone from the scheduler's store interface
+so the old path cannot return by accident (B2, the owner's seam ruling of 2026-09-06).
+
+**Two decisions were departed from, and both departures are recorded in the spec's own item
+bodies.**
+
+A2's decision names `dispatch.DeliveredJob` as the carrier source at three sites; at two of them
+the code runs in the CORE and receives a `domain.Heartbeat`, so no such value exists. The comment
+above `terminalCarrierGeneration` already argued why carrying the executor's observation back would
+mean putting it in the payload — "the P0 that killed revision 6". Implementing the decision
+verbatim would have reversed a deliberate ruling with its reason written down. What was built is
+its implementable content: the producer stops reading its own choice off the body, and the consumer
+half is A3, at the one place a `DeliveredJob` exists.
+
+C4's decision was "re-measure, then restate", and the measurement inverted the fact the retry bound
+was sized from: 20050 of 20052 generation-4 windows hold a `claimed_at`, against the 1.6% the old
+note recorded, because phase F commits the window before the job leaves the process. The
+concession that follows is written down rather than smoothed over — a re-offer cannot convert an
+unmatched claim into a matched one any more — and the mechanism is KEPT, because removing it is a
+behaviour change and not a re-measurement.
+
+**A guard that cannot be answered is a guard its readers skip.** F4's derivation of the iteration
+set from the directory exposed an early return written for the two reports that carry a findings
+table; applied to every report it complained about the majority, all of them immutable. The branch
+was dropped: every report with a table is now compared, where two were, and a report with a count
+and no table is no longer told to grow one. The trade is asserted in the test that used to require
+the opposite.
+
+**Two migrations, both forward and neither an edit to an applied one.** `00104` narrows
+`pull_tests` back to `protocol_version IN (1, 2, 3)` — generation 4 is real on the job path and
+reserved-and-unreachable on the test path, and a row no agent can claim is the silent blackhole
+`00101`'s own header says the CHECK exists to prevent — refusing with a count and deleting nothing
+if such a row exists. `00105` drops `expected_runs_job_idx`, which serves no query in the tree and
+costs a non-HOT update on the ledger's busiest table. Editing `00101` or `00102` would have moved
+only the fresh-install schema and left every deployed database unchanged.
+
+**The process fork, and who settled it.** The reviewer raised that the implementation had changed
+`docs/status.md`, `docs/traceability.md` and the canonical `func-expected-run-ledger.md` while the
+message announcing it said no iteration was open. Measured rather than argued: reverting the
+citation repairs makes `make docs-check` RED — two findings are direct consequences of B7's
+deletion, one is F4's own attribution finding — so the choice was a tree that passes its own gate
+against one that does not. The owner was given that fork with its measurements and opened
+`iter-0179`. The imprecise sentence was "there is no traceability row"; the true one was "no
+traceability ROW was added; two citations were repaired because the guard demands it".
+
+**What this decision does not do.** It authorizes no tag, no push and no release, and it does not
+close `iter-0179`: an audit result is not closure authority, which `D-0246` recorded the hard way.

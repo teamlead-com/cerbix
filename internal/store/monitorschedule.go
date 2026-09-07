@@ -88,7 +88,7 @@ UPDATE monitor_schedule s
 // `revisionFenceSetSQL` bumps plus `insertMonitorTx` — because both answer the same question about
 // one write: phase A records what the new generation IS, and this records what the OLD one covered
 // and what the new one expects. A source scan holds the pairing
-// (`TestEveryGenerationSyncsTheSchedule`), for the reason phase A's guard exists: the compiler
+// (`TestEveryGenerationCreatingSiteSyncsTheSchedule`), for the reason phase A's guard exists: the compiler
 // cannot see a missing statement, and a gap that spans a revision change is invisible and
 // permanent.
 //
@@ -104,7 +104,7 @@ func syncMonitorScheduleTx(ctx context.Context, tx pgx.Tx, s *Store, projectID s
 		return nil
 	}
 	if _, err := tx.Exec(ctx, closeScheduleSegmentSQL,
-		monitorIDs, s.expectedRunGapWindowsMax(), s.expectedRunRetentionDaysOrDefault()); err != nil {
+		monitorIDs, s.expectedRunGapWindowsMax(), s.ExpectedRunRetentionDays()); err != nil {
 		return fmt.Errorf("store: close schedule segment: %w", err)
 	}
 	// A monitor that stopped participating expects nothing. The predicate is the NEGATION of the

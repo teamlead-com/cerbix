@@ -128,6 +128,180 @@ export function canaryEncode(v: CanaryJSON): string {
   return "{" + keys.map((k) => goQuote(k) + ":" + canaryEncode((v as Record<string, CanaryJSON>)[k])).join(",") + "}";
 }
 
+/**
+ * canaryDecode is `canaryEncode`'s inverse, and it exists so the read path preserves what the write
+ * path was careful to preserve (B9).
+ *
+ * `JSON.parse` routes every number through a JS `Number`, and the form then rendered it with
+ * `String(...)`. So opening a saved canary and changing its NAME rewrote its numbers: a stored
+ * `9007199254740993` came back as `…92`, `1.10` as `1.1`, and `1e3` as `1000`. Those are not display
+ * differences — the form re-encodes what it read, so the canonical document changed, and with it the
+ * semantic hash, the execution digest and the bytes sent to the target. A cosmetic edit re-segmented
+ * the monitor's reliability history and altered a request to someone else's API.
+ *
+ * A number therefore comes back as the `{__rawNumber}` node the writer emits for it, and no JS
+ * `Number` touches an operator's digits in either direction. It parses the CANONICAL document the
+ * server stores — well-formed by construction — and returns null on anything it cannot read, which
+ * `parseCanaryConfig` already treats as "no form to show".
+ */
+export function canaryDecode(text: string): CanaryJSON | null {
+  let i = 0;
+
+  const ws = () => {
+    while (i < text.length && (text[i] === " " || text[i] === "\t" || text[i] === "\n" || text[i] === "\r")) i++;
+  };
+  const fail = () => {
+    throw new SyntaxError("canary: document is not readable at offset " + i);
+  };
+
+  const readString = (): string => {
+    if (text[i] !== '"') fail();
+    i++;
+    let out = "";
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === '"') {
+        i++;
+        return out;
+      }
+      if (ch === "\\") {
+        i++;
+        const esc = text[i++];
+        switch (esc) {
+          case '"': out += '"'; break;
+          case "\\": out += "\\"; break;
+          case "/": out += "/"; break;
+          case "b": out += "\b"; break;
+          case "f": out += "\f"; break;
+          case "n": out += "\n"; break;
+          case "r": out += "\r"; break;
+          case "t": out += "\t"; break;
+          case "u": {
+            const hex = text.slice(i, i + 4);
+            if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail();
+            out += String.fromCharCode(parseInt(hex, 16));
+            i += 4;
+            break;
+          }
+          default: fail();
+        }
+        continue;
+      }
+      out += ch;
+      i++;
+    }
+    fail();
+    return "";
+  };
+
+  // The number is taken as the SLICE the document holds. Its shape is checked against JSON's own
+  // grammar and its digits are never evaluated, which is the whole point.
+  const readNumber = (): CanaryJSON => {
+    const start = i;
+    if (text[i] === "-") i++;
+    while (i < text.length && text[i] >= "0" && text[i] <= "9") i++;
+    if (text[i] === ".") {
+      i++;
+      while (i < text.length && text[i] >= "0" && text[i] <= "9") i++;
+    }
+    if (text[i] === "e" || text[i] === "E") {
+      i++;
+      if (text[i] === "+" || text[i] === "-") i++;
+      while (i < text.length && text[i] >= "0" && text[i] <= "9") i++;
+    }
+    const token = text.slice(start, i);
+    if (!/^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$/.test(token)) fail();
+    return canaryRawNumber(token);
+  };
+
+  const readValue = (): CanaryJSON => {
+    ws();
+    const ch = text[i];
+    if (ch === '"') return readString();
+    if (ch === "{") {
+      i++;
+      const out: { [k: string]: CanaryJSON } = {};
+      ws();
+      if (text[i] === "}") {
+        i++;
+        return out;
+      }
+      for (;;) {
+        ws();
+        const key = readString();
+        ws();
+        if (text[i] !== ":") fail();
+        i++;
+        out[key] = readValue();
+        ws();
+        if (text[i] === ",") {
+          i++;
+          continue;
+        }
+        if (text[i] === "}") {
+          i++;
+          return out;
+        }
+        fail();
+      }
+    }
+    if (ch === "[") {
+      i++;
+      const out: CanaryJSON[] = [];
+      ws();
+      if (text[i] === "]") {
+        i++;
+        return out;
+      }
+      for (;;) {
+        out.push(readValue());
+        ws();
+        if (text[i] === ",") {
+          i++;
+          continue;
+        }
+        if (text[i] === "]") {
+          i++;
+          return out;
+        }
+        fail();
+      }
+    }
+    if (text.startsWith("true", i)) {
+      i += 4;
+      return true;
+    }
+    if (text.startsWith("false", i)) {
+      i += 5;
+      return false;
+    }
+    // `null` has no member in the closed union this form builds, and the canonical document never
+    // emits one — an absent field is absent, not null. Refusing it keeps the union closed rather
+    // than inventing a shape the encoder could not write back.
+    if (ch === "-" || (ch >= "0" && ch <= "9")) return readNumber();
+    fail();
+    return "";
+  };
+
+  try {
+    const v = readValue();
+    ws();
+    if (i !== text.length) return null;
+    return v;
+  } catch {
+    return null;
+  }
+}
+
+/** The display text of a scalar the reader produced: a number is its TOKEN, never a JS `Number`. */
+export function canaryScalarText(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "object" && !Array.isArray(v) && "__rawNumber" in (v as object)) {
+    return (v as { __rawNumber: string }).__rawNumber;
+  }
+  return String(v);
+}
+
 /** The two closed unions the form switches on. A `default` that accepts is an undocumented escape. */
 export const CANARY_SUBMIT_KINDS = ["http_json", "multipart_fixture"] as const;
 export const CANARY_COMPLETION_KINDS = ["sse", "poll_json"] as const;
@@ -889,17 +1063,16 @@ export function buildCanaryConfig(f: CanaryForm): Record<string, string> {
 export function parseCanaryConfig(config: Record<string, string>): CanaryForm | null {
   const raw = config[CANARY_WORKFLOW_KEY];
   if (!raw) return null;
-  let doc: Record<string, any>;
-  try {
-    doc = JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  // The token-preserving reader, not `JSON.parse` (B9): the form re-encodes what it reads, so a
+  // number routed through a JS `Number` on the way IN is a rewritten number on the way OUT.
+  const parsed = canaryDecode(raw);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const doc = parsed as Record<string, any>;
   const f = emptyCanaryForm();
   const headerRows = (arr: any): CanaryHeaderRow[] =>
     Array.isArray(arr)
       ? arr.map((h: any) => ({
-          name: String(h?.name ?? ""),
+          name: canaryScalarText(h?.name),
           value: typeof h?.value === "string" ? h.value : "",
           secretRef: typeof h?.secret_ref === "string" ? h.secret_ref : "",
         }))
@@ -911,7 +1084,7 @@ export function parseCanaryConfig(config: Record<string, string>): CanaryForm | 
           if (v && typeof v === "object" && typeof v.secret_ref === "string") {
             return { key: k, value: "", secretRef: v.secret_ref };
           }
-          return { key: k, value: v === null || v === undefined ? "" : String(v), secretRef: "" };
+          return { key: k, value: canaryScalarText(v), secretRef: "" };
         })
       : [];
 
@@ -924,43 +1097,43 @@ export function parseCanaryConfig(config: Record<string, string>): CanaryForm | 
 
   const s = doc.submit ?? {};
   f.submitKind = CANARY_SUBMIT_KINDS.includes(s.kind) ? s.kind : "http_json";
-  f.submitURL = String(s.url ?? "");
-  f.submitTimeout = String(s.submit_timeout ?? "");
-  f.acceptedStatus = Array.isArray(s.accepted_status) ? s.accepted_status.join(", ") : "";
+  f.submitURL = canaryScalarText(s.url);
+  f.submitTimeout = canaryScalarText(s.submit_timeout);
+  f.acceptedStatus = Array.isArray(s.accepted_status) ? s.accepted_status.map(canaryScalarText).join(", ") : "";
   f.submitHeaders = headerRows(s.headers);
-  f.fixtureRef = String(s.fixture_ref ?? "");
-  f.fileField = String(s.file_field ?? "file");
+  f.fixtureRef = canaryScalarText(s.fixture_ref);
+  f.fileField = s.file_field === undefined || s.file_field === null ? "file" : canaryScalarText(s.file_field);
   f.multipartFields = fieldRows(s.fields);
   f.bodyFields = fieldRows(s.body);
 
   const c = doc.correlate ?? {};
   f.correlateSource = CANARY_CORRELATE_SOURCES.includes(c.source) ? c.source : "response_json";
-  f.correlatePath = String(c.path ?? "");
-  f.correlateHeaderName = String(c.header_name ?? "");
+  f.correlatePath = canaryScalarText(c.path);
+  f.correlateHeaderName = canaryScalarText(c.header_name);
 
   const cp = doc.completion ?? {};
   f.completionKind = CANARY_COMPLETION_KINDS.includes(cp.kind) ? cp.kind : "poll_json";
-  f.completionURL = String(cp.url ?? "");
-  f.completionTimeout = String(cp.timeout ?? "");
+  f.completionURL = canaryScalarText(cp.url);
+  f.completionTimeout = canaryScalarText(cp.timeout);
   f.completionHeaders = headerRows(cp.headers);
-  f.sseSuccessEvent = String(cp.sse?.success_event ?? "");
-  f.sseFailureEvents = Array.isArray(cp.sse?.failure_events) ? cp.sse.failure_events.join(", ") : "";
-  f.sseRequiredFields = Array.isArray(cp.sse?.required_json_fields) ? cp.sse.required_json_fields.join(", ") : "";
-  f.pollInterval = String(cp.poll?.interval ?? "");
-  f.pollMaxAttempts = String(cp.poll?.max_attempts ?? "");
-  f.pollSuccessPath = String(cp.poll?.success_path ?? "");
-  f.pollSuccessValue = String(cp.poll?.success_value ?? "");
-  f.pollFailurePath = String(cp.poll?.failure_path ?? "");
-  f.pollFailureValues = Array.isArray(cp.poll?.failure_values) ? cp.poll.failure_values.join(", ") : "";
+  f.sseSuccessEvent = canaryScalarText(cp.sse?.success_event);
+  f.sseFailureEvents = Array.isArray(cp.sse?.failure_events) ? cp.sse.failure_events.map(canaryScalarText).join(", ") : "";
+  f.sseRequiredFields = Array.isArray(cp.sse?.required_json_fields) ? cp.sse.required_json_fields.map(canaryScalarText).join(", ") : "";
+  f.pollInterval = canaryScalarText(cp.poll?.interval);
+  f.pollMaxAttempts = canaryScalarText(cp.poll?.max_attempts);
+  f.pollSuccessPath = canaryScalarText(cp.poll?.success_path);
+  f.pollSuccessValue = canaryScalarText(cp.poll?.success_value);
+  f.pollFailurePath = canaryScalarText(cp.poll?.failure_path);
+  f.pollFailureValues = Array.isArray(cp.poll?.failure_values) ? cp.poll.failure_values.map(canaryScalarText).join(", ") : "";
 
   const r = doc.result ?? {};
-  f.maxLatency = String(r.max_latency ?? "");
-  f.resultRequiredFields = Array.isArray(r.required_json_fields) ? r.required_json_fields.join(", ") : "";
-  f.lifecyclePath = String(r.lifecycle_path ?? "");
+  f.maxLatency = canaryScalarText(r.max_latency);
+  f.resultRequiredFields = Array.isArray(r.required_json_fields) ? r.required_json_fields.map(canaryScalarText).join(", ") : "";
+  f.lifecyclePath = canaryScalarText(r.lifecycle_path);
 
   const cl = doc.cleanup ?? {};
   f.cleanupKind = CANARY_CLEANUP_KINDS.includes(cl.kind) ? cl.kind : "lifecycle_prefix";
-  f.cleanupPrefix = String(cl.prefix ?? "");
+  f.cleanupPrefix = canaryScalarText(cl.prefix);
   f.cleanupAcknowledged = cl.acknowledged === true;
 
   return f;

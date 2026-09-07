@@ -287,6 +287,17 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 	}
 }
 
+// admittedJob is one job of a poll batch that CROSSED the executor gate: its credential is
+// materialized and it is about to be probed. It exists because A4 split the batch into a gate pass
+// and a probe pass, and the claim post sits between them — so the two passes need one value
+// carrying the delivery (the carrier the claim is decided on), the materialized monitor, and the
+// index of the ack token that retires it.
+type admittedJob struct {
+	delivered    dispatch.DeliveredJob
+	materialized dispatch.Materialized
+	index        int
+}
+
 func (a *Agent) poll(ctx context.Context) {
 	jobs, tokens, protocolVersions, err := a.claim(ctx)
 	if err != nil {
@@ -302,7 +313,8 @@ func (a *Agent) poll(ctx context.Context) {
 	// than being silently deleted with no result — a correctness bug in the prior version,
 	// which acked every claimed token including a skipped one.
 	ackTokens := make([]string, 0, len(jobs))
-	// FR-032 §8.4: the claims for this whole batch go out BEFORE the first probe, in ONE post.
+	// FR-032 §8.4: the claims for this whole batch go out BEFORE the first probe, in ONE post —
+	// and, since A4, AFTER the gate.
 	//
 	// The AMQP worker publishes one claim per job because it takes jobs one at a time; an agent
 	// claims a batch in one poll, so batching the claims is the same rule expressed for the
@@ -310,10 +322,19 @@ func (a *Agent) poll(ctx context.Context) {
 	// §8.4's "one genuinely new per-run round trip" is an upper bound, and the pull transport
 	// comes in under it.
 	//
-	// They are collected in a first pass rather than emitted inside the execution loop, because
-	// the ordering is the whole point: a claim sent after its probe would never exist for a run
-	// that crashed mid-probe, which is the state invariant 6 is about.
-	a.publishClaims(ctx, jobs)
+	// The ordering has TWO edges and the first version of this loop honoured only one. A claim
+	// sent after its probe would never exist for a run that crashed mid-probe, which is the state
+	// invariant 6 is about — so claims precede every probe, and that half was always right. But a
+	// claim sent before the GATE asserts a run started for a job the gate is about to refuse: the
+	// AMQP worker emits a probe_error and no claim for such a job, and this transport emitted
+	// both. One §8.4 rule cannot mean two things depending on which transport a region uses, and
+	// the AMQP ordering is the one the rule states.
+	//
+	// So the batch is gated first, in full, then claimed, then probed. The cost is that the
+	// admitted jobs' materialized credentials are held across the claims POST rather than one at a
+	// time — bounded by `claimBatch`, and the alternative was one POST per job, which is the round
+	// trip §8.4 spends this batching to avoid.
+	admitted := make([]admittedJob, 0, len(jobs))
 	for i, raw := range jobs {
 		var job dispatch.CheckJob
 		if err := json.Unmarshal(raw, &job); err != nil {
@@ -339,11 +360,15 @@ func (a *Agent) poll(ctx context.Context) {
 		if materialized.UsedCredential {
 			a.recordCredentialSuccess()
 		}
+		admitted = append(admitted, admittedJob{delivered: delivered, materialized: materialized, index: i})
+	}
+	a.publishClaims(ctx, admitted)
+	for _, adm := range admitted {
 		// Same stamp as the AMQP worker, through the same owner: the result carries the job it answers.
-		results = append(results, dispatch.StampResult(a.runner.Run(ctx, materialized.Monitor), job))
-		materialized.Cleanup()
-		if i < len(tokens) {
-			ackTokens = append(ackTokens, tokens[i])
+		results = append(results, dispatch.StampResult(a.runner.Run(ctx, adm.materialized.Monitor), adm.delivered.Job))
+		adm.materialized.Cleanup()
+		if adm.index < len(tokens) {
+			ackTokens = append(ackTokens, tokens[adm.index])
 		}
 	}
 	// The tokens ack the processed jobs: they ride along with the results POST so the server
@@ -367,19 +392,18 @@ func (a *Agent) poll(ctx context.Context) {
 // diagnostic whose value is its timing — replaying one an hour later would assert that the run
 // started then.
 //
-// Jobs carrying no window produce no message, and a batch of only such jobs produces no request at
-// all: a region below the ledger carrier pays nothing.
-func (a *Agent) publishClaims(ctx context.Context, jobs []json.RawMessage) {
+// Deliveries below the ledger carrier produce no message, and a batch of only such jobs produces no
+// request at all: a region below the ledger carrier pays nothing. The refusal is decided on the
+// generation the SERVER stamped on the claimed row, which is what the agent already hands to the
+// gate — not on a field in the body (A3).
+//
+// It takes the ADMITTED jobs, so a job the gate refused is never claimed. That is the AMQP
+// worker's ordering, and §8.4 has one rule for both transports (A4).
+func (a *Agent) publishClaims(ctx context.Context, admitted []admittedJob) {
 	at := time.Now().UTC()
-	claims := make([]domain.Heartbeat, 0, len(jobs))
-	for _, raw := range jobs {
-		var job dispatch.CheckJob
-		if err := json.Unmarshal(raw, &job); err != nil {
-			// The execution loop below logs and skips this job; a claim for a body we cannot read
-			// would name nothing, so this pass stays silent about it rather than logging twice.
-			continue
-		}
-		if claim, ok := dispatch.ClaimHeartbeat(job, at); ok {
+	claims := make([]domain.Heartbeat, 0, len(admitted))
+	for _, adm := range admitted {
+		if claim, ok := dispatch.ClaimHeartbeat(adm.delivered, at); ok {
 			claims = append(claims, claim)
 		}
 	}

@@ -299,8 +299,15 @@ CREATE TABLE expected_runs (
 -- missing partition would erase exactly the fact the ledger exists to keep (invariant 16a).
 CREATE TABLE expected_runs_default PARTITION OF expected_runs DEFAULT WITH (fillfactor = 70);
 
-CREATE INDEX expected_runs_job_idx ON expected_runs (monitor_id, job_id)
-    WHERE job_id IS NOT NULL;
+-- DROPPED by migration 00105 (audit-gap package 3, item C3). It was built here "for exactly one
+-- query: a terminal event whose due_at is not trusted", and that query was never written: every
+-- event statement binds (monitor_id, due_at) and hits the primary key. An index over job_id makes
+-- every write that sets it non-HOT, which is against the storage argument §11 rests on. The DDL is
+-- kept in this block, struck through by this comment rather than deleted, because the reasoning
+-- above it — why the identity is the WINDOW and not the job — is what the index used to illustrate.
+-- If a future read needs it, it returns with that read and is justified by it.
+--   CREATE INDEX expected_runs_job_idx ON expected_runs (monitor_id, job_id)
+--       WHERE job_id IS NOT NULL;
 ```
 
 **`fillfactor` is on the PARTITION and never on the partitioned parent**, and the DDL above says so
@@ -3001,9 +3008,12 @@ which is the same rule expressed for the transport that exists there, and it cos
 per POLL rather than per run. §8.4's "one genuinely new per-run round trip" is an upper bound, and
 pull comes in under it.
 
-- **The wire and its one owner.** `TestAClaimIsBuiltOnlyForAJobThatCarriesItsWindow` and
-  `TestTheClaimAddsNoDispatcherMethod` (`internal/dispatch/runclaim_test.go`). A job carrying no
-  window produces no message at all, so a fleet below the ledger carrier pays nothing.
+- **The wire and its one owner.** `TestAClaimIsBuiltOnlyForADeliveryOnTheLedgerCarrier` and
+  `TestTheClaimAddsNoDispatcherMethod` (`internal/dispatch/runclaim_test.go`). A delivery below the
+  ledger carrier produces no message at all, so a fleet below it pays nothing. The refusal is
+  decided on the CARRIER since A3 — it read three payload fields before, which answered a carrier
+  question from a body an executor may not trust for one, and a generation-1 job carrying `DueAt`
+  therefore produced a claim.
 - **The AMQP worker.** `TestTheWorkerClaimsBeforeItProbes`,
   `TestTheWorkerSendsNoClaimForAJobWithNoWindow` and `TestARefusedJobIsNeverClaimed`
   (`internal/worker/runclaim_test.go`). The first asserts the ORDER through the runner itself —

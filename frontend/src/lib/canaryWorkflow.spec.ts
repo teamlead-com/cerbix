@@ -592,3 +592,37 @@ describe("the client encodes the way the server does", () => {
     expect(canaryEncode({ b: "1", a: "2" })).toBe('{"a":"2","b":"1"}');
   });
 });
+
+describe("the read path preserves what the write path preserved (B9)", () => {
+  // The write path takes an operator's exact DIGITS — `canaryRawNumber(raw)`, never `Number(raw)` —
+  // because coercion rewrote `9007199254740993` to `…92` and turned a 400-digit value into `null`.
+  // The read path then routed every number through `JSON.parse` and rendered it with `String(...)`,
+  // which undid all of that on the way back in. The two halves are one property.
+  //
+  // The mutation that must kill this: parse with `JSON.parse` again.
+  it("keeps a number a JS Number cannot hold, through read and re-save", () => {
+    for (const token of ["9007199254740993", "1.10", "1e3", "-0.0", "12345678901234567890123456789"]) {
+      const f = validForm();
+      f.bodyFields = [{ key: "amount", value: token, secretRef: "" }];
+      const written = buildCanaryConfig(f);
+      expect(written[CANARY_WORKFLOW_KEY], `${token} did not reach the document verbatim`).toContain(
+        `"amount":${token}`,
+      );
+
+      const readBack = parseCanaryConfig(written);
+      expect(readBack, `${token} could not be read back`).not.toBeNull();
+      const row = readBack!.bodyFields.find((r) => r.key === "amount");
+      expect(row?.value, `${token} was rewritten on the way back into the form`).toBe(token);
+
+      // And re-saving is a byte no-op, which is the property that matters: the semantic hash, the
+      // execution digest and the request sent to the target are all over these bytes.
+      expect(buildCanaryConfig(readBack!)[CANARY_WORKFLOW_KEY]).toBe(written[CANARY_WORKFLOW_KEY]);
+    }
+  });
+
+  it("refuses a document it cannot read rather than showing a half-built form", () => {
+    for (const broken of ['{"submit":', "{}}", '{"a":01}', '{"a":undefined}', '{"a":null}']) {
+      expect(parseCanaryConfig({ [CANARY_WORKFLOW_KEY]: broken }), broken).toBeNull();
+    }
+  });
+});

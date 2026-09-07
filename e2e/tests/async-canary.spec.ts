@@ -193,5 +193,87 @@ test.describe("async canary", () => {
     // mean a runner is there speaking another version) and not a stage failure (which would mean the
     // job was dispatched after all).
     expect(msg, `heartbeat message: ${msg}`).toBe("dispatch: no_capable_runner");
+
+    // B2, and it is the half a heartbeat row cannot show. The shortage used to be written through
+    // the BARE insert, which touches no status, no confirmation counter, no transition outbox and
+    // no service bucket — so this assertion's neighbour above passed while the monitor stayed UP
+    // forever with nothing probing it: no alert, no incident, no escalation, and a service SLI
+    // still computed over a monitor that had stopped being measured.
+    //
+    // A row exists in both the broken and the fixed version. The STATUS is what separates them, and
+    // this monitor's failure threshold is 1, so one shortage is enough to flip it.
+    await expect
+      .poll(
+        async () => (await apiGet(page, `/api/v1/monitors/${monitor.id}`))?.status,
+        {
+          timeout: 90_000,
+          message:
+            "the monitor never left its initial status: a shortage that records a heartbeat and " +
+            "moves nothing else is exactly the state B2 is about",
+        },
+      )
+      .toBe("down");
+  });
+
+  // B5, on the live stack — `role=all` runs a canary in EVERY non-pull region.
+  //
+  // The announcement named the DEFAULT region and nothing else, while the in-process dispatcher
+  // ignores the region entirely and executes whatever job it is handed. So a canary declared in any
+  // other non-pull region was refused with `no_capable_runner` on every tick, forever, while an
+  // ordinary monitor of that same region was probed normally by the same process.
+  //
+  // The region below is named nowhere: not in `pull.regions`, not in any local list. What must NOT
+  // appear is the shortage reason the test above asserts — this monitor is dispatched, so its
+  // heartbeat carries a STAGE, which is the same shape the first test in this file asserts for
+  // `core`.
+  test("a canary in an unnamed non-pull region is dispatched, not refused", async ({ page }) => {
+    await page.goto("/");
+    const { projectID } = await ensureE2EWorkspace(page);
+    const target = "https://canary-region.internal.invalid";
+    const workflow = {
+      kind: "async_transaction_v1",
+      submit: {
+        kind: "http_json", method: "POST", url: `${target}/files/upload`,
+        submit_timeout: 5, accepted_status: [202], body: { tenant: "e2e" },
+      },
+      correlate: { source: "response_json", path: "task_id" },
+      completion: {
+        kind: "poll_json", url: `${target}/tasks/{{ correlation_id }}`, timeout: 20,
+        poll: { interval: 5, max_attempts: 4, success_path: "status", success_value: "completed" },
+      },
+      result: { max_latency: 20, required_json_fields: ["s3_path"], lifecycle_path: "s3_path" },
+      cleanup: { kind: "none", acknowledged: true },
+    };
+    const created = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors`, {
+      name: "e2e-canary-other-region",
+      type: "async_canary",
+      region: "geo-frankfurt",
+      interval_seconds: 30,
+      timeout_seconds: 30,
+      failure_threshold: 1,
+      config: { workflow: JSON.stringify(workflow) },
+    });
+    expect(created.status(), await created.text()).toBe(201);
+    const monitor = await created.json();
+
+    let msg = "";
+    await expect
+      .poll(
+        async () => {
+          const beats = await apiGet(page, `/api/v1/monitors/${monitor.id}/heartbeats?limit=5`);
+          msg = ((beats as any[])[0]?.msg ?? "") as string;
+          return msg !== "";
+        },
+        { timeout: 90_000, message: "the canary produced no heartbeat in an unnamed non-pull region" },
+      )
+      .toBe(true);
+
+    expect(
+      msg,
+      `heartbeat message: ${msg} — this region is executed by THIS process, exactly as the ` +
+        `default one is, so a shortage here means the announcement is enumerating regions instead ` +
+        `of deriving them from the dispatcher`,
+    ).not.toContain("no_capable_runner");
+    expect(msg).toMatch(/^(submit|correlate|await_result|assert_result|cleanup_validation):/);
   });
 });

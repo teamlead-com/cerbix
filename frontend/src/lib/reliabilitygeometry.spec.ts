@@ -209,6 +209,40 @@ describe("storageVerdict — the second axis of §11.2", () => {
     expect(storageVerdict({ from: "x", to: "y", buckets: 0 }, [], DAY).complete).toBe(true);
     expect(storageVerdict(seg(5, 5, 0), [], DAY).extentMinutes).toBe(0);
   });
+
+  // E2 — a segment whose records STOP EARLY says so.
+  //
+  // The function measured a tail and had no shape for it: everything that was not interior fell to
+  // `prefix`, so a segment whose records end days before its extent was described to an operator as
+  // one whose records begin days after its start. Those two ends are precisely what the verdict
+  // claims to distinguish, and it distinguished one of them.
+  //
+  // The mutation that must kill this: collapse `suffix` back into `prefix`.
+  it("distinguishes records that stop early from records that begin late", () => {
+    // Points cover the first two days of a four-day segment: the absence is at the END.
+    const suffix = storageVerdict(seg(0, 4, 2880), [pt(0, { good: 1440 }), pt(1, { good: 1440 })], DAY);
+    expect(suffix.shape).toBe("suffix");
+    // The mirror image: points cover the LAST two days, so the absence is at the start.
+    const prefix = storageVerdict(seg(0, 4, 2880), [pt(2, { good: 1440 }), pt(3, { good: 1440 })], DAY);
+    expect(prefix.shape).toBe("prefix");
+    // And a hole in the middle still outranks both, because an interior gap is the stronger claim.
+    const interior = storageVerdict(seg(0, 4, 2880), [pt(0, { good: 1440 }), pt(3, { good: 1440 })], DAY);
+    expect(interior.shape).toBe("interior");
+  });
+
+  // E5 — an ABSENT series is not an empty segment.
+  //
+  // With no points the function answered `prefix`, so the view printed "records begin later in this
+  // segment" — a storage verdict computed from no data — directly above "Loading this segment's
+  // timeline…". Two sentences about one segment, and the confident one was the one with no
+  // evidence behind it.
+  //
+  // The mutation that must kill this: answer `prefix` for an empty series again.
+  it("says nothing about WHERE records are missing when it has no series", () => {
+    const v = storageVerdict(seg(0, 4, 100), [], DAY);
+    expect(v.complete).toBe(false);
+    expect(v.shape).toBe("unknown");
+  });
 });
 
 // The clipped-cell case, which the component's own tests exposed: a window that starts mid-step

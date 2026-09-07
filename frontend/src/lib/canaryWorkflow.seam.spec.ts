@@ -6,6 +6,7 @@ import {
   buildCanaryConfig,
   canaryRefusals,
   emptyCanaryForm,
+  parseCanaryConfig,
   CANARY_CORRELATION_PLACEHOLDER,
   type CanaryForm,
 } from "./canaryWorkflow";
@@ -228,5 +229,31 @@ describe("the form's valid documents are valid to the server", () => {
       "the form now produces something different from the committed Go seam fixture — " +
         "regenerate with CERBIX_UPDATE_SEAM=1 npm test and commit the diff",
     ).toBe(want);
+  });
+
+  // B9 — reading a saved canary back and re-saving it changes NOTHING.
+  //
+  // The read path parsed with `JSON.parse` and rendered every scalar with `String(...)`, while the
+  // write path is careful to preserve an operator's exact digits. So opening a saved canary and
+  // editing its NAME re-encoded its numbers: the canonical document changed, and with it the
+  // semantic hash, the execution digest and the bytes sent to the target. A cosmetic edit
+  // re-segmented the monitor's reliability history and altered a request to someone else's API.
+  //
+  // The corpus is this file's own variant set — every union variant the form can build — rather
+  // than one happy vector, which is the lesson this seam was created by. The assertion is on the
+  // BYTES, because that is what the hash is over.
+  it("re-saves every seam variant byte-identically after reading it back", () => {
+    for (const { name, form } of variants()) {
+      const written = buildCanaryConfig(form);
+      const readBack = parseCanaryConfig(written);
+      expect(readBack, `variant "${name}" could not be read back at all`).not.toBeNull();
+      const rewritten = buildCanaryConfig(readBack!);
+      expect(
+        rewritten,
+        `variant "${name}" changed on a read/re-save round trip — an unrelated edit would move the ` +
+          `semantic hash, re-segment the monitor's reliability history and change the bytes sent to ` +
+          `the target`,
+      ).toEqual(written);
+    }
   });
 });

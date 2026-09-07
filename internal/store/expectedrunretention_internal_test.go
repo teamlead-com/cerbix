@@ -504,3 +504,68 @@ func encodeBadVersionCursorForTest(at time.Time) string {
 func encodeBadInstantCursorForTest() string {
 	return base64.RawURLEncoding.EncodeToString([]byte(expectedRunCursorVersion + ":not-a-time"))
 }
+
+// C6 — a window that is LISTED is a window the ledger can answer for.
+//
+// The retained floor was computed from the oldest DATED partition alone, on the reasoning that the
+// default partition "has no lower bound, so a row sitting in it says nothing about how far back the
+// table can answer". True of its definition, false of its contents: an instance whose partition
+// maintenance has not run for longer than its lead materializes its missed windows into the default
+// on restart, and those rows are stored and returned by the read API while `ledger_from` — jumped
+// forward to the oldest dated partition — declared their whole span unanswerable. One screen, two
+// answers, and the wrong one was the one that decides whether a verdict is emitted at all.
+//
+// The mutation that must kill this: consult the dated partitions only.
+func TestARowInTheDefaultPartitionIsInsideTheAnswerableRange(t *testing.T) {
+	st, ctx := ledgerStore(t)
+	proj := seedLedgerProject(t, st, ctx, "defaultfloor")
+	m := ledgerMonitor(t, st, ctx, proj, "stranded", 60)
+
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	// A day no dated partition covers: this is exactly where a restart's catch-up gap windows land.
+	stranded := today.AddDate(0, 0, -3).Add(9 * time.Hour)
+	if _, err := st.pool.Exec(ctx,
+		`INSERT INTO expected_runs (project_id, monitor_id, due_at, execution_revision, region, interval_seconds)
+		 VALUES ($1, $2, $3, $4, $5, 60)`,
+		proj, m.ID, stranded, m.ExecutionRevision, m.Region); err != nil {
+		t.Fatalf("plant a stranded window: %v", err)
+	}
+	var landedIn string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT tableoid::regclass::text FROM expected_runs WHERE monitor_id = $1 AND due_at = $2`,
+		m.ID, stranded).Scan(&landedIn); err != nil {
+		t.Fatalf("read the row back: %v", err)
+	}
+	if landedIn != "expected_runs_default" {
+		t.Fatalf("the fixture landed in %s, not the default partition — this case no longer reaches "+
+			"the state it is about", landedIn)
+	}
+
+	// The floor alone, so the assertion is about THIS input and not about whichever of
+	// `LedgerFrom`'s four inputs happens to dominate in the fixture.
+	floor, err := st.expectedRunRetainedFloor(ctx)
+	if err != nil {
+		t.Fatalf("retained floor: %v", err)
+	}
+	if floor == nil {
+		t.Fatal("the table holds rows and reports no floor at all")
+	}
+	if floor.After(stranded) {
+		t.Errorf("the retained floor is %s, later than a window at %s that is still stored and still "+
+			"listed: the read API returns rows for a span the ledger says it cannot answer for",
+			floor, stranded)
+	}
+
+	// And the row really is listed, which is the half that makes the contradiction visible rather
+	// than theoretical.
+	page, err := st.ListExpectedRuns(ctx, ExpectedRunQuery{
+		ProjectID: proj, MonitorID: m.ID,
+		From: stranded.Add(-time.Hour), To: stranded.Add(time.Hour), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(page.Windows) != 1 {
+		t.Fatalf("the read API returned %d windows for the stranded span, want 1", len(page.Windows))
+	}
+}

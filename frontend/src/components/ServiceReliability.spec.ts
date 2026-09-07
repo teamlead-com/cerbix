@@ -26,8 +26,9 @@ function mountWith(
   extra?: {
     tail?: SeriesFixture;
     // per-segment fixtures keyed by the segment's exact `from` ([221] P1-2); "never" hangs
-    // that one request forever ([228] P1-2's deferred-one case)
-    segmentSeries?: Record<string, SeriesFixture | "never">;
+    // that one request forever ([228] P1-2's deferred-one case), "fails" answers it with an error
+    // so E5's second absent-series shape — a request that came back empty-handed — is reachable
+    segmentSeries?: Record<string, SeriesFixture | "never" | "fails">;
     reportFails?: boolean;
     healthFails?: boolean;
     // REJECTED promises, not {error} payloads — openapi-fetch rethrows network failures
@@ -57,6 +58,7 @@ function mountWith(
       if (extra?.segmentSeries && from && from in extra.segmentSeries) {
         const fix = extra.segmentSeries[from];
         if (fix === "never") return new Promise(() => {});
+        if (fix === "fails") return Promise.resolve({ error: { error: "boom" } });
         return Promise.resolve({ data: fix });
       }
       if (extra?.seriesRejects) return Promise.reject(new TypeError("fetch failed"));
@@ -711,6 +713,37 @@ describe("ServiceReliability honesty states", () => {
     expect(readout.text()).not.toContain("bad");
   });
 
+  // E9 — a marked SUB-SECOND outage states its real duration.
+  //
+  // The readout rounded to whole seconds, so a 400-millisecond outage read "down 0s" beneath the
+  // sentence "marked, too small to draw at this size". Sub-second is not an unusual case for this
+  // marker — it is the same population: what is too small to draw is what is short. The reader was
+  // told a state exists and then shown a duration saying it does not.
+  //
+  // The mutation that must kill this: round to whole seconds again.
+  it("gives a marked sub-second outage the precision its own label promises", async () => {
+    const wrapper = mountWith(okReport, undefined, {
+      from: "a", to: "b", step: "day",
+      points: [{
+        start: "2026-08-15T00:00:00Z", epoch_id: "e1", revision_id: "r1", provisional: false, buckets: 1440,
+        // 400 ms of down inside a day of unknown: below the floor, and below a second.
+        durations: { ...goodDurations, GoodUs: 0, BadUs: 400_000, UnknownUs: 86_399_600_000, HealthyUs: 0 },
+      }],
+    });
+    await flushPromises();
+    const timeline = wrapper.find('[data-testid="svc-timeline"]');
+    const at = Date.parse("2026-08-15T00:00:00Z");
+    const hit = timeline.find(`rect[data-testid="strip-cell-hit"][data-cell-start="${at}"]`);
+    await hit.trigger("focus");
+    const readout = wrapper.find('[data-testid="svc-cell-belowfloor"]');
+    expect(readout.exists(), "the sub-second outage was not marked at all").toBe(true);
+    expect(
+      readout.text(),
+      "a marked outage reads as zero under a label promising its exact duration",
+    ).not.toContain("down 0s");
+    expect(readout.text()).toContain("400ms");
+  });
+
   it("names the marked state in a SEGMENT LANE too, at its own 14px height (reviewer P1 [186])", async () => {
     // `belowFloor` is not a property of a cell: the floor is fixed in pixels and the cap is a share
     // of the strip's HEIGHT, so the same cell can be fully funded at 30px and marked at 14px. The
@@ -861,6 +894,141 @@ describe("ServiceReliability honesty states", () => {
     expect(segments[1].find('[data-testid="svc-segment-availability"]').text()).toContain("99.5%");
     expect(segments[1].find('[data-testid="svc-segment-storage"]').text()).toContain("contiguous");
     expect(segments[1].find('[data-testid="svc-segment-storage-note"]').exists()).toBe(false);
+  });
+
+  // E2 — a segment whose records STOP EARLY says so, at the surface an operator reads.
+  //
+  // Everything that was not an interior hole fell to the prefix sentence, so this segment — one
+  // stored day at its START and three empty days after it — told the operator its records "begin
+  // later". They begin on time and stop early, which is the opposite fact and the opposite thing to
+  // go looking for.
+  //
+  // The mutation that must kill this: map `suffix` to the prefix sentence.
+  it("says records STOP EARLY when the absence is at the segment's end", async () => {
+    const wrapper = mountWith(
+      {
+        ...okReport,
+        availability: undefined,
+        objective: undefined,
+        budget: undefined,
+        aggregate_withheld: "spans_definition_revisions",
+        segments: [
+          { revision_id: "r1", revision: 1, epoch_id: "e1", epoch_seq: 1, from: "2026-08-01T00:00:00Z", to: "2026-08-05T00:00:00Z", buckets: 1440, durations: goodDurations, availability: 100, coverage: 1, declared_reconstruction: false },
+        ],
+      },
+      undefined,
+      {
+        from: "a", to: "b", step: "day",
+        points: [
+          { start: "2026-08-01T00:00:00Z", epoch_id: "e1", revision_id: "r1", provisional: false, buckets: 1440, durations: goodDurations },
+        ],
+      },
+    );
+    await flushPromises();
+    const note = wrapper.findAll('[data-testid="svc-segment"]')[0].find('[data-testid="svc-segment-storage-note"]').text();
+    expect(note).toContain("records stop before the end of this segment");
+    expect(note).not.toContain("begin later");
+  });
+
+  // E5 — while the series has not arrived, NO storage sentence is printed.
+  //
+  // The verdict was computed from an empty array and rendered the prefix sentence, so the view said
+  // "records begin later in this segment" directly above "Loading this segment's timeline…" — a
+  // confident claim about where the records are, made before any had been read.
+  //
+  // The mutation that must kill this: answer a shape for an empty series again.
+  it("prints no storage sentence while a segment's series is still loading", async () => {
+    const wrapper = mountWith(
+      {
+        ...okReport,
+        availability: undefined,
+        objective: undefined,
+        budget: undefined,
+        aggregate_withheld: "spans_definition_revisions",
+        segments: [
+          { revision_id: "r1", revision: 1, epoch_id: "e1", epoch_seq: 1, from: "2026-08-01T00:00:00Z", to: "2026-08-05T00:00:00Z", buckets: 1440, durations: goodDurations, availability: 100, coverage: 1, declared_reconstruction: false },
+        ],
+      },
+      undefined,
+      // No points at all: the request has not answered yet.
+      { from: "a", to: "b", step: "day", points: [] },
+    );
+    await flushPromises();
+    const seg0 = wrapper.findAll('[data-testid="svc-segment"]')[0];
+    expect(
+      seg0.find('[data-testid="svc-segment-storage-note"]').exists(),
+      "a storage verdict was printed from a series that has not been read",
+    ).toBe(false);
+    // The incompleteness itself is still stated — the counts are the payload's, not the series' —
+    // so the operator is not told the segment is fine either.
+    expect(seg0.find('[data-testid="svc-segment-storage"]').text()).toContain("incomplete");
+  });
+
+  // E5's two ABSENT-SERIES shapes, each asserted where it can actually fail (reviewer P3, party
+  // [366]).
+  //
+  // The test named for E5 feeds an already-answered EMPTY series, which reaches `unknown` by a
+  // different route than a request that has not returned or has failed. Both of those are the shapes
+  // the rule is about, and neither was asserted.
+  //
+  // Two properties of the fixture are load-bearing, and the first version of these tests had
+  // NEITHER, so both assertions were vacuous — they could not fail however the rule was broken:
+  //   * TWO segments in ONE epoch, because a lone segment inherits the global series and the
+  //     per-segment request is never made;
+  //   * an INCOMPLETE segment (`buckets` below the extent in minutes), because a complete one
+  //     prints no storage sentence whatever its shape, and the assertion would be about
+  //     completeness rather than about E5.
+  const absentSeriesReport = {
+    ...okReport,
+    availability: undefined,
+    objective: undefined,
+    budget: undefined,
+    aggregate_withheld: "spans_definition_revisions",
+    segments: [
+      // 12 hours of extent, 100 minutes stored: incomplete, so a shape WOULD be printed.
+      { revision_id: "r1", revision: 1, epoch_id: "e1", epoch_seq: 1, from: "2026-08-01T00:00:00Z", to: "2026-08-01T12:00:00Z", buckets: 100, durations: goodDurations, availability: 100, coverage: 1, declared_reconstruction: false },
+      { revision_id: "r1", revision: 1, epoch_id: "e1", epoch_seq: 1, from: "2026-08-01T12:00:00Z", to: "2026-08-02T00:00:00Z", buckets: 100, durations: goodDurations, availability: 100, coverage: 1, declared_reconstruction: false },
+    ],
+  };
+  const answeredSecondSegment = {
+    from: "a", to: "b", step: "day",
+    points: [{ start: "2026-08-01T12:00:00Z", epoch_id: "e1", revision_id: "r1", provisional: false, buckets: 100, durations: goodDurations }],
+  };
+
+  it("prints no storage sentence for a segment whose series has not answered", async () => {
+    const wrapper = mountWith(absentSeriesReport, undefined, undefined, {
+      segmentSeries: {
+        "2026-08-01T00:00:00Z": "never",
+        "2026-08-01T12:00:00Z": answeredSecondSegment,
+      },
+    });
+    await flushPromises();
+    const seg0 = wrapper.findAll('[data-testid="svc-segment"]')[0];
+    // The fixture is the shape it claims to be, or the assertion below is about nothing.
+    expect(seg0.find('[data-testid="svc-segment-strip-pending"]').exists(), "not the pending case").toBe(true);
+    expect(seg0.find('[data-testid="svc-segment-storage"]').text(), "not an incomplete segment").toContain("incomplete");
+    expect(
+      seg0.find('[data-testid="svc-segment-storage-note"]').exists(),
+      "a storage verdict was printed for a segment whose series has not answered",
+    ).toBe(false);
+  });
+
+  it("prints no storage sentence when a segment's series request failed", async () => {
+    const wrapper = mountWith(absentSeriesReport, undefined, undefined, {
+      segmentSeries: {
+        "2026-08-01T00:00:00Z": "fails",
+        "2026-08-01T12:00:00Z": answeredSecondSegment,
+      },
+    });
+    await flushPromises();
+    const seg0 = wrapper.findAll('[data-testid="svc-segment"]')[0];
+    // The failure itself is stated — silence would be the worse answer.
+    expect(seg0.find('[data-testid="svc-segment-series-error"]').exists(), "not the failed case").toBe(true);
+    expect(seg0.find('[data-testid="svc-segment-storage"]').text(), "not an incomplete segment").toContain("incomplete");
+    expect(
+      seg0.find('[data-testid="svc-segment-storage-note"]').exists(),
+      "a storage verdict was printed beside a transport failure, from records that were never read",
+    ).toBe(false);
   });
 
   it("collapses colliding boundary marks into ONE mark carrying its count, anchored at the earliest", async () => {

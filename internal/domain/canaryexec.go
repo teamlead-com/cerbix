@@ -92,6 +92,27 @@ func ValidateCanaryCorrelationID(raw string) error {
 			return fmt.Errorf("correlation id contains a control character")
 		}
 	}
+	// B8. The id must be ONE SAFE PATH SEGMENT, and one that is not is REJECTED rather than
+	// escaped.
+	//
+	// It is substituted into the completion URL with `url.PathEscape`, which is exactly right for
+	// the characters it escapes and does nothing at all to a dot segment: `PathEscape("..")` is
+	// `".."`. A target answering `..` therefore points the completion request one segment up, at a
+	// URL the author never wrote and the write-time rules never saw — and a proxy that normalises
+	// the path is enough to make it happen even where Go itself does not. A separator is the same
+	// hazard by another route: `%2F` is safe until something on the way decodes it, and then the id
+	// has grown a segment boundary.
+	//
+	// This is the rule the write-time placeholder check already applies to the segment the id will
+	// occupy — the placeholder must stand alone between two slashes, never glued to other text and
+	// never inside the host — stated once more for the value that lands there. Escaping harder
+	// would not close it, because the hazard is what the segment MEANS and not how it is spelled.
+	if raw == "." || raw == ".." {
+		return fmt.Errorf("correlation id is a relative path segment")
+	}
+	if strings.ContainsAny(raw, `/\`) {
+		return fmt.Errorf("correlation id contains a path separator")
+	}
 	return nil
 }
 

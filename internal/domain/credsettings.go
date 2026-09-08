@@ -301,6 +301,33 @@ func CredentialedType(typ MonitorType) bool {
 	return ok
 }
 
+// RequiresExecutionEnvelope reports whether a monitor's dispatch must carry a credential envelope.
+//
+// It exists because `CredentialedType` answers a NARROWER question and was being used for this one.
+// That predicate routes by the static FR-020 SCHEMA: a type is credentialed when it has a schema,
+// full stop. An `async_canary` has none — its bindings are declared in the workflow document, not in
+// a schema — so the scheduler's nomination gate read false for a canary that had declared a binding,
+// sent it down the plain branch, and stamped it with a generation that carries no envelope. The
+// executor then refused it at the gate, correctly, for a field the producer had never been asked to
+// put there: a canary with a binding could not run at all (reviewer, party [390]).
+//
+// `CredentialedType` is deliberately NOT widened. Widening it would make a schema router answer a
+// dispatch question, and every other caller — validation, normalization, the expected-field set —
+// would inherit an answer about a type that has no schema to route by.
+//
+// The union rather than a re-derivation, and the reason is measured rather than assumed: defining
+// this as "expects at least one envelope field" reads FALSE for `promql`, which has a schema and no
+// required field, and would have silently stopped nominating it. The schema half stays exactly as it
+// was; the canary half is DERIVED from `canaryExpectedFields`, the same function that decides which
+// canary fields the envelope must contain, so the nomination and the envelope's contents cannot
+// disagree about whether a binding was declared.
+func RequiresExecutionEnvelope(m Monitor) bool {
+	if CredentialedType(m.Type) {
+		return true
+	}
+	return len(canaryExpectedFields(m.Type, m.Config)) > 0
+}
+
 // resolveVariant picks the effective variant for a type + settings. It is the single
 // place the conditional schema is decided, so validation, normalization, the expected
 // field set and the binding keys can never disagree about which shape applies.
@@ -514,6 +541,23 @@ func CanonicalSettingValue(typ MonitorType, settings map[string]string, key stri
 		return settings[key], nil
 	}
 	if _, ok := ScenarioBindingFromRefKey(key); ok {
+		return settings[key], nil
+	}
+	// The CANARY's keys are the same case and had no arm, which is the third instance of one
+	// substitution: `ExecutionBindingKeys` names `workflow`, `canary_run` and every
+	// `canary_secret_*_ref` for an `async_canary`, and this function was then asked for each of
+	// their values and answered with the schema resolver — which refuses a type that has no
+	// schema. So the digest could not be computed, `Seal` failed, and materialization returned
+	// `decrypt_failed`: a canary declaring a binding could not be sealed at all, one level below
+	// the nomination gate this iteration opened with (iter-0180).
+	//
+	// Like the scenario arms above, the value is what the operator wrote, byte for byte: these keys
+	// have no schema field and no canonical default, and the digest must bind exactly what was
+	// stored.
+	if key == CanaryWorkflowKey || key == CanaryRunKey {
+		return settings[key], nil
+	}
+	if _, ok := CanaryBindingFromRefKey(key); ok {
 		return settings[key], nil
 	}
 	variant, err := resolveVariant(typ, settings)

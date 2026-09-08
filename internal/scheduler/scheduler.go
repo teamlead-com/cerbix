@@ -1745,7 +1745,11 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 				if _, held := deferredDispatch[m.ID]; held {
 					continue
 				}
-				if s.credentialEnvelopes && domain.CredentialedType(m.Type) {
+				// The nomination asks whether this monitor's dispatch needs an envelope, which is
+				// not the same question as whether its TYPE has a credential schema — an
+				// `async_canary` has no schema and can still declare bindings (reviewer, party
+				// [390]).
+				if s.credentialEnvelopes && domain.RequiresExecutionEnvelope(m) {
 					credentialByRegion[m.Region] = append(credentialByRegion[m.Region], m.ID)
 					continue
 				}

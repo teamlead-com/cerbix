@@ -8138,3 +8138,52 @@ traceability ROW was added; two citations were repaired because the guard demand
 
 **What this decision does not do.** It authorizes no tag, no push and no release, and it does not
 close `iter-0179`: an audit result is not closure authority, which `D-0246` recorded the hard way.
+
+## D-0248 — the dispatch question is asked of a monitor, not of its type
+
+**2026-09-08, iter-0180.** A predicate that routes by SCHEMA was being used to decide whether a
+DISPATCH needs a credential envelope, and the two questions have different answers for exactly one
+type.
+
+**Context.** `domain.CredentialedType(typ)` reports whether a monitor TYPE carries a static FR-020
+credential schema. The scheduler nominated monitors for credential materialization with it. An
+`async_canary` has no such schema — its bindings are declared inside the workflow document — so a
+canary that had declared a binding read false, took the plain branch, and was stamped with a
+generation carrying no envelope. `ExpectedCredentialFields` named the binding's field anyway, so the
+executor gate refused the job for a field the producer had never been asked to supply. **A canary
+with a declared binding could not run at all**, and it shipped in `v0.1.9`.
+
+**Decision.** A new monitor-level predicate, `domain.RequiresExecutionEnvelope(m)`, answers the
+dispatch question; the nomination asks it. `CredentialedType` is NOT widened: it routes by schema,
+and validation, normalization and the expected-field set all depend on that meaning.
+
+**And it is a UNION rather than a re-derivation, on a measurement.** Defining it as "expects at least
+one envelope field" reads false for `promql`, which has a schema and no required field — that
+definition would have stopped nominating a type that works today. The schema half is therefore
+unchanged, and only the canary half is added, derived from `canaryExpectedFields` so the nomination
+and the envelope's contents cannot disagree about whether a binding was declared.
+
+**The same substitution was made twice.** Every product call site of `CredentialedType` was then read
+against what it decides: fifteen are schema decisions, two were already unions, and one — the test
+path's `MaterializeTestExecutionConfig`, which returns an envelope-less generation-1 job for any type
+the predicate reports false for — carried the defect in the other direction. The API's
+test-connection surface had the matching fail-closed rule for a scenario binding and none for a
+canary one, so Test Connection on a canary with a binding met the executor's "missing field" instead
+of "save the monitor before testing it". That arm now exists, worded like its twin.
+
+**A THIRD instance, found by building the test the reviewer demanded.** He refused a
+nomination-only regression and held the release; the seam test written to satisfy him showed that a
+canary binding could not be SEALED at all. `ExecutionBindingKeys` names the canary's keys and
+`CanonicalSettingValue` — asked for each of their values by the digest builder — had arms for the
+synthetic scenario and none for the canary, so every key fell through to the schema resolver and
+`Seal` failed. The repair would otherwise have shipped with the nomination fixed and the envelope
+still unbuildable. The canary arms are added, mirroring the scenario ones.
+
+**What this does not claim.** The chain is proved through materialization and the executor gate, not
+through a live stack. The credential capability resolves after the loop
+that nominates, so the carrier policy is empty at that point and asserting it would describe the
+harness. The NOMINATION test asserts nomination and nothing more; the publication half is covered
+separately by `TestACanaryBindingIsPublishedOnTheGenerationItsAgentAnnounced`, which derives
+generation 3 from a live agent's announcement and asserts the enqueue. What remains open is
+recorded in `iter-0180` §4c: no single process holds the scheduler, the store and the prober at
+once, and the live cases that exist today do not demonstrate a successful canary run.

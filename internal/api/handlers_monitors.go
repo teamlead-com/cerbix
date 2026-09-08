@@ -289,6 +289,19 @@ func (h *Handler) testMonitor(w http.ResponseWriter, r *http.Request) {
 			"save the monitor before testing it: the secret binding "+binding+" is resolved from the project inventory at dispatch, and this path has no envelope to carry it")
 		return
 	}
+	// A CANARY binding is the same contract and had no such rule, which is the sibling of the
+	// nomination defect this iteration repairs (iter-0180, D-0248): `MaterializeTestExecutionConfig`
+	// returns a generation-1 job for any type `CredentialedType` reports false for, and that is
+	// false for `async_canary`. So a canary declaring a binding reached the tester with no envelope
+	// to resolve it — refused far away at the executor gate, with a message about a missing field
+	// rather than the one an operator can act on. Same fail-closed answer as the scenario half,
+	// given here where the reason is known.
+	if refs := domain.CanarySecretRefKeys(m.Config); len(refs) > 0 {
+		binding, _ := domain.CanaryBindingFromRefKey(refs[0])
+		writeError(w, http.StatusBadRequest,
+			"save the monitor before testing it: the workflow binding "+binding+" is resolved from the project inventory at dispatch, and this path has no envelope to carry it")
+		return
+	}
 	hb, err := h.tester.RunTest(r.Context(), m)
 	if err != nil {
 		// No worker in the target region (or the RPC failed): the probe result is

@@ -6,6 +6,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [v0.1.9.1] - 2026-09-08
+
+One defect, found by an independent reviewer about an hour after `v0.1.9` was published, and
+repaired under its own iteration rather than left for the next one.
+
+### 🩹 Fixed
+
+- **An `async_canary` that declared a credential binding could not run at all.** Every dispatch was
+  refused at the executor gate and the monitor reported nothing else.
+
+  The scheduler nominated monitors for credential materialization by asking whether the monitor's
+  TYPE carries a static credential schema. An `async_canary` has none — its bindings are declared
+  inside the workflow document — so a canary with a declared binding took the plain branch and was
+  stamped with a generation that carries no envelope, while the expected-field set named the
+  binding's field anyway. The executor then refused the job, correctly, for a field the producer had
+  never been asked to supply. **If you declared a binding on a canary in `v0.1.9`, it never ran**;
+  after this release it runs, with no change to the monitor.
+
+  The predicate the nomination asks is now a monitor-level one rather than a type-level one. The
+  schema half of it is unchanged on purpose: the tempting definition — "expects at least one envelope
+  field" — reads false for `promql`, which has a schema and no required field, and would have
+  repaired one type by breaking another.
+
+- **And Test Connection on such a canary now says what to do instead of failing far away.** The same
+  substitution was made on the test path: it builds a generation-1 job with no envelope for any type
+  whose credential requirement is decided by its schema, and a canary's is not. The pre-save refusal
+  that a SYNTHETIC scenario binding has had since FR-028 — "save the monitor before testing it" —
+  had no canary twin, so pressing Test on a canary with a binding produced a message about a missing
+  envelope field from the far side of the dispatch. It now names the binding and the way forward,
+  before any probe is attempted.
+
+- **And the envelope could not be BUILT for such a canary either**, one level below the nomination.
+  The digest that binds a credential to the exact execution asks for the canonical value of every
+  binding key; for a canary those keys are the workflow document, the run key and each reference,
+  and the value lookup had arms for a synthetic scenario and none for a canary — so it fell through
+  to the credential-schema resolver, which refuses a type that has no schema. Sealing failed and the
+  monitor was refused with a reason naming decryption, which points an operator at a key problem
+  that does not exist. **This was found by writing the store/materializer/gate regression an independent
+  reviewer refused to release without**; the nomination repair alone would have shipped the feature still
+  broken.
+
+- **No migration, no configuration change, no API change.** A canary that declares no binding, and
+  every other monitor type, dispatches exactly as it did. The new refusal is a 400 on a path that
+  previously reached a prober and failed there.
+
+### Why no test caught it
+
+Every test passed on the defective tree, including the full `-race` suite, the browser suite and the
+geo topology suite. None of them dispatches a canary that declares a binding: the canary suites use
+bindingless workflows and the credential suites use schema types. It is stated here rather than
+quietly fixed because the gap is the useful part — a green gate is only evidence about what it
+actually covers.
+
+<sub>iter-0180, `D-0248` · full `-race` 33 packages exit 0 (`internal/store` 763.4 s) · `make dev-test`
+70 passed / 1 skipped on an image rebuilt from this candidate tree · `make docs-check` OK · THREE defects,
+one substitution: a type-level predicate answering a monitor-level question, in the nomination, in the pre-save test refusal and in the canonical value lookup the digest depends on · the third was found only by `TestACanaryBindingIsSealedIntoAGenerationThreeEnvelope`, which runs against the real materializer and the real executor gate and proves generation 3 + `EnvelopeV2` + the credential actually used — a store/materializer/gate seam, not an end-to-end one: it neither publishes nor probes · four regressions, each with its killing mutation — the nomination loop, and
+the pre-save refusal whose canary arm was missing · the sibling was found by reading every product
+call site of the type-level predicate against what it decides: eighteen sites, fifteen correct, two
+already unions, one carrying the same defect · the nomination regression with its killing
+mutation — restoring the old predicate fails the declared-binding case by name and leaves both
+negative cases passing · what is NOT covered is recorded in `iter-0180` §4c and not softened: no single process holds the
+scheduler, the store and the prober at once, and the live cases that exist today do not demonstrate a successful canary run</sub>
+
+---
+
 ## [v0.1.9] - 2026-09-07
 
 Everything since `v0.1.8`, in four parts and one set of fixes: the **typed external canary** and

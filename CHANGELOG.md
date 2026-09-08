@@ -6,10 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
-## [v0.1.9.1] - 2026-09-08
+## [v0.2.0] - 2026-09-08
 
 One defect, found by an independent reviewer about an hour after `v0.1.9` was published, and
 repaired under its own iteration rather than left for the next one.
+
+**Why a minor bump for one fix, and why this section was numbered twice.** It was released as
+`v0.1.9.1` first, and that tag and release were withdrawn by the owner: a four-component version is
+not semantic versioning, so tooling that orders by semver — GitHub's own "latest" among it — would
+never have ranked it. The content is unchanged; only the number is. `v0.2.0` rather than `v0.1.10`
+is the owner's choice, and the fix it carries is a behaviour restoration rather than an addition.
 
 ### 🩹 Fixed
 

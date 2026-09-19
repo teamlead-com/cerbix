@@ -1610,16 +1610,6 @@ func creditBurnDeliveries(t *testing.T, st *Store, ctx context.Context, serviceI
 	}
 }
 
-// creditLiveDelivery is the same for the health signal's single latch.
-func creditLiveDelivery(t *testing.T, st *Store, ctx context.Context, serviceID string) {
-	t.Helper()
-	if _, err := st.pool.Exec(ctx,
-		`UPDATE service_alert_state SET delivered_seq = emitted_seq WHERE service_id = $1`,
-		serviceID); err != nil {
-		t.Fatalf("credit live delivery: %v", err)
-	}
-}
-
 // The announcement has to be about the state the service is IN.
 //
 // A DEGRADED alert is delivered and covers. The service then observes DOWN and starts collecting its

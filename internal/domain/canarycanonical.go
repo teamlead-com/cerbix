@@ -455,7 +455,7 @@ func parseCanonicalHeaders(hs []canonicalHeader) []CanaryHeader {
 	}
 	out := make([]CanaryHeader, 0, len(hs))
 	for _, h := range hs {
-		out = append(out, CanaryHeader{Name: h.Name, Value: h.Value, SecretRef: h.SecretRef})
+		out = append(out, CanaryHeader(h))
 	}
 	return out
 }

@@ -3,7 +3,7 @@ package agent
 import (
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,26 +19,27 @@ import (
 
 func TestThisExecutorImportsNoStorePackage(t *testing.T) {
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, parser.ImportsOnly)
+	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pkgs) == 0 {
-		t.Fatal("no package parsed here, so this scan guards nothing")
-	}
 	scanned := 0
-	for _, pkg := range pkgs {
-		for name, file := range pkg.Files {
-			scanned++
-			for _, imp := range file.Imports {
-				path := strings.Trim(imp.Path.Value, `"`)
-				if strings.Contains(path, "cerbix/internal/store") {
-					t.Errorf("%s imports %q. This executor must stay DB-less: FR-032 run facts come "+
-						"from the PUBLISHED job, recorded by core, never by the process that ran it",
-						filepath.Base(name), path)
-				}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		scanned++
+		for _, imp := range file.Imports {
+			path := strings.Trim(imp.Path.Value, `"`)
+			if strings.Contains(path, "cerbix/internal/store") {
+				t.Errorf("%s imports %q. This executor must stay DB-less: FR-032 run facts come "+
+					"from the PUBLISHED job, recorded by core, never by the process that ran it",
+					filepath.Base(name), path)
 			}
 		}
 	}

@@ -32,7 +32,11 @@ func TestCanaryMultipartUploadsThePinnedFixture(t *testing.T) {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		defer file.Close()
+		defer func() {
+			if err := file.Close(); err != nil {
+				t.Errorf("close multipart file: %v", err)
+			}
+		}()
 		gotFileName = hdr.Filename
 		body, _ := io.ReadAll(file)
 		sum := sha256.Sum256(body)

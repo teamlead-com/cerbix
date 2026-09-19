@@ -4,9 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"sort"
-	"strings"
 	"testing"
 )
 
@@ -46,18 +44,10 @@ func exportedBareMonitorWritersIn(files []*ast.File) []string {
 }
 
 func TestTheStoreExportsNoUnauditedMonitorWriter(t *testing.T) {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, "../store", func(fi os.FileInfo) bool {
-		return strings.HasSuffix(fi.Name(), ".go") && !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatalf("parse internal/store: %v", err)
-	}
+	parsed := parseNonTestGoFiles(t, "../store", 0)
 	var files []*ast.File
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			files = append(files, file)
-		}
+	for _, file := range parsed {
+		files = append(files, file)
 	}
 	if got := exportedBareMonitorWritersIn(files); len(got) != 0 {
 		t.Fatalf("internal/store exports unaudited monitor writers %v — the product's only monitor doors take an AuditActor (FR-026 §10)", got)

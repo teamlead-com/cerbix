@@ -323,13 +323,6 @@ func insertColumnList(stmt string) string {
 	return strings.Join(strings.Fields(stmt[open+1:end]), " ")
 }
 
-func firstLineOf(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimSpace(s[:i])
-	}
-	return strings.TrimSpace(s)
-}
-
 // Phase A's AST helpers — referencesIn, insertsMonitor, parseStorePackage, fenceSites — live in
 // revisiontimeline_internal_test.go and are reused by the pairing guard in
 // monitorschedule_internal_test.go rather than reimplemented. The scheduler-side scans

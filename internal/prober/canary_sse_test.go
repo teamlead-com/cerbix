@@ -30,7 +30,9 @@ func sseFixture(t *testing.T, contentType string, lines ...string) *httptest.Ser
 		w.WriteHeader(200)
 		flusher, _ := w.(http.Flusher)
 		for _, l := range lines {
-			fmt.Fprint(w, l)
+			if _, err := fmt.Fprint(w, l); err != nil {
+				return
+			}
 			if flusher != nil {
 				flusher.Flush()
 			}

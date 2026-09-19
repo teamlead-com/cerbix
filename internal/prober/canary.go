@@ -310,7 +310,7 @@ func (p canaryProber) do(ctx context.Context, client *http.Client, method, rawUR
 	if err != nil {
 		return nil, nil, &canaryFailure{stage, canaryTransportClass(err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	limited := io.LimitReader(resp.Body, canaryMaxResponseBytes+1)
 	read, err := io.ReadAll(limited)
@@ -421,7 +421,7 @@ func (p canaryProber) awaitSSE(ctx context.Context, client *http.Client, w domai
 	if err != nil {
 		return nil, &canaryFailure{domain.CanaryStageAwaitResult, canaryTransportClass(err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return nil, &canaryFailure{domain.CanaryStageAwaitResult, "stream status " + canaryStatusClass(resp.StatusCode)}
 	}

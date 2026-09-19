@@ -446,7 +446,6 @@ func TestGateOverrideChecksAndHistoryIndex(t *testing.T) {
 
 	type row struct {
 		reason        string
-		revokedAt     *string // SQL expression or nil
 		revokedReason *string
 		byUser        *string
 		viaToken      *bool

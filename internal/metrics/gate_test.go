@@ -265,7 +265,9 @@ func TestGateLedgerGaugesSetThenCleared(t *testing.T) {
 		t.Fatalf("a zero sample must still be exported:\n%s", got)
 	}
 	// Step-down: a deposed pass does not speak — absence, not zero.
-	reg.RecordGateMaintenanceError("lock_timeout") // a counter, which must SURVIVE the clear
+	if err := reg.RecordGateMaintenanceError("lock_timeout"); err != nil {
+		t.Fatalf("record maintenance error: %v", err)
+	} // a counter, which must SURVIVE the clear
 	reg.ClearGateLedgerGauges()
 	got = gateLines(t, reg)
 	for _, g := range gauges {

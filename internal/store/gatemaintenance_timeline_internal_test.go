@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -500,11 +499,4 @@ func TestGateMaintFullRemovalSliceAndResetBlackholeFitThirtySeconds(t *testing.T
 	}
 	waitFor(t, 5*time.Second, "the poisoned backend to be gone", func() bool { return !backendAlive(t, st, ctx, pid) })
 	waitGateLockFree(t, st, ctx)
-}
-
-// pgCounts is a small helper for messages.
-func pgCounts(m *gateMetricsFake) string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return fmt.Sprint(m.counts)
 }

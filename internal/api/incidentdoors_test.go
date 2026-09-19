@@ -33,6 +33,32 @@ var systemDoors = map[string]bool{
 	"AddIncidentUpdateBySystem": true,
 }
 
+func parseNonTestGoFiles(t *testing.T, dir string, mode parser.Mode) map[string]*ast.File {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	fset := token.NewFileSet()
+	files := make(map[string]*ast.File)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		file, err := parser.ParseFile(fset, path, nil, mode)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		files[path] = file
+	}
+	if len(files) == 0 {
+		t.Fatalf("the guard parsed no files in %s — it would pass over an empty package", dir)
+	}
+	return files
+}
+
 // systemDoorCallsIn reports every system-door call site in one parsed file. Guard 1 is this function;
 // the test runs it over the tree and over a fixture that must fail it.
 func systemDoorCallsIn(file *ast.File) []string {
@@ -52,25 +78,12 @@ func systemDoorCallsIn(file *ast.File) []string {
 
 // GUARD 1 — what is REACHED. No file in internal/api may call a system door, receiver included.
 func TestTheAPINeverCallsASystemDoor(t *testing.T) {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, "../api", func(fi os.FileInfo) bool {
-		return strings.HasSuffix(fi.Name(), ".go") && !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatalf("parse internal/api: %v", err)
-	}
-	seen := 0
-	for _, pkg := range pkgs {
-		for path, file := range pkg.Files {
-			seen++
-			for _, hit := range systemDoorCallsIn(file) {
-				t.Errorf("%s calls the SYSTEM door %s: a principal write must be audited (FR-026 D3)",
-					filepath.Base(path), hit)
-			}
+	files := parseNonTestGoFiles(t, "../api", 0)
+	for path, file := range files {
+		for _, hit := range systemDoorCallsIn(file) {
+			t.Errorf("%s calls the SYSTEM door %s: a principal write must be audited (FR-026 D3)",
+				filepath.Base(path), hit)
 		}
-	}
-	if seen == 0 {
-		t.Fatal("the guard parsed no files — it would pass over an empty package")
 	}
 }
 
@@ -115,18 +128,10 @@ func declaredSystemDoors(files []*ast.File) []string {
 // declared in internal/store and called by nobody passes an internal/api scan cleanly, and the next
 // handler to want it finds an unaudited door already built.
 func TestTheStoreDeclaresExactlyTheSystemDoorsThatHaveMachineCallers(t *testing.T) {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, "../store", func(fi os.FileInfo) bool {
-		return strings.HasSuffix(fi.Name(), ".go") && !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatalf("parse internal/store: %v", err)
-	}
+	parsed := parseNonTestGoFiles(t, "../store", 0)
 	var files []*ast.File
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			files = append(files, file)
-		}
+	for _, file := range parsed {
+		files = append(files, file)
 	}
 	got := declaredSystemDoors(files)
 
@@ -194,9 +199,7 @@ func interfaceMethodsNamed(files []*ast.File, iface, suffix string) (got []strin
 	// P2, party [324]). A special case that duplicates the general one is a place for the general
 	// one's rules to stop applying, and here they stopped at depth two.
 	var walkIface func(it *ast.InterfaceType)
-	var walkNamed func(name string)
-
-	walkNamed = func(name string) {
+	walkNamed := func(name string) {
 		if visited[name] {
 			return
 		}
@@ -250,21 +253,10 @@ func interfaceMethodsNamed(files []*ast.File, iface, suffix string) (got []strin
 //
 // The mutation that must kill this: put either method back on the interface.
 func TestTheAPIStoreInterfaceDeclaresNoSystemDoor(t *testing.T) {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, "../api", func(fi os.FileInfo) bool {
-		return strings.HasSuffix(fi.Name(), ".go") && !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatalf("parse internal/api: %v", err)
-	}
+	parsed := parseNonTestGoFiles(t, "../api", 0)
 	var files []*ast.File
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			files = append(files, file)
-		}
-	}
-	if len(files) == 0 {
-		t.Fatal("the guard parsed no files — it would pass over an empty package")
+	for _, file := range parsed {
+		files = append(files, file)
 	}
 	// The interface exists: a rename would otherwise make this guard silently vacuous.
 	all, unresolved := interfaceMethodsNamed(files, "Store", "")

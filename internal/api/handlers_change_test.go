@@ -320,7 +320,7 @@ func TestChangeRecordDomainValidationBeforeTheBounds(t *testing.T) {
 		{map[string]any{"source": ""}, "source_invalid"},
 		{map[string]any{"external_id": strings.Repeat("x", 129)}, "external_id_invalid"},
 		{map[string]any{"external_id": "   "}, "external_id_invalid"},
-		{map[string]any{"ref": "v1​"}, "ref_invalid"},
+		{map[string]any{"ref": "v1\u200b"}, "ref_invalid"},
 		{map[string]any{"ref": "v1\nv2"}, "ref_invalid"},
 		{map[string]any{"url": "http://ci.example/run/42"}, "url_invalid"},
 		{map[string]any{"decision_id": "not-a-uuid"}, "decision_unknown"},

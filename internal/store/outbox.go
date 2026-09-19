@@ -159,7 +159,7 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 		case !out[i].created.Equal(out[j].created):
 			return out[i].created.Before(out[j].created)
 		default:
-			return out[i].OutboxEvent.ID < out[j].OutboxEvent.ID
+			return out[i].ID < out[j].ID
 		}
 	})
 	events := make([]domain.OutboxEvent, 0, len(out))

@@ -1,0 +1,17 @@
+groups:
+  - name: cerbix-audit-retention
+    rules:
+      - alert: CerbixAuditRetentionStale
+        expr: time() - cerbix_audit_retention_last_success_timestamp_seconds > 7200
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Audit-retention pass has not succeeded for two hours.
+      - alert: CerbixAuditRetentionBacklog
+        expr: cerbix_audit_retention_oldest_expired_seconds > 7200
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Audit rows remain expired beyond two healthy purge cadences.

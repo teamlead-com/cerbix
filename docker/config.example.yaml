@@ -99,6 +99,14 @@ result:
 heartbeats:
   retention_days: 30
 
+# Audit evidence is retained instance-wide. Rows at the database-clock cutoff survive; older
+# rows are removed in bounded batches by one fenced maintenance owner. Raising the horizon cannot
+# restore rows already deleted. [retention_days 30..3650, purge_every 5m..24h, batch 100..10000]
+audit:
+  retention_days: 365
+  purge_every: 1h
+  purge_batch_rows: 1000
+
 # Service reliability fan-out caps (func-service-reliability §10.10). Each value has a hard
 # maximum the domain owns (200 / 200 / 25); a value outside [1, hard max] is REJECTED at
 # startup rather than silently adjusted — the config you wrote is the config that runs.

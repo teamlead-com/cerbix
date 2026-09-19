@@ -2,6 +2,21 @@
 
 Operational guide. Grows as capabilities land.
 
+## Audit-log retention
+
+`audit.retention_days` is one instance-wide horizon for organization and global audit rows. A row
+at the PostgreSQL cutoff is retained; rows strictly before it become eligible and remain readable
+until a successful bounded purge batch deletes them. Under a healthy maintenance owner, removal
+normally completes by `retention_days + purge_every + 30s`.
+
+Watch `cerbix_audit_retention_last_success_timestamp_seconds` and
+`cerbix_audit_retention_oldest_expired_seconds`. A stale success or backlog older than two purge
+cadences means the fenced retention owner, PostgreSQL, or its advisory lock needs investigation.
+Check scheduler logs for `audit_retention_pass`; `lock_busy` is normal during leader overlap, while
+`error` or `budget` requires database/lock diagnosis. Do not run manual bulk deletes: the retention
+pass is the only automatic deletion path and preserves cutoff/batch semantics. Reducing the horizon
+can create backlog; increasing it affects only surviving rows and never restores deleted evidence.
+
 ## Run locally (single process)
 
 ```bash

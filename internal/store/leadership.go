@@ -60,7 +60,11 @@ func (ls *LeaderSession) Check(ctx context.Context) (bool, error) {
 // Release relinquishes the lock and returns the pinned connection to the pool (best-effort
 // unlock on a fresh context so shutdown still releases).
 func (ls *LeaderSession) Release() {
-	_, _ = ls.conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, ls.key)
+	if _, err := ls.conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, ls.key); err != nil {
+		// A session whose unlock proof failed must not be reused: the pool could otherwise hand
+		// its still-held advisory lock to unrelated work. Closing it releases session locks.
+		_ = ls.conn.Conn().Close(context.Background())
+	}
 	ls.conn.Release()
 }
 

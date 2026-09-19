@@ -63,6 +63,10 @@ func (a StoreAdapter) TryBecomeLeaderSession(ctx context.Context, key int64) (Le
 	return ls, true, nil
 }
 
+func (a StoreAdapter) RunAuditRetentionPass(ctx context.Context, cfg store.AuditRetentionConfig) (store.AuditRetentionReport, bool, string, error) {
+	return a.Store.RunAuditRetentionPass(ctx, cfg)
+}
+
 type Store interface {
 	ListEnabledMonitors(ctx context.Context) ([]domain.Monitor, error)
 	ListEnabledMonitorSnapshots(ctx context.Context) ([]domain.Monitor, error)
@@ -684,9 +688,11 @@ type Scheduler struct {
 	gateMetrics GateMaintenanceSink
 	// changeRetentionDays / changeGroupsPerBatch drive the daily change-group retention pass
 	// (FR-025 D9); a zero retention means the pass is not run.
-	changeRetentionDays  int
-	changeGroupsPerBatch int
-	changeMetrics        ChangeRetentionSink
+	changeRetentionDays   int
+	changeGroupsPerBatch  int
+	changeMetrics         ChangeRetentionSink
+	auditRetentionCfg     store.AuditRetentionConfig
+	auditRetentionMetrics AuditRetentionSink
 	// ledgerMetrics publishes FR-032 §11's HOT-update sample. Optional and nil-safe, like every
 	// other sink here: a role that runs no maintenance pass publishes nothing rather than zero.
 	ledgerMetrics LedgerStatsSink
@@ -1294,6 +1300,12 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 			stopGate()
 			<-gateDone
 		}()
+	}
+	if s.auditRetentionEnabled() {
+		auditCtx, stopAudit := context.WithCancel(ctx)
+		auditDone := make(chan struct{})
+		go func() { defer close(auditDone); s.auditRetentionLoop(auditCtx) }()
+		defer func() { stopAudit(); <-auditDone }()
 	}
 	nextRun := map[string]time.Time{}
 	credentialFailures := map[string]int{}

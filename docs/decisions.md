@@ -8321,3 +8321,11 @@ This decision records sequence and authorization boundaries, not approval of eve
 choice inside the drafts. In particular, FR-024 D2 (one window) remains the live product contract until
 the owner approves `func-reliability-gate-all-windows.md` and the later implementation closes its
 compatibility gates.
+
+## D-0253 — audit retention contract approved for iter-0184 (2026-09-19)
+
+**Decision.** The owner instruction opening iter-0184 approves revision 1 of
+`ops-audit-log-retention.md`. The implementation uses one strict instance-level `audit.*` snapshot,
+a distinct session advisory-lock slot, one PostgreSQL `clock_timestamp()` cutoff per pass, and ordered
+`FOR UPDATE SKIP LOCKED` batches. The pass accepts no tenant input, emits no audit row, and leaves
+the existing best-effort audit append contract independent of retention success.

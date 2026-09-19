@@ -1120,6 +1120,7 @@ func runServe(args []string) int {
 					PurgeEvery:         time.Duration(cfg.Gate.DecisionPurgeEvery),
 					PurgeMaxPartitions: cfg.Gate.DecisionPurgeMaxPartitions,
 				}, registry).
+				WithAuditRetention(store.AuditRetentionConfig{RetentionDays: cfg.Audit.RetentionDays, PurgeEvery: time.Duration(cfg.Audit.PurgeEvery), PurgeBatchRows: cfg.Audit.PurgeBatchRows}, registry).
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
 				WithReconciler(ingest.NewReconciler(st, broker, registry, logger)). // dead-man DOWN → SSE + incident
 				WithConfirmSignals(confirmSignals()).
@@ -1153,6 +1154,7 @@ func runServe(args []string) int {
 					PurgeEvery:         time.Duration(cfg.Gate.DecisionPurgeEvery),
 					PurgeMaxPartitions: cfg.Gate.DecisionPurgeMaxPartitions,
 				}, registry).
+				WithAuditRetention(store.AuditRetentionConfig{RetentionDays: cfg.Audit.RetentionDays, PurgeEvery: time.Duration(cfg.Audit.PurgeEvery), PurgeBatchRows: cfg.Audit.PurgeBatchRows}, registry).
 				WithLeaderState(registry).                                          // cerbix_scheduler_leader gauge
 				WithReconciler(ingest.NewReconciler(st, broker, registry, logger)). // dead-man DOWN → incident/outbox (SSE only if this process serves it)
 				WithConfirmSignals(confirmSignals()).                               // accelerated failure-confirmation probes

@@ -39,6 +39,7 @@ type Config struct {
 	Pull               PullConfig               `yaml:"pull"`
 	Providers          ProvidersConfig          `yaml:"providers"`
 	Gate               GateConfig               `yaml:"gate"`
+	Audit              AuditConfig              `yaml:"audit"`
 	Change             ChangeConfig             `yaml:"change"`
 	Ledger             LedgerConfig             `yaml:"ledger"`
 }
@@ -272,6 +273,14 @@ type GateConfig struct {
 	// pass performs; steady state is two a day. Default 8, range 1..48; load refuses
 	// max × floor(86400 / purge_every seconds) < 4.
 	DecisionPurgeMaxPartitions int `yaml:"decision_purge_max_partitions"`
+}
+
+// AuditConfig controls the instance-wide lifecycle of append-only audit evidence.
+// It is deliberately not tenant configurable: org and instance audit rows share one horizon.
+type AuditConfig struct {
+	RetentionDays  int      `yaml:"retention_days"`
+	PurgeEvery     Duration `yaml:"purge_every"`
+	PurgeBatchRows int      `yaml:"purge_batch_rows"`
 }
 
 // ChangeConfig bounds change intelligence (func-change-intelligence §5a): how fast changes may
@@ -566,6 +575,11 @@ func defaults() *Config {
 			DecisionPurgeEvery:             Duration(time.Hour),
 			DecisionPurgeMaxPartitions:     8,
 		},
+		Audit: AuditConfig{
+			RetentionDays:  365,
+			PurgeEvery:     Duration(time.Hour),
+			PurgeBatchRows: 1000,
+		},
 		Change: ChangeConfig{
 			RecordRateProcessPerMinute:   300,
 			RecordRatePrincipalPerMinute: 30,
@@ -662,6 +676,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	if err := c.validateGate(); err != nil {
+		return err
+	}
+	if err := c.validateAudit(); err != nil {
 		return err
 	}
 	if err := c.validateChange(); err != nil {
@@ -776,6 +793,20 @@ func (c *Config) validateGate() error {
 		return fmt.Errorf("gate.decision_purge_max_partitions × floor(86400 / gate.decision_purge_every) must be at least %d "+
 			"(strictly more than the two stage-ops a day of steady state), got %d × %d = %d: raise gate.decision_purge_max_partitions or shorten gate.decision_purge_every",
 			gatePurgePerDayMin, g.DecisionPurgeMaxPartitions, passesPerDay, n)
+	}
+	return nil
+}
+
+func (c *Config) validateAudit() error {
+	a := c.Audit
+	if a.RetentionDays < 30 || a.RetentionDays > 3650 {
+		return fmt.Errorf("audit.retention_days must be between 30 and 3650, got %d", a.RetentionDays)
+	}
+	if every := a.PurgeEvery.Std(); every < 5*time.Minute || every > 24*time.Hour {
+		return fmt.Errorf("audit.purge_every must be between 5m0s and 24h0m0s, got %s", every)
+	}
+	if a.PurgeBatchRows < 100 || a.PurgeBatchRows > 10000 {
+		return fmt.Errorf("audit.purge_batch_rows must be between 100 and 10000, got %d", a.PurgeBatchRows)
 	}
 	return nil
 }

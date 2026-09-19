@@ -1,8 +1,7 @@
 # ops-audit-log-retention — bounded audit history (FR-033 / NFR-027)
 
-> **Revision 1 — DRAFT for iter-0184, commissioned 2026-09-19. NOT IMPLEMENTED and the
-> iteration is not opened by this document.** This is a product/operations iteration with no SPA
-> surface and no mock requirement. Owner approval of this contract is required before code.
+> **Revision 1 — APPROVED for iter-0184 by owner instruction on 2026-09-19.** This is a
+> product/operations iteration with no SPA surface and no mock requirement.
 
 ## 1. Problem
 

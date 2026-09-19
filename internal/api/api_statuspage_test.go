@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/store"
 )
 
 func TestPublicRenderEnriched(t *testing.T) {
@@ -198,7 +199,8 @@ func TestCreateStatusPageAuthz(t *testing.T) {
 }
 
 func TestComponentAuthzAndMonitorOrgCheck(t *testing.T) {
-	h := newHandler(seededStore())
+	fs := seededStore()
+	h := newHandler(fs)
 	// Viewer cannot add a component.
 	if rec := do(h, o1Viewer, http.MethodPost, "/api/v1/status-pages/sp1/components", `{"name":"Web"}`); rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer add component = %d, want 403", rec.Code)
@@ -208,16 +210,17 @@ func TestComponentAuthzAndMonitorOrgCheck(t *testing.T) {
 		t.Fatalf("admin add component = %d, want 201", rec.Code)
 	}
 	// Monitor in the same org → 201.
-	if rec := do(h, o1Admin, http.MethodPost, "/api/v1/status-pages/sp1/components", `{"name":"API","monitor_id":"mon1"}`); rec.Code != http.StatusCreated {
+	if rec := do(h, o1Admin, http.MethodPost, "/api/v1/status-pages/sp1/components", `{"name":"API","monitor_id":"`+componentBindingID+`"}`); rec.Code != http.StatusCreated {
 		t.Fatalf("component with in-org monitor = %d, want 201", rec.Code)
 	}
-	// Monitor mon3 is in o2 → 400, and the message must be IDENTICAL to a truly
-	// nonexistent id so it can't be used to enumerate cross-tenant monitor ids.
-	crossOrg := do(h, o1Admin, http.MethodPost, "/api/v1/status-pages/sp1/components", `{"name":"X","monitor_id":"mon3"}`)
+	// The store owns both absent and cross-organization binding classification. The transport must
+	// map its one non-oracular sentinel identically for either valid UUID.
+	fs.createComponentErr = store.ErrComponentBindingNotFound
+	crossOrg := do(h, o1Admin, http.MethodPost, "/api/v1/status-pages/sp1/components", `{"name":"X","monitor_id":"00000000-0000-4000-8000-000000000002"}`)
 	if crossOrg.Code != http.StatusBadRequest {
 		t.Fatalf("component with cross-org monitor = %d, want 400", crossOrg.Code)
 	}
-	missing := do(h, o1Admin, http.MethodPost, "/api/v1/status-pages/sp1/components", `{"name":"X","monitor_id":"does-not-exist"}`)
+	missing := do(h, o1Admin, http.MethodPost, "/api/v1/status-pages/sp1/components", `{"name":"X","monitor_id":"00000000-0000-4000-8000-000000000003"}`)
 	if missing.Code != http.StatusBadRequest {
 		t.Fatalf("component with missing monitor = %d, want 400", missing.Code)
 	}

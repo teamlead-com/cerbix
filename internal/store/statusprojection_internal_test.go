@@ -129,10 +129,17 @@ func TestComponentTenancyBySchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("alien service: %v", err)
 	}
-	_, err = st.CreateComponent(ctx, domain.Component{
-		StatusPageID: f.pageProj, Name: "Alien", ServiceID: alien.ID,
-	})
-	if err == nil || !strings.Contains(err.Error(), "component_project_outside_page_scope") {
+	// The insert is RAW because this test is about the schema. It used to travel through
+	// `CreateComponent`, and iter-0181 gave that function the same page-scope assertion conversion
+	// already had — so the application now refuses first and the trigger is never reached. That
+	// makes the Go assertion the thing under test instead of the trigger, which is the opposite of
+	// this test's name; `TestACreateRefusesABindingOutsideThePagesProject` owns that half. A direct
+	// writer is also the only caller the trigger exists FOR.
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO components (status_page_id, org_id, source, source_project, service_id, name)
+		VALUES ($1, $2, 'service', $3, $4, 'Alien')`,
+		f.pageProj, f.orgID, f.otherProj, alien.ID); err == nil ||
+		!strings.Contains(err.Error(), "component_project_outside_page_scope") {
 		t.Fatalf("foreign component on a project-scoped page = %v, want the page-scope guard", err)
 	}
 

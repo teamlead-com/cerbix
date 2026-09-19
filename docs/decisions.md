@@ -8187,3 +8187,54 @@ separately by `TestACanaryBindingIsPublishedOnTheGenerationItsAgentAnnounced`, w
 generation 3 from a live agent's announcement and asserts the enqueue. What remains open is
 recorded in `iter-0180` §4c: no single process holds the scheduler, the store and the prober at
 once, and the live cases that exist today do not demonstrate a successful canary run.
+
+## D-0249 — a component's binding is resolved inside the page's organization
+
+**2026-09-16, iter-0181.** Creating a status-page component bound to a SERVICE was impossible: the
+API handler did not accept `service_id` although `openapi.yaml` declared it, the SPA sent it, and the
+store already inserted it. `decodeJSON` disallows unknown fields, so every such request died in the
+decoder as `400 invalid JSON body` — a message about malformed JSON for a body that was valid.
+
+**Decision.** The handler accepts the field, AND the store's `componentSourceOf` resolves bindings
+through `bindingProjectTx`, scoped to the page's organization.
+
+The second half is not housekeeping alongside the first: without it the fix opens the hole §15.0
+records as a P0. The resolver looked bindings up by id alone, so tenancy rested on the caller — the
+API checked a monitor with `monitorInOrg`, and nothing checked a service because no service binding
+could arrive. `bindingProjectTx` is the helper the CONVERSION path already uses, so the two ways a
+component acquires a binding answer tenancy identically rather than nearly so.
+
+**A refusal names the class and not the id.** A binding outside the organization and one that does
+not exist both answer `binding not found`, which is what `monitorInOrg` has done since FR-021: the
+difference between the two is a cross-tenant existence oracle.
+
+The store exposes that refusal as `ErrComponentBindingNotFound`, not the repository-wide
+`ErrNotFound`. The latter remains reserved here for the status page disappearing between the API's
+authorization read and the transactional create, and therefore still maps to HTTP 404. Conflating
+the two made a page-deletion race answer `400 binding not found`, which was false.
+
+**A failed lookup is not an absent binding.** The first version of this decision collapsed every
+error from `bindingProjectTx` onto `ErrNotFound`, so a database that did not answer reached the
+operator as `400 binding not found` — false, and it would have them hunting a deleted service
+during an outage while the API reported the fault as the caller's. `bindingLookupError` translates
+only the refusal `bindingProjectTx` owns and wraps everything else with its cause; the handler ends
+its switch in `serverError`, which logs and answers 500. The oracle rule above is about which
+REFUSALS are indistinguishable, not about hiding failures.
+
+**Create asserts page scope and the dormant pair itself.** Conversion refuses a binding outside the
+page's project, and a retained pair that cannot share one `source_project`, in Go — because the
+schema would otherwise refuse them at COMMIT with a constraint name, after the operator consented to
+a preview that promised the change would work. Create left both to that deferred trigger, so the two
+paths answered the same question in two different voices. `CreateComponent` now calls
+`assertBindingInPageScope` and `assertRetainedBindingsSameProjectTx`. The page-scope call is guarded
+on a binding existing at all: a manual component has no project to compare, and asserting
+unconditionally would refuse every manual component on a project-scoped page.
+
+**One validation owner.** Transport owns JSON shape and UUID format for `monitor_id` and
+`service_id`. Store owns binding existence, organization scope, page-project scope and retained-pair
+compatibility inside the create transaction. The API's former `monitorInOrg` preflight duplicated
+the monitor half, added two queries and still could not protect services or non-HTTP callers; it is
+removed. Both binding kinds now take the same authoritative path.
+
+**What this does not change.** The conversion path, the SPA and the API contract are untouched —
+they already described this behaviour. What changed is the server catching up with them.

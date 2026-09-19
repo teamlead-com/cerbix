@@ -48,6 +48,11 @@ type fakeStore struct {
 	// its principal, which is the property FR-026 exists for.
 	auditActors []string
 
+	// createComponentErr, when set, is what CreateComponent returns instead of a row. It exists so
+	// a test can drive the handler's error CLASSIFICATION: an expected refusal and an
+	// infrastructure failure must not answer alike (reviewer P1, iter-0181).
+	createComponentErr error
+
 	// FR-032 §13a fixtures and recordings.
 	expectedRunQueries []store.ExpectedRunQuery
 	expectedRunPage    store.ExpectedRunPage
@@ -1201,6 +1206,9 @@ func (f *fakeStore) ListStatusPagesByOrg(_ context.Context, orgID string) ([]dom
 	return out, nil
 }
 func (f *fakeStore) CreateComponent(_ context.Context, c domain.Component) (domain.Component, error) {
+	if f.createComponentErr != nil {
+		return domain.Component{}, f.createComponentErr
+	}
 	c.ID = "c-new"
 	// Mirrors the store: the source is DERIVED, never taken from the caller, and a service
 	// binding wins over a leftover monitor one.

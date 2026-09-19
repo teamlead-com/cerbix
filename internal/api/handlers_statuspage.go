@@ -188,17 +188,28 @@ func (h *Handler) createComponent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name         string `json:"name"`
-		Description  string `json:"description"`
-		Group        string `json:"group"`
-		Position     int    `json:"position"`
-		MonitorID    string `json:"monitor_id"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Group       string `json:"group"`
+		Position    int    `json:"position"`
+		MonitorID   string `json:"monitor_id"`
+		// ServiceID was MISSING here while `openapi.yaml` declared it, the SPA sent it, and
+		// `domain.Component` carried it — so a service-backed component could not be created at all.
+		// `decodeJSON` disallows unknown fields, which turned every such request into
+		// `400 invalid JSON body`: an answer that sends the reader after malformed JSON when the
+		// JSON was correct and the FIELD was unsupported.
+		ServiceID    string `json:"service_id"`
 		ManualStatus string `json:"manual_status"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if body.MonitorID != "" && !h.monitorInOrg(w, r, body.MonitorID, sp.OrgID) {
+	if body.MonitorID != "" && !serviceUUIDPattern.MatchString(body.MonitorID) {
+		writeError(w, http.StatusBadRequest, "monitor_id must be a UUID")
+		return
+	}
+	if body.ServiceID != "" && !serviceUUIDPattern.MatchString(body.ServiceID) {
+		writeError(w, http.StatusBadRequest, "service_id must be a UUID")
 		return
 	}
 	c := domain.Component{
@@ -208,6 +219,7 @@ func (h *Handler) createComponent(w http.ResponseWriter, r *http.Request) {
 		GroupName:    body.Group,
 		Position:     body.Position,
 		MonitorID:    body.MonitorID,
+		ServiceID:    body.ServiceID,
 		ManualStatus: domain.ComponentStatus(body.ManualStatus),
 	}
 	if err := c.Validate(); err != nil {
@@ -215,37 +227,32 @@ func (h *Handler) createComponent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	created, err := h.store.CreateComponent(r.Context(), c)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "could not create component")
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		// The page existed during authorization but disappeared before the transactional create.
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	case errors.Is(err, store.ErrComponentBindingNotFound):
+		// A binding that does not exist and one that belongs to another organization answer the
+		// same: the difference is a cross-tenant existence oracle.
+		writeError(w, http.StatusBadRequest, "binding not found")
+		return
+	case errors.Is(err, store.ErrPageComponentCeiling):
+		writeError(w, http.StatusBadRequest, "the page is at its component ceiling")
+		return
+	case errors.Is(err, store.ErrComponentConversionTarget):
+		// A binding outside the page's project, or a dormant pair that cannot share one
+		// `source_project`. The store names the reason; repeating it here is what an operator can
+		// act on, and the alternative was the deferred trigger's constraint text.
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	case err != nil:
+		// Anything left is infrastructure, and a 400 would tell the caller their request was wrong
+		// when it was not. It goes through `serverError`, which logs the cause and answers 500.
+		h.serverError(w, "create_component", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
-}
-
-// monitorInOrg verifies a monitor exists and belongs to the given organization.
-// Writes 400 and returns false otherwise.
-func (h *Handler) monitorInOrg(w http.ResponseWriter, r *http.Request, monitorID, orgID string) bool {
-	// "not found" and "exists but in another org" return the SAME response so a caller
-	// can't use the difference to enumerate monitor ids across tenant boundaries.
-	mon, err := h.store.GetMonitor(r.Context(), monitorID)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusBadRequest, "monitor not found")
-		return false
-	}
-	if err != nil {
-		h.serverError(w, "get_monitor", err)
-		return false
-	}
-	proj, err := h.store.GetProject(r.Context(), mon.ProjectID)
-	if err != nil {
-		h.serverError(w, "get_project", err)
-		return false
-	}
-	if proj.OrgID != orgID {
-		writeError(w, http.StatusBadRequest, "monitor not found") // uniform: no cross-tenant existence oracle
-		return false
-	}
-	return true
 }
 
 // deleteComponent removes a component (org admin on its page's org).

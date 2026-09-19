@@ -5057,7 +5057,10 @@ export interface paths {
             };
         };
         put?: never;
-        /** Add a component (org admin). A monitor-backed component must be in the page's org. */
+        /**
+         * Add a component (org admin).
+         * @description A binding — `monitor_id` or `service_id` — is resolved inside the PAGE's organization, and a binding outside it answers exactly as one that does not exist: the difference would be a cross-tenant existence oracle. A project-scoped page additionally refuses a binding from another project, and a request carrying both ids refuses a pair whose projects disagree, because the row has ONE source project for the two. `service_id` wins the source when both are given; the other id is retained as the dormant binding.
+         */
         post: {
             parameters: {
                 query?: never;

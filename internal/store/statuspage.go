@@ -150,6 +150,11 @@ func scanComponent(row pgx.Row) (domain.Component, error) {
 // render is unauthenticated and every component multiplies its cost.
 var ErrPageComponentCeiling = errors.New("store: status page is at its component ceiling")
 
+// ErrComponentBindingNotFound is returned when a requested monitor or service binding is absent
+// from the status page's organization. Missing and foreign bindings deliberately share one error
+// so the API does not expose a cross-tenant existence oracle.
+var ErrComponentBindingNotFound = errors.New("store: component binding not found")
+
 // CreateComponent inserts a component (validated in domain) inside one transaction that also
 // enforces the page ceiling and bumps the page's component generation — the structural CAS the
 // conversion preview compares against (§15.0). The org and the binding project are derived
@@ -188,8 +193,28 @@ func (s *Store) CreateComponent(ctx context.Context, c domain.Component) (domain
 		return domain.Component{}, ErrPageComponentCeiling
 	}
 
-	source, bindingProject, err := componentSourceOf(ctx, tx, c)
+	source, bindingProject, err := componentSourceOf(ctx, tx, c, orgID)
 	if err != nil {
+		return domain.Component{}, err
+	}
+	// `pageProject` was read above and then not consulted, so a same-org binding from a project the
+	// page is not scoped to reached the deferred trigger and came back as an opaque constraint
+	// error at COMMIT. The conversion path refuses it in Go with a named reason; a create now does
+	// the same, which is what makes the symmetry between the two paths real rather than claimed.
+	// Only when there IS a binding: a manual component has no project of its own, and asking a
+	// page scoped to one project to match the empty string refuses every manual create — which is
+	// what the first version of this line did, and what the existing conversion tests caught.
+	if bindingProject != "" {
+		if err := assertBindingInPageScope(pageProject, bindingProject); err != nil {
+			return domain.Component{}, err
+		}
+	}
+	// And the DORMANT half: a create may carry both ids — the SPA sends one, but the API is not the
+	// only caller — and the row has ONE `source_project` column for both. Same check, same reason,
+	// same place in the transaction as the conversion path.
+	if err := assertRetainedBindingsSameProjectTx(ctx, tx, orgID, domain.Component{
+		Source: source, SourceProject: bindingProject, MonitorID: c.MonitorID, ServiceID: c.ServiceID,
+	}); err != nil {
 		return domain.Component{}, err
 	}
 	row := tx.QueryRow(ctx,
@@ -208,29 +233,50 @@ func (s *Store) CreateComponent(ctx context.Context, c domain.Component) (domain
 	return created, nil
 }
 
-// componentSourceOf resolves the ACTIVE source and its project from the requested bindings.
-// A service binding wins over a monitor one when both are given, because a caller asking for a
-// service component with a leftover monitor id is describing a conversion, not an ambiguity.
-func componentSourceOf(ctx context.Context, tx pgx.Tx, c domain.Component) (domain.ComponentSource, string, error) {
+// bindingLookupError separates "this binding is not available to you" from "the database did not
+// answer".
+//
+// The first version collapsed both into `ErrNotFound`, and the API then reported a connection
+// failure to an operator as `400 binding not found` — an answer that is not merely unhelpful but
+// false, and one that would have them looking for a deleted service while the database was
+// unreachable. `bindingProjectTx` already marks the refusals it OWNS with
+// `ErrComponentConversionTarget`; everything else is infrastructure and must keep its cause.
+func bindingLookupError(kind string, err error) error {
+	if errors.Is(err, ErrComponentConversionTarget) {
+		// Absent and out-of-organization answer alike: the difference is a cross-tenant oracle.
+		return ErrComponentBindingNotFound
+	}
+	return fmt.Errorf("store: resolve component %s: %w", kind, err)
+}
+
+// componentSourceOf resolves the ACTIVE source and its project from the requested bindings, WITHIN
+// the page's organization. A service binding wins over a monitor one when both are given, because a
+// caller asking for a service component with a leftover monitor id is describing a conversion, not
+// an ambiguity.
+//
+// The org scope is the point and not a precaution. The resolver used to look a binding up by id
+// alone, so the tenancy of a CREATE depended entirely on the caller above it: the API checked a
+// monitor with `monitorInOrg` and nothing checked a service, because a service binding could not be
+// created at all — the handler did not accept `service_id`, and `DisallowUnknownFields` turned the
+// attempt into `invalid JSON body`. Accepting the field without this scope would have opened
+// exactly the hole §15.0 records as a P0: a direct writer binding another organization's service.
+//
+// The lookup is the one the CONVERSION path already uses (`bindingProjectTx`), so the two ways a
+// component can acquire a binding answer the tenancy question identically instead of nearly so.
+// A binding outside the organization is `ErrComponentBindingNotFound` — the same answer as one
+// that does not exist — because the difference between them is a cross-tenant existence oracle.
+func componentSourceOf(ctx context.Context, tx pgx.Tx, c domain.Component, orgID string) (domain.ComponentSource, string, error) {
 	switch {
 	case c.ServiceID != "":
-		var proj string
-		err := tx.QueryRow(ctx, `SELECT project_id FROM services WHERE id = $1`, c.ServiceID).Scan(&proj)
-		if noRows(err) {
-			return "", "", ErrNotFound
-		}
+		proj, err := bindingProjectTx(ctx, tx, "services", c.ServiceID, orgID)
 		if err != nil {
-			return "", "", fmt.Errorf("store: resolve component service: %w", err)
+			return "", "", bindingLookupError("service", err)
 		}
 		return domain.ComponentSourceService, proj, nil
 	case c.MonitorID != "":
-		var proj string
-		err := tx.QueryRow(ctx, `SELECT project_id FROM monitors WHERE id = $1`, c.MonitorID).Scan(&proj)
-		if noRows(err) {
-			return "", "", ErrNotFound
-		}
+		proj, err := bindingProjectTx(ctx, tx, "monitors", c.MonitorID, orgID)
 		if err != nil {
-			return "", "", fmt.Errorf("store: resolve component monitor: %w", err)
+			return "", "", bindingLookupError("monitor", err)
 		}
 		return domain.ComponentSourceMonitor, proj, nil
 	default:

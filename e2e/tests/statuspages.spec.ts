@@ -53,4 +53,50 @@ test.describe("status pages", () => {
       await apiSend(page, "delete", `/api/v1/status-pages/${sp.id}`);
     }
   });
+
+  // iter-0181, reported from production: adding a component whose source is a SERVICE answered
+  // `400 Bad Request` with `invalid JSON body`. The handler did not name `service_id` while the
+  // contract declared it and the SPA sent it, and `DisallowUnknownFields` turned the request into a
+  // malformed-JSON report about JSON that was correct. Every unit-level double already implemented
+  // the derivation the handler lacked, so nothing below this line could fail either — which is why
+  // the live assertion is worth its seconds.
+  test("a component can be bound to a service", async ({ page }) => {
+    const { orgID, projectID } = await firstProject(page);
+    const slug = "e2e-status-svc";
+    const svcSlug = "e2e-status-svc-binding";
+
+    for (const p of await apiGet(page, `/api/v1/organizations/${orgID}/status-pages`)) {
+      if (p.slug === slug) await apiSend(page, "delete", `/api/v1/status-pages/${p.id}`);
+    }
+    for (const s of await apiGet(page, `/api/v1/projects/${projectID}/services`)) {
+      if (s.service.slug === svcSlug) await apiSend(page, "delete", `/api/v1/projects/${projectID}/services/${s.service.id}`);
+    }
+
+    const svcRes = await apiSend(page, "post", `/api/v1/projects/${projectID}/services`, {
+      slug: svcSlug, name: "E2E Status Binding",
+    });
+    expect(svcRes.status()).toBe(201);
+    const svc = await svcRes.json();
+    let sp: { id: string } | null = null;
+    try {
+      const pageRes = await apiSend(page, "post", `/api/v1/organizations/${orgID}/status-pages`, {
+        slug, title: "E2E Service Status", visibility: "public",
+      });
+      expect(pageRes.status()).toBe(201);
+      sp = await pageRes.json();
+      const comp = await apiSend(page, "post", `/api/v1/status-pages/${sp.id}/components`, {
+        name: "e2e-service-comp", service_id: svc.id, group: "Services",
+      });
+      // The reported symptom, named: a 400 here is the defect returning, not a bad fixture.
+      expect(await comp.text()).not.toContain("invalid JSON body");
+      expect(comp.status()).toBe(201);
+      const created = await comp.json();
+      // The source is DERIVED from the binding; the caller never sends it.
+      expect(created.source).toBe("service");
+      expect(created.service_id).toBe(svc.id);
+    } finally {
+      if (sp) await apiSend(page, "delete", `/api/v1/status-pages/${sp.id}`);
+      await apiSend(page, "delete", `/api/v1/projects/${projectID}/services/${svc.id}`);
+    }
+  });
 });

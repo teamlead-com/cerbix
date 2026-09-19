@@ -346,6 +346,31 @@ type GatePolicy struct {
 	UpdatedBy string `json:"updated_by"`
 }
 
+// GatePolicySource identifies the row that supplied an effective gate policy.  It is part of
+// the policy identity, rather than display metadata: an override and a decision bind to the
+// complete tuple (source, owner id, revision).
+type GatePolicySource string
+
+const (
+	GatePolicySourceService GatePolicySource = "service"
+	GatePolicySourceProject GatePolicySource = "project"
+)
+
+// ValidGatePolicySource reports whether source names one of the two persisted policy scopes.
+func ValidGatePolicySource(source GatePolicySource) bool {
+	return source == GatePolicySourceService || source == GatePolicySourceProject
+}
+
+// EffectiveGatePolicy is the one policy a service may use at a snapshot.  Policy is never
+// copied into a service: for an inherited policy its ServiceID is empty and OwnerID is the
+// project id.
+type EffectiveGatePolicy struct {
+	Policy                  GatePolicy
+	Source                  GatePolicySource
+	OwnerID                 string
+	ServiceOverrideRevision *int64
+}
+
 // Live reports whether the policy governs decisions right now — present and not tombstoned.
 func (p GatePolicy) Live() bool { return p.DeletedAt == nil }
 
@@ -409,6 +434,8 @@ type GateOverride struct {
 	ServiceID      string
 	ProjectID      string
 	PolicyRevision int64
+	PolicySource   GatePolicySource
+	PolicyOwnerID  string
 
 	// The actor triple (D9): who created it.
 	ActorUserID *string
@@ -584,8 +611,10 @@ type GateDecision struct {
 	Action  *GateAction       `json:"action,omitempty"`
 	Reasons []GateReasonEntry `json:"reasons"`
 	// PolicyRevision and Window are present when a policy exists.
-	PolicyRevision *int64  `json:"policy_revision,omitempty"`
-	Window         *string `json:"window,omitempty"`
+	PolicyRevision *int64            `json:"policy_revision,omitempty"`
+	PolicySource   *GatePolicySource `json:"policy_source,omitempty"`
+	PolicyOwnerID  *string           `json:"policy_owner_id,omitempty"`
+	Window         *string           `json:"window,omitempty"`
 	// OverrideID is present exactly when an override was applied — the id the listing carries;
 	// Override (in the evidence) is the same override with its attribution.
 	OverrideID    *string    `json:"override_id,omitempty"`

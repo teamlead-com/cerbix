@@ -10,6 +10,7 @@ import InstanceAuditPanel from "@/components/settings/InstanceAuditPanel.vue";
 import MembersPanel from "@/components/settings/MembersPanel.vue";
 import OrgDangerZonePanel from "@/components/settings/OrgDangerZonePanel.vue";
 import SecretsPanel from "@/components/settings/SecretsPanel.vue";
+import ProjectGatePolicy from "@/components/settings/ProjectGatePolicy.vue";
 import UsersPanel from "@/components/settings/UsersPanel.vue";
 import {
   TOKEN_ACTIONS_WARNING_LEAD,
@@ -41,6 +42,7 @@ type Tab =
   | "channels"
   | "incoming"
   | "secrets"
+  | "gatepolicy"
   | "authentication"
   | "branding"
   | "alerting"
@@ -69,6 +71,7 @@ const tabs = computed<{ key: Tab; label: string; scope: string }[]>(() => [
   { key: "channels", label: "Notification channels", scope: "project" },
   { key: "incoming", label: "Incoming alerts", scope: "project" },
   { key: "secrets", label: "Secrets", scope: "project" },
+  { key: "gatepolicy", label: "Release gate", scope: "project" },
   // Deleting a project is an org-manage action, so only org admins see it.
   ...(canManageOrg.value
     ? ([{ key: "danger", label: "Danger zone", scope: "project" }] as { key: Tab; label: string; scope: string }[])
@@ -981,6 +984,10 @@ watch(tab, loadActive);
             </tbody>
           </table>
         </section>
+      </template>
+
+      <template v-else-if="tab === 'gatepolicy'">
+        <ProjectGatePolicy :project-id="ws.projectId" :can-manage="session.canProjectAdmin(ws.orgId, ws.projectId)" />
       </template>
 
       <!-- ── Incoming alerts (Alertmanager receiver) ── -->

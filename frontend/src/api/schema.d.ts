@@ -2288,6 +2288,119 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{projectID}/gate/policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        /** Read a project's inherited gate policy (viewer+) */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["GatePolicy"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /** Create or replace a project gate policy (project admin+) */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["GatePolicyWrite"];
+                };
+            };
+            responses: {
+                /** @description Revision */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** Format: int64 */
+                            revision: number;
+                        };
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description revision_conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        post?: never;
+        /** Tombstone a project gate policy (project admin+) */
+        delete: {
+            parameters: {
+                query: {
+                    expected_revision: number;
+                };
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deleted. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description revision_conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{projectID}/services/{serviceID}/gate/policy": {
         parameters: {
             query?: never;
@@ -8401,7 +8514,7 @@ export interface components {
             ticket_burn_firing: components["schemas"]["GateClauseAssignment"];
             service_incident_open: components["schemas"]["GateClauseAssignment"];
         };
-        /** @description A service's live gate policy as stored (FR-024 D13a). */
+        /** @description An effective gate policy. `policy_source` and `policy_owner_id` state whether a service override or a project policy supplied the document. */
         GatePolicy: {
             /** @description The clause vocabulary version; 1 is the only known one. */
             schema_version: number;
@@ -8429,6 +8542,12 @@ export interface components {
             updated_at: string;
             /** @description The writer's immutable audit label. */
             updated_by: string;
+            /** @enum {string} */
+            policy_source: "service" | "project";
+            /** Format: uuid */
+            policy_owner_id: string;
+            /** Format: int64 */
+            service_override_revision?: number | null;
         };
         /** @description The PUT body — the whole document, nothing filled in server-side (FR-024 D11, D13a, D14). `expected_revision` is required: `null` claims nothing is configured. */
         GatePolicyWrite: {

@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [Unreleased]
+
+### ✨ Added
+
+- **Bounded audit-log retention (iter-0184, FR-033 / NFR-027).** A strict instance-wide
+  retention configuration now removes only database-clock-expired organization and global audit rows
+  in fenced, bounded batches. The scheduler, metrics, alerts, recovery guidance, and migration index
+  ship together; audit APIs and retained history semantics do not change.
+
+- **Project-level inherited release-gate policy (iter-0185, FR-034 / NFR-028).** Projects can now
+  define one versioned gate policy. A service resolves its effective document in explicit service →
+  project → not-configured order, records the immutable source tuple in decisions and overrides, and
+  exposes the result through API, CLI-compatible schema, metrics, and the Settings / service SPA
+  surfaces. Editing a project policy revokes only overrides that inherited that project revision.
+
+### ⚠️ Verification note
+
+- `iter-0185` passes the Go and frontend suites, generated OpenAPI client check, production frontend
+  build, and documentation checks. Direct PostgreSQL migration, tenancy, CAS, and set-based
+  revocation cases still require the opt-in `CERBIX_TEST_DATABASE_DSN` release gate before this work
+  is marked complete in `docs/status.md`.
+
+---
+
 ## [v0.2.1] - 2026-09-19
 
 This patch release combines the status-page service-component repair from `iter-0181` with the

@@ -1,8 +1,9 @@
 # func-project-gate-policy — inherited reliability-gate policy (FR-034 / NFR-028)
 
-> **Revision 1 — DRAFT for iter-0185, commissioned 2026-09-19. NOT IMPLEMENTED and the
-> iteration is not opened by this document.** Depends on the existing FR-024 gate contract. Owner
-> approval is required before schema, API, CLI, or SPA work.
+> **Revision 1 — APPROVED for iter-0185 on 2026-09-19.** Backend/schema/API work is authorized by
+> the owner instruction opening this iteration. The dedicated SPA editor mock
+> [`mock-project-gate-policy.html`](../design/mock-project-gate-policy.html) is also approved by the
+> owner on 2026-09-19; frontend implementation is authorized.
 
 ## 1. Problem
 

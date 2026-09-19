@@ -30,7 +30,7 @@ const GateListLimitMax = 200
 // canonical evidence, from which the D7 response is reconstructed as it was.
 const gateDecisionColumns = `
 	id, service_id, service_slug, service_name, state, action, reasons, evidence,
-	policy_revision, window_name, override_id, evaluated_at, sealed_through`
+	policy_revision, policy_source, policy_owner_id, window_name, override_id, evaluated_at, sealed_through`
 
 func scanGateDecision(row scannable) (domain.GateDecision, error) {
 	var (
@@ -39,7 +39,7 @@ func scanGateDecision(row scannable) (domain.GateDecision, error) {
 		reasons, evidence []byte
 	)
 	if err := row.Scan(&dec.DecisionID, &dec.ServiceID, &dec.ServiceSlug, &dec.ServiceName, &dec.State, &action,
-		&reasons, &evidence, &dec.PolicyRevision, &dec.Window, &dec.OverrideID, &dec.EvaluatedAt, &dec.SealedThrough); err != nil {
+		&reasons, &evidence, &dec.PolicyRevision, &dec.PolicySource, &dec.PolicyOwnerID, &dec.Window, &dec.OverrideID, &dec.EvaluatedAt, &dec.SealedThrough); err != nil {
 		return domain.GateDecision{}, err
 	}
 	dec.SchemaVersion = domain.GateDecisionSchemaV1

@@ -153,14 +153,11 @@ func (s *Store) decideGateOnce(ctx context.Context, projectID, serviceID string,
 
 	// (2) The policy. Absent or tombstoned → NOT_CONFIGURED: a recorded decision with no action
 	// and no evidence beyond itself (D4, D7).
-	policy, found, err := readGatePolicyRowOn(ctx, tx, serviceID, false)
-	if err != nil {
-		return domain.GateDecision{}, err
-	}
+	effective, effectiveErr := effectiveGatePolicyTx(ctx, tx, projectID, serviceID)
 	if err := runGateDecisionHook(ctx, attempt, gatePhasePolicyRead, tx); err != nil {
 		return domain.GateDecision{}, err
 	}
-	if !found || !policy.Live() {
+	if errors.Is(effectiveErr, ErrGatePolicyNotConfigured) {
 		dec.State = domain.GateStateNotConfigured
 		dec.Reasons = []domain.GateReasonEntry{{Code: string(domain.GateReasonNotConfigured), Docs: domain.GateDocsURL}}
 		if err := runGateDecisionHook(ctx, attempt, gatePhaseReadsDone, tx); err != nil {
@@ -174,13 +171,19 @@ func (s *Store) decideGateOnce(ctx context.Context, projectID, serviceID string,
 		}
 		return dec, nil
 	}
+	if effectiveErr != nil {
+		return domain.GateDecision{}, effectiveErr
+	}
+	policy := effective.Policy
+	source, ownerID := effective.Source, effective.OwnerID
+	dec.PolicySource, dec.PolicyOwnerID = &source, &ownerID
 	window, ok := sla.WindowByName(policy.Window)
 	if !ok {
 		return domain.GateDecision{}, fmt.Errorf("store: gate policy window %q is not an SLA window", policy.Window)
 	}
 
 	// (3) The active override at evaluated_at, against the live revision.
-	override, err := activeGateOverrideTx(ctx, tx, serviceID, evaluatedAt, &policy.Revision)
+	override, err := activeGateOverrideTx(ctx, tx, serviceID, evaluatedAt, effective)
 	if err != nil {
 		return domain.GateDecision{}, err
 	}
@@ -563,10 +566,10 @@ func insertGateDecisionTx(ctx context.Context, tx pgx.Tx, projectID string, dec 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO service_gate_decisions
 		    (id, project_id, service_id, service_slug, service_name, state, action, reasons, evidence,
-		     policy_revision, window_name, policy_snapshot, override_id, evaluated_at, sealed_through)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+		     policy_revision, policy_source, policy_owner_id, window_name, policy_snapshot, override_id, evaluated_at, sealed_through)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
 		dec.DecisionID, projectID, dec.ServiceID, dec.ServiceSlug, dec.ServiceName, string(dec.State), action,
-		reasons, evidence, dec.PolicyRevision, window, snapshot, dec.OverrideID, dec.EvaluatedAt, dec.SealedThrough)
+		reasons, evidence, dec.PolicyRevision, dec.PolicySource, dec.PolicyOwnerID, window, snapshot, dec.OverrideID, dec.EvaluatedAt, dec.SealedThrough)
 	switch {
 	case err == nil:
 		return nil

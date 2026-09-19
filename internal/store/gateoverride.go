@@ -36,13 +36,16 @@ const gateOverrideListLimit = 50
 // expressions — the database clock and the service's LIVE revision — ride in the same
 // statement so the status function is computed over one instant and one fact set.
 const gateOverrideColumns = `
-	o.id, o.service_id, o.project_id, o.policy_revision,
+	o.id, o.service_id, o.project_id, o.policy_revision, o.policy_source, o.policy_owner_id,
 	o.actor_user_id, o.via_token, o.actor_label,
 	o.reason, o.created_at, o.expires_at,
 	o.revoked_at, o.revoked_reason,
 	o.revoked_by_user_id, o.revoked_via_token, o.revoked_by_label,
 	statement_timestamp(),
-	(SELECT p.revision FROM service_gate_policies p WHERE p.service_id = o.service_id AND p.deleted_at IS NULL)`
+	CASE o.policy_source
+		WHEN 'service' THEN (SELECT p.revision FROM service_gate_policies p WHERE p.service_id = o.service_id AND p.deleted_at IS NULL)
+		WHEN 'project' THEN (SELECT p.revision FROM project_gate_policies p WHERE p.project_id = o.project_id AND p.deleted_at IS NULL)
+	END`
 
 func scanGateOverride(row scannable) (GateOverrideRecord, error) {
 	var (
@@ -52,7 +55,7 @@ func scanGateOverride(row scannable) (GateOverrideRecord, error) {
 		live   *int64
 	)
 	o := &rec.GateOverride
-	if err := row.Scan(&o.ID, &o.ServiceID, &o.ProjectID, &o.PolicyRevision,
+	if err := row.Scan(&o.ID, &o.ServiceID, &o.ProjectID, &o.PolicyRevision, &o.PolicySource, &o.PolicyOwnerID,
 		&o.ActorUserID, &o.ViaToken, &o.ActorLabel,
 		&o.Reason, &o.CreatedAt, &o.ExpiresAt,
 		&o.RevokedAt, &reason,
@@ -116,11 +119,14 @@ func (s *Store) CreateGateOverride(
 	if err := lockServiceRowTx(ctx, tx, projectID, serviceID); err != nil {
 		return "", err
 	}
-	live, err := liveGatePolicyRevisionOn(ctx, tx, serviceID)
-	if err != nil {
+	effective, err := effectiveGatePolicyTx(ctx, tx, projectID, serviceID)
+	if errors.Is(err, ErrGatePolicyNotConfigured) || err != nil {
+		if errors.Is(err, ErrGatePolicyNotConfigured) {
+			return "", ErrGateRevisionConflict
+		}
 		return "", err
 	}
-	if live == nil || *live != policyRevision {
+	if effective.Policy.Revision != policyRevision {
 		return "", ErrGateRevisionConflict
 	}
 	now, err := dbNow(ctx, tx)
@@ -157,14 +163,14 @@ func (s *Store) CreateGateOverride(
 	var id string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO service_gate_overrides
-		    (service_id, project_id, policy_revision, actor_user_id, via_token, actor_label, reason, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, statement_timestamp())
+		    (service_id, project_id, policy_revision, policy_source, policy_owner_id, actor_user_id, via_token, actor_label, reason, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, statement_timestamp())
 		RETURNING id`,
-		serviceID, projectID, policyRevision, actor.userID(), actor.ViaToken, actor.Label, reason, expiresAt.UTC()).Scan(&id); err != nil {
+		serviceID, projectID, policyRevision, string(effective.Source), effective.OwnerID, actor.userID(), actor.ViaToken, actor.Label, reason, expiresAt.UTC()).Scan(&id); err != nil {
 		return "", fmt.Errorf("store: insert gate override: %w", err)
 	}
 	if err := insertGateAudit(ctx, tx, projectID, actor, "gate.override.create",
-		"service="+serviceID+" override="+id+" policy_revision="+fmt.Sprint(policyRevision)+
+		"service="+serviceID+" override="+id+" policy_source="+string(effective.Source)+" policy_owner_id="+effective.OwnerID+" policy_revision="+fmt.Sprint(policyRevision)+
 			" expires_at="+expiresAt.UTC().Format(time.RFC3339)+" actor="+actor.Label); err != nil {
 		return "", err
 	}
@@ -302,9 +308,9 @@ func (s *Store) ListGateOverrides(ctx context.Context, projectID, serviceID stri
 // snapshot instant (D9): an unrevoked row whose status, computed against the live revision
 // passed in and `at` (= evaluated_at), is `active`. It runs inside the decision transaction so
 // the override and every other fact come from one snapshot (D6a).
-func activeGateOverrideTx(ctx context.Context, tx pgx.Tx, serviceID string, at time.Time, liveRevision *int64) (*domain.GateOverride, error) {
+func activeGateOverrideTx(ctx context.Context, tx pgx.Tx, serviceID string, at time.Time, effective domain.EffectiveGatePolicy) (*domain.GateOverride, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT id, service_id, project_id, policy_revision, actor_user_id, via_token, actor_label,
+		SELECT id, service_id, project_id, policy_revision, policy_source, policy_owner_id, actor_user_id, via_token, actor_label,
 		       reason, created_at, expires_at
 		  FROM service_gate_overrides
 		 WHERE service_id = $1 AND revoked_at IS NULL
@@ -315,12 +321,12 @@ func activeGateOverrideTx(ctx context.Context, tx pgx.Tx, serviceID string, at t
 	defer rows.Close()
 	for rows.Next() {
 		var o domain.GateOverride
-		if err := rows.Scan(&o.ID, &o.ServiceID, &o.ProjectID, &o.PolicyRevision, &o.ActorUserID, &o.ViaToken, &o.ActorLabel,
+		if err := rows.Scan(&o.ID, &o.ServiceID, &o.ProjectID, &o.PolicyRevision, &o.PolicySource, &o.PolicyOwnerID, &o.ActorUserID, &o.ViaToken, &o.ActorLabel,
 			&o.Reason, &o.CreatedAt, &o.ExpiresAt); err != nil {
 			return nil, fmt.Errorf("store: scan gate override for decision: %w", err)
 		}
 		o.CreatedAt, o.ExpiresAt = o.CreatedAt.UTC(), o.ExpiresAt.UTC()
-		if domain.GateOverrideStatusAt(o, at, liveRevision) == domain.GateOverrideActive {
+		if o.PolicySource == effective.Source && o.PolicyOwnerID == effective.OwnerID && domain.GateOverrideStatusAt(o, at, &effective.Policy.Revision) == domain.GateOverrideActive {
 			return &o, nil
 		}
 	}

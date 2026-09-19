@@ -32,15 +32,18 @@ import (
 
 // gatePolicyView is the GET …/gate/policy shape of D13a, field for field.
 type gatePolicyView struct {
-	SchemaVersion         int                                           `json:"schema_version"`
-	Window                string                                        `json:"window"`
-	Clauses               map[domain.GateClause]domain.ClauseAssignment `json:"clauses"`
-	BudgetConsumedPercent int                                           `json:"budget_consumed_percent"`
-	MaxSealLagSeconds     int                                           `json:"max_seal_lag_seconds"`
-	UnknownBehavior       domain.GateUnknownBehavior                    `json:"unknown_behavior"`
-	Revision              int64                                         `json:"revision"`
-	UpdatedAt             time.Time                                     `json:"updated_at"`
-	UpdatedBy             string                                        `json:"updated_by"`
+	SchemaVersion           int                                           `json:"schema_version"`
+	Window                  string                                        `json:"window"`
+	Clauses                 map[domain.GateClause]domain.ClauseAssignment `json:"clauses"`
+	BudgetConsumedPercent   int                                           `json:"budget_consumed_percent"`
+	MaxSealLagSeconds       int                                           `json:"max_seal_lag_seconds"`
+	UnknownBehavior         domain.GateUnknownBehavior                    `json:"unknown_behavior"`
+	Revision                int64                                         `json:"revision"`
+	UpdatedAt               time.Time                                     `json:"updated_at"`
+	UpdatedBy               string                                        `json:"updated_by"`
+	PolicySource            *domain.GatePolicySource                      `json:"policy_source,omitempty"`
+	PolicyOwnerID           *string                                       `json:"policy_owner_id,omitempty"`
+	ServiceOverrideRevision *int64                                        `json:"service_override_revision,omitempty"`
 }
 
 func newGatePolicyView(p domain.GatePolicy) gatePolicyView {
@@ -55,6 +58,26 @@ func newGatePolicyView(p domain.GatePolicy) gatePolicyView {
 		UpdatedAt:             p.UpdatedAt,
 		UpdatedBy:             p.UpdatedBy,
 	}
+}
+
+func newEffectiveGatePolicyView(policy domain.EffectiveGatePolicy) gatePolicyView {
+	view := newGatePolicyView(policy.Policy)
+	view.PolicySource = &policy.Source
+	view.PolicyOwnerID = &policy.OwnerID
+	view.ServiceOverrideRevision = policy.ServiceOverrideRevision
+	return view
+}
+
+type projectGatePolicyStore interface {
+	GetProjectGatePolicy(context.Context, string) (domain.GatePolicy, error)
+	PutProjectGatePolicy(context.Context, string, *int64, domain.GatePolicyDocument, store.GateActor) (int64, bool, error)
+	DeleteProjectGatePolicy(context.Context, string, int64, store.GateActor) error
+	EffectiveGatePolicy(context.Context, string, string) (domain.EffectiveGatePolicy, error)
+}
+
+func (h *Handler) projectGatePolicies() (projectGatePolicyStore, bool) {
+	projectPolicies, ok := h.store.(projectGatePolicyStore)
+	return projectPolicies, ok
 }
 
 // gatePolicyWriteRequest is the PUT body. Every value field is a pointer or a raw message so
@@ -225,6 +248,18 @@ func (h *Handler) recordGateDecision(dec domain.GateDecision) {
 	action := ""
 	if dec.Action != nil {
 		action = string(*dec.Action)
+	}
+	source := "none"
+	if dec.PolicySource != nil {
+		source = string(*dec.PolicySource)
+	}
+	if withSource, ok := h.gateMetrics.(interface {
+		RecordGateDecisionWithPolicySource(string, string, bool, string) error
+	}); ok {
+		if err := withSource.RecordGateDecisionWithPolicySource(string(dec.State), action, dec.Overridden(), source); err != nil {
+			h.logger.Error("gate_metric", "op", "decision", "error", err.Error())
+		}
+		return
 	}
 	if err := h.gateMetrics.RecordGateDecision(string(dec.State), action, dec.Overridden()); err != nil {
 		h.logger.Error("gate_metric", "op", "decision", "error", err.Error())
@@ -501,11 +536,49 @@ func (h *Handler) getGatePolicy(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if policies, ok := h.projectGatePolicies(); ok {
+		effective, err := policies.EffectiveGatePolicy(r.Context(), proj.ID, serviceID)
+		if h.writeGateError(w, "gate_policy_get", err) {
+			return
+		}
+		writeJSON(w, http.StatusOK, newEffectiveGatePolicyView(effective))
+		return
+	}
 	p, err := h.store.GetGatePolicy(r.Context(), proj.ID, serviceID)
 	if h.writeGateError(w, "gate_policy_get", err) {
 		return
 	}
 	writeJSON(w, http.StatusOK, newGatePolicyView(p))
+}
+
+func gatePolicyDocumentFromRequest(w http.ResponseWriter, r *http.Request) (*int64, domain.GatePolicyDocument, bool) {
+	var req gatePolicyWriteRequest
+	if !gateDecodeBody(w, r, &req) {
+		return nil, domain.GatePolicyDocument{}, false
+	}
+	expected, msg := decodeExpectedRevision(req.ExpectedRevision)
+	if msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return nil, domain.GatePolicyDocument{}, false
+	}
+	for _, field := range []struct {
+		name    string
+		present bool
+	}{
+		{"schema_version", req.SchemaVersion != nil}, {"window", req.Window != nil},
+		{"budget_consumed_percent", req.BudgetConsumedPercent != nil}, {"max_seal_lag_seconds", req.MaxSealLagSeconds != nil}, {"unknown_behavior", req.UnknownBehavior != nil},
+	} {
+		if !field.present {
+			writeError(w, http.StatusBadRequest, field.name+": is required")
+			return nil, domain.GatePolicyDocument{}, false
+		}
+	}
+	clauses, msg := decodeGateClauses(req.Clauses)
+	if msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return nil, domain.GatePolicyDocument{}, false
+	}
+	return expected, domain.GatePolicyDocument{SchemaVersion: *req.SchemaVersion, Window: *req.Window, Clauses: clauses, BudgetConsumedPercent: *req.BudgetConsumedPercent, MaxSealLagSeconds: *req.MaxSealLagSeconds, UnknownBehavior: domain.GateUnknownBehavior(*req.UnknownBehavior)}, true
 }
 
 // putGatePolicy creates or replaces the policy (D13a, D14). The body is decoded strictly and
@@ -522,48 +595,79 @@ func (h *Handler) putGatePolicy(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req gatePolicyWriteRequest
-	if !gateDecodeBody(w, r, &req) {
+	expected, doc, ok := gatePolicyDocumentFromRequest(w, r)
+	if !ok {
 		return
-	}
-	expected, msg := decodeExpectedRevision(req.ExpectedRevision)
-	if msg != "" {
-		writeError(w, http.StatusBadRequest, msg)
-		return
-	}
-	for _, f := range []struct {
-		name    string
-		present bool
-	}{
-		{"schema_version", req.SchemaVersion != nil},
-		{"window", req.Window != nil},
-		{"budget_consumed_percent", req.BudgetConsumedPercent != nil},
-		{"max_seal_lag_seconds", req.MaxSealLagSeconds != nil},
-		{"unknown_behavior", req.UnknownBehavior != nil},
-	} {
-		if !f.present {
-			writeError(w, http.StatusBadRequest, f.name+": is required")
-			return
-		}
-	}
-	clauses, msg := decodeGateClauses(req.Clauses)
-	if msg != "" {
-		writeError(w, http.StatusBadRequest, msg)
-		return
-	}
-	doc := domain.GatePolicyDocument{
-		SchemaVersion:         *req.SchemaVersion,
-		Window:                *req.Window,
-		Clauses:               clauses,
-		BudgetConsumedPercent: *req.BudgetConsumedPercent,
-		MaxSealLagSeconds:     *req.MaxSealLagSeconds,
-		UnknownBehavior:       domain.GateUnknownBehavior(*req.UnknownBehavior),
 	}
 	revision, _, err := h.store.PutGatePolicy(r.Context(), proj.ID, serviceID, expected, doc, h.gateActor(r))
 	if h.writeGateError(w, "gate_policy_put", err) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int64{"revision": revision})
+}
+
+func (h *Handler) getProjectGatePolicy(w http.ResponseWriter, r *http.Request) {
+	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionGateEvaluate)
+	if !ok {
+		return
+	}
+	policies, ok := h.projectGatePolicies()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "project_gate_policy_not_wired")
+		return
+	}
+	policy, err := policies.GetProjectGatePolicy(r.Context(), proj.ID)
+	if h.writeGateError(w, "project_gate_policy_get", err) {
+		return
+	}
+	source, ownerID := domain.GatePolicySourceProject, proj.ID
+	writeJSON(w, http.StatusOK, newEffectiveGatePolicyView(domain.EffectiveGatePolicy{Policy: policy, Source: source, OwnerID: ownerID}))
+}
+
+func (h *Handler) putProjectGatePolicy(w http.ResponseWriter, r *http.Request) {
+	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionGateOverride)
+	if !ok {
+		return
+	}
+	policies, ok := h.projectGatePolicies()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "project_gate_policy_not_wired")
+		return
+	}
+	expected, doc, ok := gatePolicyDocumentFromRequest(w, r)
+	if !ok {
+		return
+	}
+	revision, _, err := policies.PutProjectGatePolicy(r.Context(), proj.ID, expected, doc, h.gateActor(r))
+	if h.writeGateError(w, "project_gate_policy_put", err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{"revision": revision})
+}
+
+func (h *Handler) deleteProjectGatePolicy(w http.ResponseWriter, r *http.Request) {
+	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionGateOverride)
+	if !ok {
+		return
+	}
+	policies, ok := h.projectGatePolicies()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "project_gate_policy_not_wired")
+		return
+	}
+	if !r.URL.Query().Has("expected_revision") {
+		writeError(w, http.StatusBadRequest, "expected_revision_required")
+		return
+	}
+	expected, err := strconv.ParseInt(r.URL.Query().Get("expected_revision"), 10, 64)
+	if err != nil || expected < 0 {
+		writeError(w, http.StatusBadRequest, "expected_revision_invalid")
+		return
+	}
+	if h.writeGateError(w, "project_gate_policy_delete", policies.DeleteProjectGatePolicy(r.Context(), proj.ID, expected, h.gateActor(r))) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // deleteGatePolicy tombstones the policy (D13a): `expected_revision` is REQUIRED in the query,

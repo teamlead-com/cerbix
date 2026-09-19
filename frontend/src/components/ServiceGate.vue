@@ -425,11 +425,15 @@ const policyError = ref("");
  */
 const conflict = ref<"" | "policy" | "delete" | "override">("");
 const blocked = computed(() => conflict.value !== "");
+/** A project document is displayed here but is not a service row to CAS or delete. */
+const inheritedPolicy = computed(() => policy.value?.policy_source === "project");
 
 function prefill() {
   if (policy.value) {
     draft.value = draftFromPolicy(policy.value);
-    baseRevision.value = policy.value.revision;
+    // Older responses/fixtures predate the source tuple; they were necessarily explicit service
+    // documents, so only the explicit project value starts a service override at `null`.
+    baseRevision.value = policy.value.policy_source === "project" ? null : policy.value.revision;
   } else {
     draft.value = createTemplate(windowsWithTarget.value);
     baseRevision.value = null;
@@ -529,7 +533,7 @@ watch(deleteOpen, (open) => {
 });
 
 function openDelete() {
-  if (!policy.value || !props.canPolicyWrite || blocked.value) return;
+  if (!policy.value || inheritedPolicy.value || !props.canPolicyWrite || blocked.value) return;
   deleteError.value = "";
   deleteOpen.value = true;
   void nextTick(() => deleteCancelBtn.value?.focus());
@@ -721,7 +725,9 @@ const SEG_ITEM = "border-r border-border px-[10px] py-[3px] text-[11.5px] last:b
         <span :class="[PILL_DOT, headerPill.dot]"></span>{{ headerPill.label }}
       </span>
       <div class="flex-1"></div>
-      <span v-if="policyStatus === 'ok' && policy" :class="chipMono" data-testid="gate-policy-chip">revision {{ policy.revision }}</span>
+      <span v-if="policyStatus === 'ok' && policy" :class="inheritedPolicy ? chipAcc : chipMono" data-testid="gate-policy-chip">
+        {{ inheritedPolicy ? `inherited from project · revision ${policy.revision}` : `revision ${policy.revision}` }}
+      </span>
       <span v-else-if="policyStatus === 'none'" :class="chipDorm" data-testid="gate-policy-chip">no policy</span>
       <button
         type="button"
@@ -815,13 +821,13 @@ const SEG_ITEM = "border-r border-border px-[10px] py-[3px] text-[11.5px] last:b
         <div class="flex flex-wrap items-center gap-[10px]">
           <h3 class="text-[13px] font-semibold">Gate policy</h3>
           <span :class="chipMono">schema_version {{ policy?.schema_version ?? GATE_SCHEMA_VERSION }}</span>
-          <span v-if="policy" :class="chipMono">revision {{ policy.revision }}</span>
+          <span v-if="policy" :class="inheritedPolicy ? chipAcc : chipMono">{{ inheritedPolicy ? `inherited from project · revision ${policy.revision}` : `revision ${policy.revision}` }}</span>
           <span v-else :class="chipDorm">new policy</span>
           <div class="flex-1"></div>
           <span v-if="managedBy" :class="chipFile" :title="'Owned by the file provider ' + managedBy">file-managed service</span>
           <span v-if="managedBy" :class="chipAcc">gate owned here</span>
           <button v-if="canPolicyWrite && !editing" type="button" :class="BTN_SM" :disabled="blocked" data-testid="gate-configure" @click="openEditor">
-            Configure
+            {{ inheritedPolicy ? "Create service override" : "Configure" }}
           </button>
         </div>
 
@@ -982,7 +988,7 @@ const SEG_ITEM = "border-r border-border px-[10px] py-[3px] text-[11.5px] last:b
             <button type="submit" :class="BTN_PRI" :disabled="!canSave" data-testid="gate-save">{{ saving ? "Saving…" : "Save policy" }}</button>
             <button type="button" :class="BTN" :disabled="saving" data-testid="gate-discard" @click="discard">Discard changes</button>
             <span class="flex-1"></span>
-            <button v-if="policy" type="button" :class="BTN_DANGER" :disabled="saving || blocked" data-testid="gate-delete" @click="openDelete">Delete policy…</button>
+            <button v-if="policy && !inheritedPolicy" type="button" :class="BTN_DANGER" :disabled="saving || blocked" data-testid="gate-delete" @click="openDelete">Delete policy…</button>
           </div>
         </form>
       </div>

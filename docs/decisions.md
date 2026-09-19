@@ -8322,6 +8322,20 @@ choice inside the drafts. In particular, FR-024 D2 (one window) remains the live
 the owner approves `func-reliability-gate-all-windows.md` and the later implementation closes its
 compatibility gates.
 
+## D-0254 — iter-0185 approval and inherited gate source tuple (2026-09-19)
+
+**Decision.** The owner instruction opening `iter-0185` approves revision 1 of
+`func-project-gate-policy.md` for backend, schema and API work. A project policy is a distinct,
+tombstoned revision stream; no service row is created during inheritance. Gate decisions and active
+overrides bind `(policy_source, policy_owner_id, policy_revision)`. Project writes use the existing
+project-admin `gate:override` authorization action because its grant set is exactly
+global_admin/org_admin/project_admin, while service policy writes remain editor+.
+
+**Consequence.** [`mock-project-gate-policy.html`](design/mock-project-gate-policy.html) received
+explicit owner approval on 2026-09-19. The project-policy SPA editor and inherited-service panel are
+authorized; FR-034/NFR-028 and DoD-0185 remain `IN_PROGRESS` until their integration, browser and
+PostgreSQL gates pass.
+
 ## D-0253 — audit retention contract approved for iter-0184 (2026-09-19)
 
 **Decision.** The owner instruction opening iter-0184 approves revision 1 of

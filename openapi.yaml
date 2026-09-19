@@ -1228,6 +1228,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/v1/projects/{projectID}/gate/policy:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    get:
+      tags: [gate]
+      summary: Read a project's inherited gate policy (viewer+)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GatePolicy' } } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [gate]
+      summary: Create or replace a project gate policy (project admin+)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GatePolicyWrite' } } } }
+      responses:
+        '200': { description: Revision, content: { application/json: { schema: { type: object, required: [revision], properties: { revision: { type: integer, format: int64 } } } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: revision_conflict }
+    delete:
+      tags: [gate]
+      summary: Tombstone a project gate policy (project admin+)
+      parameters: [ { name: expected_revision, in: query, required: true, schema: { type: integer, format: int64, minimum: 0 } } ]
+      responses:
+        '204': { description: Deleted. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: revision_conflict }
+
   /api/v1/projects/{projectID}/services/{serviceID}/gate/policy:
     parameters:
       - { $ref: '#/components/parameters/ProjectID' }
@@ -5091,8 +5121,8 @@ components:
         service_incident_open: { $ref: '#/components/schemas/GateClauseAssignment' }
     GatePolicy:
       type: object
-      description: A service's live gate policy as stored (FR-024 D13a).
-      required: [schema_version, window, clauses, budget_consumed_percent, max_seal_lag_seconds, unknown_behavior, revision, updated_at, updated_by]
+      description: An effective gate policy. `policy_source` and `policy_owner_id` state whether a service override or a project policy supplied the document.
+      required: [schema_version, window, clauses, budget_consumed_percent, max_seal_lag_seconds, unknown_behavior, revision, updated_at, updated_by, policy_source, policy_owner_id]
       additionalProperties: false
       properties:
         schema_version: { type: integer, description: The clause vocabulary version; 1 is the only known one. }
@@ -5104,6 +5134,9 @@ components:
         revision: { type: integer, format: int64, description: DB-owned generation, never reused. }
         updated_at: { type: string, format: date-time }
         updated_by: { type: string, description: The writer's immutable audit label. }
+        policy_source: { type: string, enum: [service, project] }
+        policy_owner_id: { type: string, format: uuid }
+        service_override_revision: { type: integer, format: int64, nullable: true }
     GatePolicyWrite:
       type: object
       description: >

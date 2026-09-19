@@ -2,6 +2,19 @@
 
 Operational guide. Grows as capabilities land.
 
+## Inherited reliability-gate policy
+
+When a gate decision surprises an operator, inspect `policy_source`, `policy_owner_id` and
+`policy_revision` in the ledger first. `service` means an explicit service override won;
+`project` means no live service policy existed at that snapshot; `none` accompanies
+`NOT_CONFIGURED`. Do not copy the project document into a service to diagnose it.
+
+To return one service to inheritance, delete only its explicit service policy using that service
+revision. The next effective read and decision will show the project tuple. A project policy mutation
+revokes only active overrides bound to `policy_source=project` on currently inheriting services;
+explicit-service-policy overrides remain active. A `revision_conflict` means reload the source tuple
+before retrying—never reuse a project revision as a service CAS token.
+
 ## Audit-log retention
 
 `audit.retention_days` is one instance-wide horizon for organization and global audit rows. A row

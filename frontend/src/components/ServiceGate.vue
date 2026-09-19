@@ -75,6 +75,7 @@ import {
   validateOverride,
   windowsOf,
   type GateFailure,
+  type GateState,
   type GateWindow,
   type PolicyDraft,
   type ServiceSLATarget,
@@ -89,6 +90,7 @@ type GatePolicy = components["schemas"]["GatePolicy"];
 type GateOverride = components["schemas"]["GateOverride"];
 type GateDecision = components["schemas"]["GateDecision"];
 type GateDecisionList = components["schemas"]["GateDecisionList"];
+type EvaluatedWindow = NonNullable<GateDecision["evaluated_windows"]>[number];
 
 const props = defineProps<{
   projectId: string;
@@ -465,10 +467,12 @@ function discard() {
 }
 
 const draftErrors = computed(() => validateDraft(draft.value, windowsWithTarget.value, policy.value?.window ?? ""));
+const allWindowMode = computed(() => draft.value.window_mode === "all");
 /** The stored window lost its target since the policy was saved (reviewer check 2). */
 const windowLost = computed(
   () =>
     editing.value &&
+    draft.value.window_mode === "one" &&
     !!policy.value &&
     draft.value.window === policy.value.window &&
     !windowsWithTarget.value.includes(policy.value.window),
@@ -676,6 +680,15 @@ const sealStale = computed(
   () => !!latest.value && latest.value.seal_lag != null && latest.value.max_seal_lag_seconds != null && latest.value.seal_lag > latest.value.max_seal_lag_seconds,
 );
 const staleReason = computed(() => (latest.value ? sealStaleReason(latest.value.reasons) : undefined));
+function evaluatedWindowState(item: EvaluatedWindow): GateState {
+  if (item.reasons.some((r) => reasonKind(r) === "matched" && r.assignment === "block")) return "BLOCK";
+  if (item.reasons.some((r) => reasonKind(r) === "unavailable" && r.assignment !== "ignore")) return "UNKNOWN";
+  if (item.reasons.some((r) => reasonKind(r) === "matched" && r.assignment === "warn")) return "WARN";
+  return "ALLOW";
+}
+function evaluatedWindowDetermines(item: EvaluatedWindow): boolean {
+  return !!latest.value && evaluatedWindowState(item) === latest.value.state;
+}
 /** The header chip beside the big pill: an override in force, or an action that differs from the state. */
 const actionChip = computed<{ text: string; cls: string } | null>(() => {
   const d = latest.value;
@@ -704,6 +717,7 @@ const chipMono = `${chipPlain} font-mono text-[10.5px]`;
 const chipDorm = `${CHIP_BASE} ${CHIP_DORM}`;
 const chipFile = `${CHIP_BASE} ${CHIP_FILE}`;
 const chipAcc = `${CHIP_BASE} ${CHIP_ACC}`;
+const chipDown = `${CHIP_BASE} ${CHIP_DOWN}`;
 const reasonChipCls = "font-mono text-[10.5px]";
 const INPUT = "h-[30px] rounded-sm border border-border bg-surface px-[10px] text-[13px] text-ink outline-none focus:border-accent disabled:opacity-60";
 const LBL = "text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3";
@@ -785,7 +799,7 @@ const SEG_ITEM = "border-r border-border px-[10px] py-[3px] text-[11.5px] last:b
       <!-- ── Screen 1: the empty state ─────────────────────────────────────────────────── -->
       <div v-if="policyStatus === 'none' && !editing" class="flex flex-col gap-[14px] p-4" data-testid="gate-empty">
         <p class="max-w-[62ch] text-[13px] text-ink-2">
-          Nothing asks this service before a release yet. A gate policy names <b>one SLO window</b> of this service and
+          Nothing asks this service before a release yet. A gate policy evaluates <b>one SLO window or every configured window</b> of this service and
           says, for each release-risk fact, whether it <b>blocks</b>, <b>warns</b> or is <b>ignored</b>. A pipeline then
           asks <span class="font-mono">cerbix gate check</span> immediately before the protected step and gets one of
           <span class="font-mono">ALLOW · WARN · BLOCK · UNKNOWN</span>, with the evidence it rests on.
@@ -796,23 +810,22 @@ const SEG_ITEM = "border-r border-border px-[10px] py-[3px] text-[11.5px] last:b
             {{ t.window }} · {{ fmtPercent(t.objective) }}
           </span>
           <span v-if="!targets.length" class="text-[12.5px] text-ink-3" data-testid="gate-windows-none">
-            none yet — set an objective on a window in the reliability report above; a policy needs one
+            none yet — one-window mode needs a target; all-window mode may still be configured and will answer UNKNOWN when target evidence is required
           </span>
           <span class="flex-1"></span>
-          <span v-if="targets.length" :class="chipPlain">a policy picks exactly one</span>
+          <span v-if="targets.length" :class="chipPlain">one or all configured windows</span>
         </div>
         <div v-if="canPolicyWrite" class="flex flex-wrap items-center gap-[10px]">
           <button
             type="button"
             :class="BTN_PRI"
-            :disabled="!windowsWithTarget.length || blocked"
-            :title="!windowsWithTarget.length ? 'no window has a target yet' : undefined"
+            :disabled="blocked"
             data-testid="gate-configure"
             @click="openEditor"
           >
             Configure gate
           </button>
-          <span v-if="!windowsWithTarget.length" class="text-[12px] text-ink-3">a policy needs a window with a target</span>
+          <span v-if="!windowsWithTarget.length" class="text-[12px] text-ink-3">choose all-window mode, or add a target before saving one-window mode</span>
         </div>
       </div>
 
@@ -835,9 +848,18 @@ const SEG_ITEM = "border-r border-border px-[10px] py-[3px] text-[11.5px] last:b
         <div v-if="!editing && policy" class="flex flex-col gap-[14px]" data-testid="gate-policy-readonly">
           <div class="grid grid-cols-2 gap-[14px] max-[760px]:grid-cols-1">
             <div class="flex flex-col gap-[5px]">
+              <span :class="LBL">Window evaluation</span>
+              <span class="text-[13px]" data-testid="gate-readonly-window-mode">{{ (policy.window_mode ?? "one") === "all" ? "Worst of all configured windows" : "One window" }}</span>
+            </div>
+            <div v-if="(policy.window_mode ?? 'one') === 'one'" class="flex flex-col gap-[5px]">
               <span :class="LBL">SLO window</span>
               <span class="font-mono text-[13px]" data-testid="gate-readonly-window">{{ policy.window }}</span>
               <span class="text-[12px] text-ink-3">every budget and burn fact is judged against this window's target</span>
+            </div>
+            <div v-else class="flex flex-col gap-[5px]" data-testid="gate-readonly-inventory">
+              <span :class="LBL">Target inventory preview</span>
+              <span class="flex flex-wrap gap-2"><span v-for="t in targets" :key="t.window" :class="chipMono">{{ t.window }} · {{ fmtPercent(t.objective) }}</span><span v-if="!targets.length" class="text-[12px] text-ink-3">no configured targets</span></span>
+              <span class="text-[12px] text-ink-3">preview only · the policy stores no copied target list</span>
             </div>
             <div class="flex flex-col gap-[5px]">
               <span :class="LBL">When a fact is unavailable</span>
@@ -887,8 +909,21 @@ const SEG_ITEM = "border-r border-border px-[10px] py-[3px] text-[11.5px] last:b
 
         <!-- The editor: the whole document, every field explicit, one revision. -->
         <form v-else-if="editing" class="flex flex-col gap-[14px]" data-testid="gate-policy-form" novalidate @submit.prevent="save">
+          <div class="flex flex-col gap-[5px]">
+            <span class="text-[12.5px] font-medium text-ink-2">Window evaluation</span>
+            <div class="flex flex-wrap gap-2" data-testid="gate-window-mode">
+              <button type="button" :class="draft.window_mode === 'one' ? BTN_PRI : BTN" :disabled="saving" data-testid="gate-window-mode-one" @click="draft.window_mode = 'one'">One window</button>
+              <button type="button" :class="draft.window_mode === 'all' ? BTN_PRI : BTN" :disabled="saving" data-testid="gate-window-mode-all" @click="draft.window_mode = 'all'">Worst of all configured windows</button>
+            </div>
+            <span class="text-[12px] text-ink-3">All-window mode evaluates the complete target inventory in canonical order and stores no copied window list.</span>
+          </div>
+          <div v-if="allWindowMode" class="flex flex-wrap items-center gap-[9px] rounded-[7px] border border-border px-[13px] py-[11px]" data-testid="gate-inventory-preview">
+            <span :class="LBL" class="min-w-[140px]">Target inventory preview</span>
+            <span v-for="t in targets" :key="t.window" :class="chipMono">{{ t.window }} · {{ fmtPercent(t.objective) }}</span>
+            <span v-if="!targets.length" class="text-[12.5px] text-ink-3">no configured targets · constraining window evidence will be unavailable</span>
+          </div>
           <div class="grid grid-cols-2 gap-[14px] max-[760px]:grid-cols-1">
-            <div class="flex flex-col gap-[5px]">
+            <div v-if="!allWindowMode" class="flex flex-col gap-[5px]">
               <label class="text-[12.5px] font-medium text-ink-2" for="gate-window">SLO window</label>
               <select
                 id="gate-window"
@@ -1023,7 +1058,40 @@ const SEG_ITEM = "border-r border-border px-[10px] py-[3px] text-[11.5px] last:b
         </div>
 
         <div v-else-if="latest" class="mt-3 flex flex-col gap-[14px]">
-          <div class="grid grid-cols-2 gap-[14px] max-[760px]:grid-cols-1">
+          <div v-if="latest.window_mode === 'all'" class="flex flex-col gap-2" data-testid="gate-evaluated-windows">
+            <div class="flex flex-wrap items-center gap-2">
+              <span :class="LBL">Evaluated windows</span>
+              <span :class="chipMono">{{ latest.evaluated_windows?.length ?? 0 }} targets · complete snapshot</span>
+            </div>
+            <div class="overflow-hidden rounded-[7px] border border-border">
+              <div
+                v-for="item in latest.evaluated_windows ?? []"
+                :key="item.window"
+                :class="[ROW, evaluatedWindowDetermines(item) ? 'bg-down-weak' : '']"
+                data-testid="gate-evaluated-window"
+                :data-window="item.window"
+                :data-state="evaluatedWindowState(item)"
+              >
+                <span :class="chipMono">{{ item.window }}</span>
+                <span :class="[PILL_BASE, statePill(evaluatedWindowState(item)).cls]">
+                  <span :class="[PILL_DOT, statePill(evaluatedWindowState(item)).dot]"></span>{{ statePill(evaluatedWindowState(item)).label }}
+                </span>
+                <span class="font-mono text-[12.5px] text-ink-2"><template v-if="item.objective != null">objective {{ fmtPercent(item.objective) }}</template><template v-else>no target objective</template></span>
+                <span class="flex-1"></span>
+                <span v-if="evaluatedWindowDetermines(item)" :class="chipDown">determining result</span>
+                <span v-if="item.facts_fresh_until" class="font-mono text-[11.5px] text-ink-3">fresh until {{ sealedLabel(item.facts_fresh_until) }}</span>
+                <span v-if="!item.reasons.length" class="basis-full text-[12px] text-ink-3">No clauses matched; healthy evidence retained.</span>
+                <span v-for="(reason, reasonIndex) in item.reasons" :key="reasonIndex" class="basis-full pl-[2px] text-[12px] text-ink-2">
+                  <span class="font-mono font-medium">{{ reason.clause ?? reason.code }}</span>
+                  <span v-if="reasonKind(reason) === 'unavailable'" class="font-mono"> · {{ reason.code }}</span>
+                  <span v-else-if="reasonValueLabel(reason)" class="font-mono"> · {{ reasonValueLabel(reason) }}</span>
+                </span>
+              </div>
+              <div v-if="!latest.evaluated_windows?.length" class="px-4 py-[11px] text-[12.5px] text-ink-3">No configured service targets were visible in this decision snapshot.</div>
+            </div>
+          </div>
+
+          <div v-if="latest.window_mode !== 'all'" class="grid grid-cols-2 gap-[14px] max-[760px]:grid-cols-1">
             <dl class="grid grid-cols-[max-content_1fr] gap-x-[18px] gap-y-[6px] text-[13px]">
               <dt class="text-ink-3">Evaluated</dt>
               <dd class="font-mono" data-testid="gate-latest-evaluated">{{ preciseLabel(latest.evaluated_at) }}</dd>

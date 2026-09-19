@@ -60,6 +60,23 @@ const FULL = {
   burn_leases: [{ rule_key: "30d/page/fast", severity: "page", firing: false, last_verdict: "ok", evaluated_at: "2026-08-29T14:02:00Z", lease_until: "2026-08-29T14:07:00Z", fresh: true }],
   coverage_state: { live: { armed: true }, burn: { armed: false, reason: "held" } },
 };
+const ALL_WINDOWS = {
+  ...FULL,
+  schema_version: 2,
+  action: "BLOCK",
+  window_mode: "all",
+  window: undefined,
+  target_id: undefined,
+  objective: undefined,
+  evaluated_windows: [
+    { window: "7d", target_id: "t7", objective: 99.5, sealed_through: "2026-08-29T14:00:00Z", seal_lag: 182, burn_leases: [], reasons: [] },
+    { window: "30d", target_id: "t30", objective: 99.9, sealed_through: "2026-08-29T14:00:00Z", seal_lag: 182, burn_leases: [], reasons: [{ code: "budget_consumed", clause: "budget_consumed", assignment: "warn", value: 96.4 }] },
+    { window: "90d", target_id: "t90", objective: 99.99, sealed_through: "2026-08-29T14:00:00Z", seal_lag: 182, burn_leases: [], reasons: [{ code: "service_incident_open", clause: "service_incident_open", assignment: "block", value: "inc-1" }] },
+  ],
+};
+delete (ALL_WINDOWS as any).window;
+delete (ALL_WINDOWS as any).target_id;
+delete (ALL_WINDOWS as any).objective;
 
 function mountView(answer: Res | Promise<Res>, id = "d1") {
   apiMock.GET.mockReset();
@@ -152,6 +169,21 @@ describe("GateDecisionView", () => {
     expect(reasons[1].text()).toContain("clause budget_exhausted");
     expect(t(w, "gate-decision-json").text()).toContain('"decision_id": "d1"');
     expect(JSON.parse(t(w, "gate-decision-json").text())).toEqual(FULL);
+  });
+
+  it("all-window record shows the complete snapshot and the determining worst result", async () => {
+    const w = mountView(ok(ALL_WINDOWS));
+    await settle();
+    expect(t(w, "gate-decision-window-mode").text()).toBe("worst of all configured windows");
+    const rows = w.findAll('[data-testid="gate-decision-evaluated-window"]');
+    expect(rows.map((row) => [row.attributes("data-window"), row.attributes("data-state")])).toEqual([
+      ["7d", "ALLOW"],
+      ["30d", "WARN"],
+      ["90d", "BLOCK"],
+    ]);
+    expect(rows[0].text()).toContain("healthy evidence retained");
+    expect(rows[2].text()).toContain("determining result");
+    expect(JSON.parse(t(w, "gate-decision-json").text())).toEqual(ALL_WINDOWS);
   });
 
   it("service_id null: the row keeps the slug and wears the deleted chip; the raw record keeps the null", async () => {

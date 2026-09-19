@@ -33,7 +33,8 @@ import (
 // gatePolicyView is the GET …/gate/policy shape of D13a, field for field.
 type gatePolicyView struct {
 	SchemaVersion           int                                           `json:"schema_version"`
-	Window                  string                                        `json:"window"`
+	WindowMode              *domain.GateWindowMode                        `json:"window_mode,omitempty"`
+	Window                  *string                                       `json:"window,omitempty"`
 	Clauses                 map[domain.GateClause]domain.ClauseAssignment `json:"clauses"`
 	BudgetConsumedPercent   int                                           `json:"budget_consumed_percent"`
 	MaxSealLagSeconds       int                                           `json:"max_seal_lag_seconds"`
@@ -47,9 +48,8 @@ type gatePolicyView struct {
 }
 
 func newGatePolicyView(p domain.GatePolicy) gatePolicyView {
-	return gatePolicyView{
+	view := gatePolicyView{
 		SchemaVersion:         p.SchemaVersion,
-		Window:                p.Window,
 		Clauses:               p.Clauses,
 		BudgetConsumedPercent: p.BudgetConsumedPercent,
 		MaxSealLagSeconds:     p.MaxSealLagSeconds,
@@ -58,6 +58,14 @@ func newGatePolicyView(p domain.GatePolicy) gatePolicyView {
 		UpdatedAt:             p.UpdatedAt,
 		UpdatedBy:             p.UpdatedBy,
 	}
+	if p.SchemaVersion >= domain.GatePolicySchemaV2 {
+		view.WindowMode = &p.WindowMode
+	}
+	if p.Window != "" {
+		window := p.Window
+		view.Window = &window
+	}
+	return view
 }
 
 func newEffectiveGatePolicyView(policy domain.EffectiveGatePolicy) gatePolicyView {
@@ -89,6 +97,7 @@ func (h *Handler) projectGatePolicies() (projectGatePolicyStore, bool) {
 type gatePolicyWriteRequest struct {
 	ExpectedRevision      json.RawMessage `json:"expected_revision"`
 	SchemaVersion         *int            `json:"schema_version"`
+	WindowMode            *string         `json:"window_mode"`
 	Window                *string         `json:"window"`
 	Clauses               json.RawMessage `json:"clauses"`
 	BudgetConsumedPercent *int            `json:"budget_consumed_percent"`
@@ -252,6 +261,18 @@ func (h *Handler) recordGateDecision(dec domain.GateDecision) {
 	source := "none"
 	if dec.PolicySource != nil {
 		source = string(*dec.PolicySource)
+	}
+	windowMode := "none"
+	if dec.WindowMode != nil {
+		windowMode = string(*dec.WindowMode)
+	}
+	if withMode, ok := h.gateMetrics.(interface {
+		RecordGateDecisionWithPolicySourceAndWindowMode(string, string, bool, string, string) error
+	}); ok {
+		if err := withMode.RecordGateDecisionWithPolicySourceAndWindowMode(string(dec.State), action, dec.Overridden(), source, windowMode); err != nil {
+			h.logger.Error("gate_metric", "op", "decision", "error", err.Error())
+		}
+		return
 	}
 	if withSource, ok := h.gateMetrics.(interface {
 		RecordGateDecisionWithPolicySource(string, string, bool, string) error
@@ -565,7 +586,7 @@ func gatePolicyDocumentFromRequest(w http.ResponseWriter, r *http.Request) (*int
 		name    string
 		present bool
 	}{
-		{"schema_version", req.SchemaVersion != nil}, {"window", req.Window != nil},
+		{"schema_version", req.SchemaVersion != nil},
 		{"budget_consumed_percent", req.BudgetConsumedPercent != nil}, {"max_seal_lag_seconds", req.MaxSealLagSeconds != nil}, {"unknown_behavior", req.UnknownBehavior != nil},
 	} {
 		if !field.present {
@@ -573,12 +594,24 @@ func gatePolicyDocumentFromRequest(w http.ResponseWriter, r *http.Request) (*int
 			return nil, domain.GatePolicyDocument{}, false
 		}
 	}
+	if *req.SchemaVersion == domain.GatePolicySchemaV2 && req.WindowMode == nil {
+		writeError(w, http.StatusBadRequest, "window_mode: is required")
+		return nil, domain.GatePolicyDocument{}, false
+	}
 	clauses, msg := decodeGateClauses(req.Clauses)
 	if msg != "" {
 		writeError(w, http.StatusBadRequest, msg)
 		return nil, domain.GatePolicyDocument{}, false
 	}
-	return expected, domain.GatePolicyDocument{SchemaVersion: *req.SchemaVersion, Window: *req.Window, Clauses: clauses, BudgetConsumedPercent: *req.BudgetConsumedPercent, MaxSealLagSeconds: *req.MaxSealLagSeconds, UnknownBehavior: domain.GateUnknownBehavior(*req.UnknownBehavior)}, true
+	window := ""
+	if req.Window != nil {
+		window = *req.Window
+	}
+	mode := domain.GateWindowModeOne
+	if req.WindowMode != nil {
+		mode = domain.GateWindowMode(*req.WindowMode)
+	}
+	return expected, domain.GatePolicyDocument{SchemaVersion: *req.SchemaVersion, WindowMode: mode, Window: window, Clauses: clauses, BudgetConsumedPercent: *req.BudgetConsumedPercent, MaxSealLagSeconds: *req.MaxSealLagSeconds, UnknownBehavior: domain.GateUnknownBehavior(*req.UnknownBehavior)}, true
 }
 
 // putGatePolicy creates or replaces the policy (D13a, D14). The body is decoded strictly and

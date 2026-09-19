@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -49,8 +50,11 @@ func TestGateClausesV1IsClosedAndOrdered(t *testing.T) {
 	if got := GateClausesFor(GatePolicySchemaV1); len(got) != len(want) {
 		t.Fatalf("GateClausesFor(1) = %v", got)
 	}
-	if got := GateClausesFor(2); got != nil {
-		t.Fatalf("GateClausesFor(2) = %v, want nil for an unknown version", got)
+	if got := GateClausesFor(GatePolicySchemaV2); !reflect.DeepEqual(got, GateClausesV1) {
+		t.Fatalf("GateClausesFor(v2) = %v, want %v", got, GateClausesV1)
+	}
+	if got := GateClausesFor(3); got != nil {
+		t.Fatalf("GateClausesFor(3) = %v, want nil for an unknown version", got)
 	}
 	// The returned slice is a copy: a caller cannot mutate the vocabulary.
 	got := GateClausesFor(GatePolicySchemaV1)
@@ -121,7 +125,7 @@ func TestValidateGatePolicyV1RefusesByName(t *testing.T) {
 		field string
 		words []string
 	}{
-		{"unknown schema version", func(d *GatePolicyDocument) { d.SchemaVersion = 2 }, "schema_version", []string{"got 2", "1"}},
+		{"unknown schema version", func(d *GatePolicyDocument) { d.SchemaVersion = 3 }, "schema_version", []string{"got 3", "1"}},
 		{"empty window", func(d *GatePolicyDocument) { d.Window = "" }, "window", nil},
 		{"padded window", func(d *GatePolicyDocument) { d.Window = " 30d" }, "window", nil},
 		{"unknown clause", func(d *GatePolicyDocument) {
@@ -323,5 +327,51 @@ func TestGateOverrideStatusIsStableAcrossTheExpiredClosure(t *testing.T) {
 	}
 	if !o.Open() {
 		t.Fatal("an unrevoked row is open (the slot predicate)")
+	}
+}
+
+func TestValidateGatePolicyV2WindowModeUnion(t *testing.T) {
+	all := validGateDoc()
+	all.SchemaVersion = GatePolicySchemaV2
+	all.WindowMode = GateWindowModeAll
+	all.Window = ""
+	if _, err := ValidateGatePolicy(all); err != nil {
+		t.Fatalf("v2 all policy was refused: %v", err)
+	}
+
+	all.Window = "30d"
+	if _, err := ValidateGatePolicy(all); err == nil || !strings.Contains(err.Error(), "window") {
+		t.Fatalf("v2 all policy with window error = %v, want a window refusal", err)
+	}
+
+	one := validGateDoc()
+	one.SchemaVersion = GatePolicySchemaV2
+	one.WindowMode = GateWindowModeOne
+	one.Window = ""
+	if _, err := ValidateGatePolicy(one); err == nil || !strings.Contains(err.Error(), "window") {
+		t.Fatalf("v2 one policy without window error = %v, want a window refusal", err)
+	}
+}
+
+func TestGateAlgebraPreservesAllWindowEvidenceAndPrecedence(t *testing.T) {
+	targetID := "00000000-0000-0000-0000-000000000001"
+	state, action, reasons := DecideGateAlgebra([]GateClauseVerdict{
+		{
+			Clause: ClauseBudgetConsumed, Assignment: ClauseAssignWarn, Unavailable: GateReasonBudgetWithheld,
+			Source: "report", Window: "30d", TargetID: &targetID,
+		},
+		{
+			Clause: ClausePageBurnFiring, Assignment: ClauseAssignBlock, Matched: true, Value: "page:1",
+			Source: "latch", Window: "7d", TargetID: &targetID,
+		},
+	}, GateUnknownWarn)
+	if state != GateStateBlock || action != GateActionBlock {
+		t.Fatalf("state/action = %s/%s, want BLOCK/BLOCK", state, action)
+	}
+	if len(reasons) != 2 || reasons[0].Window != "30d" || reasons[1].Window != "7d" {
+		t.Fatalf("window evidence = %#v, want both windows preserved", reasons)
+	}
+	if reasons[0].TargetID == nil || *reasons[0].TargetID != targetID {
+		t.Fatalf("target evidence = %#v, want %q", reasons[0].TargetID, targetID)
 	}
 }

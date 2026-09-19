@@ -8,7 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 This patch release combines the status-page service-component repair from `iter-0181` with the
 alert-routing tenant-boundary hardening from `iter-0182`, bounded audit retention from `iter-0184`,
-and project-level inherited release-gate policy from `iter-0185`.
+project-level inherited release-gate policy from `iter-0185`, and worst-of-all-windows gate evaluation
+from `iter-0186`.
 
 ### ✨ Added
 
@@ -22,6 +23,12 @@ and project-level inherited release-gate policy from `iter-0185`.
   project → not-configured order, records the immutable source tuple in decisions and overrides, and
   exposes the result through API, CLI-compatible schema, metrics, and the Settings / service SPA.
   Editing a project policy revokes only overrides that inherited that project revision.
+
+- **Worst-of-all-windows release-gate evaluation (iter-0186, FR-035 / NFR-029).** A schema-v2
+  project or service policy can evaluate every configured standard SLO target in one snapshot. The
+  decision keeps healthy and unhealthy windows together, applies BLOCK → unavailable → WARN
+  precedence without averaging or early exit, persists complete per-window evidence, and renders
+  mode switching, inventory, inherited policy, UNKNOWN and override states in the SPA.
 
 ### 🩹 Fixed
 
@@ -80,8 +87,9 @@ and project-level inherited release-gate policy from `iter-0185`.
 documentation checks and configured lint green · live status-page Playwright regression included in
 71 passed / 1 skipped / 0 failed · PostgreSQL 16 migration and direct-SQL tenant regressions green,
 including the full DB-backed `internal/store` package. `iter-0184` completed its delivery gates;
-`iter-0185` passes Go/frontend/docs checks, while its opt-in PostgreSQL migration, tenancy, CAS and
-set-based-revocation release gate remains recorded as in progress in `docs/status.md`.</sub>
+`iter-0185` and `iter-0186` pass their PostgreSQL migration/snapshot regressions, full Go and SPA
+suites, generated-schema parity, Dockerized lint, build, docs checks, and the scoped live gate UI
+Playwright suite.</sub>
 
 ---
 

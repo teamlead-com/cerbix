@@ -23,7 +23,8 @@ export type GateDecision = Schemas["GateDecision"];
 export type GateReason = Schemas["GateReason"];
 export type GateState = GateDecision["state"];
 export type GateAction = NonNullable<GateDecision["action"]>;
-export type GateWindow = GatePolicy["window"];
+export type GateWindow = NonNullable<GatePolicy["window"]>;
+export type GateWindowMode = NonNullable<GatePolicy["window_mode"]>;
 export type GateClause = keyof Schemas["GateClauses"];
 export type ClauseAssignment = Schemas["GateClauseAssignment"];
 export type UnknownBehavior = GatePolicy["unknown_behavior"];
@@ -42,7 +43,7 @@ export const GATE_CLAUSES: readonly GateClause[] = [
   "service_incident_open",
 ];
 export const ASSIGNMENTS: readonly ClauseAssignment[] = ["block", "warn", "ignore"];
-export const GATE_SCHEMA_VERSION = 1;
+export const GATE_SCHEMA_VERSION = 2;
 /** D8a: bucket 60 s + grace 120 s + two buckets of headroom; the maximum is a day. */
 export const MIN_SEAL_LAG_SECONDS = 300;
 export const MAX_SEAL_LAG_SECONDS = 86_400;
@@ -166,6 +167,7 @@ export function assignmentClass(a: ClauseAssignment, on: boolean): string {
  * a half-typed value has to be representable either way.
  */
 export interface PolicyDraft {
+  window_mode: GateWindowMode;
   window: GateWindow | "";
   clauses: Record<GateClause, ClauseAssignment>;
   threshold: string | number;
@@ -190,6 +192,7 @@ export function templateWindow(windowsWithTarget: readonly GateWindow[]): GateWi
  */
 export function createTemplate(windowsWithTarget: readonly GateWindow[]): PolicyDraft {
   return {
+    window_mode: "one",
     window: templateWindow(windowsWithTarget),
     clauses: {
       budget_exhausted: "block",
@@ -206,7 +209,8 @@ export function createTemplate(windowsWithTarget: readonly GateWindow[]): Policy
 
 export function draftFromPolicy(p: GatePolicy): PolicyDraft {
   return {
-    window: p.window,
+    window_mode: p.window_mode ?? "one",
+    window: p.window ?? "",
     clauses: { ...p.clauses },
     threshold: String(p.budget_consumed_percent),
     sealLagMinutes: String(p.max_seal_lag_seconds / 60),
@@ -216,15 +220,17 @@ export function draftFromPolicy(p: GatePolicy): PolicyDraft {
 
 /** The WHOLE document (D11): every field explicit, the server fills nothing in. */
 export function draftToBody(d: PolicyDraft, expectedRevision: number | null): GatePolicyWrite {
-  return {
+  const body: GatePolicyWrite = {
     expected_revision: expectedRevision,
     schema_version: GATE_SCHEMA_VERSION,
-    window: d.window as GateWindow,
+    window_mode: d.window_mode,
     clauses: { ...d.clauses },
     budget_consumed_percent: Number(d.threshold),
     max_seal_lag_seconds: Number(d.sealLagMinutes) * 60,
     unknown_behavior: d.unknown_behavior,
   };
+  if (d.window_mode === "one") body.window = d.window as GateWindow;
+  return body;
 }
 
 // ── Client validation, mirroring the server's rules ─────────────────────────────────────────────
@@ -289,8 +295,10 @@ export function validateDraft(
   storedWindow?: GateWindow | "",
 ): Partial<Record<DraftField, string>> {
   const out: Partial<Record<DraftField, string>> = {};
-  const w = validateWindow(d.window, windowsWithTarget, storedWindow);
-  if (w) out.window = w;
+  if (d.window_mode === "one") {
+    const w = validateWindow(d.window, windowsWithTarget, storedWindow ?? "");
+    if (w) out.window = w;
+  }
   const c = validateClauses(d.clauses);
   if (c) out.clauses = c;
   const t = validateThreshold(d.threshold);

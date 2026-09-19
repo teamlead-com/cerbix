@@ -3,7 +3,8 @@
 > **Revision 1 — APPROVED for iter-0185 on 2026-09-19.** Backend/schema/API work is authorized by
 > the owner instruction opening this iteration. The dedicated SPA editor mock
 > [`mock-project-gate-policy.html`](../design/mock-project-gate-policy.html) is also approved by the
-> owner on 2026-09-19; frontend implementation is authorized.
+> owner on 2026-09-19 and was explicitly re-approved after alignment to the canonical release-gate
+> CSS, shell, typography and component grammar; frontend implementation remains authorized.
 
 ## 1. Problem
 

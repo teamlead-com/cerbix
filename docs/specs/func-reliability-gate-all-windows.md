@@ -1,9 +1,10 @@
 # func-reliability-gate-all-windows — worst-of-all-windows evaluation (FR-035 / NFR-029)
 
-> **Revision 1 — DRAFT for iter-0186, commissioned 2026-09-19. NOT IMPLEMENTED and the
-> iteration is not opened by this document.** Depends on iter-0185's effective-policy source tuple.
-> This intentionally supersedes FR-024 D2's decision to evaluate exactly one window; owner approval
-> must be recorded before implementation.
+> **Revision 1 — APPROVED for iter-0186 by owner instruction on 2026-09-19.** Backend/schema/API
+> implementation is authorized. Depends on iter-0185's effective-policy source tuple. This
+> intentionally supersedes FR-024 D2's decision to evaluate exactly one window. The canonical-theme
+> artifact [`mock-reliability-gate-all-windows.html`](../design/mock-reliability-gate-all-windows.html)
+> was approved by the owner on 2026-09-19; SPA implementation is authorized.
 
 ## 1. Problem
 

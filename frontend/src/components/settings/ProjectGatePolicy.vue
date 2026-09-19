@@ -137,7 +137,7 @@ onMounted(load);
       <div class="flex-1"></div>
       <span v-if="policy" :class="chipAcc" data-testid="project-gate-source">project policy</span>
       <span v-else :class="chipDorm" data-testid="project-gate-source">no project policy</span>
-      <button v-if="canManage && !editing" type="button" class="h-[32px] rounded-sm border border-border px-3 text-[12.5px] hover:border-border-strong" :disabled="loading || conflict" @click="openEditor">
+      <button v-if="canManage && !editing" type="button" class="h-[32px] rounded-sm border border-border px-3 text-[12.5px] hover:border-border-strong" :disabled="loading || conflict" data-testid="project-gate-configure" @click="openEditor">
         {{ policy ? "Edit policy" : "Configure policy" }}
       </button>
     </div>
@@ -158,7 +158,8 @@ onMounted(load);
 
       <div v-else-if="policy && !editing" class="flex flex-col gap-4" data-testid="project-gate-readonly">
         <div class="grid grid-cols-2 gap-4 max-[760px]:grid-cols-1">
-          <div><span class="text-[11px] font-medium uppercase tracking-wide text-ink-3">SLO window</span><p class="mt-1 font-mono text-[13px]">{{ policy.window }}</p></div>
+          <div><span class="text-[11px] font-medium uppercase tracking-wide text-ink-3">Window evaluation</span><p class="mt-1 text-[13px]">{{ (policy.window_mode ?? "one") === "all" ? "Worst of all configured windows" : "One window" }}</p></div>
+          <div v-if="(policy.window_mode ?? 'one') === 'one'"><span class="text-[11px] font-medium uppercase tracking-wide text-ink-3">SLO window</span><p class="mt-1 font-mono text-[13px]">{{ policy.window }}</p></div>
           <div><span class="text-[11px] font-medium uppercase tracking-wide text-ink-3">Unavailable facts</span><p class="mt-1 text-[13px]">{{ UNKNOWN_BEHAVIOR_LABELS[policy.unknown_behavior] }}</p></div>
         </div>
         <div class="overflow-hidden rounded border border-border">
@@ -181,9 +182,17 @@ onMounted(load);
 
       <form v-else class="flex flex-col gap-4" novalidate @submit.prevent="save">
         <div class="flex flex-wrap items-center gap-2"><span :class="chipPlain">schema_version {{ policy?.schema_version ?? GATE_SCHEMA_VERSION }}</span><span :class="chipPlain">{{ policy ? `revision ${policy.revision}` : "new policy" }}</span></div>
+        <div class="flex flex-col gap-1 text-[12.5px] font-medium text-ink-2">
+          <span>Window evaluation</span>
+          <div class="flex flex-wrap gap-2" data-testid="project-gate-window-mode">
+            <button type="button" class="h-[32px] rounded-sm border px-3 text-[12.5px]" :class="draft.window_mode === 'one' ? 'border-accent bg-accent text-accent-ink' : 'border-border bg-surface'" :disabled="saving" data-testid="project-gate-window-mode-one" @click="draft.window_mode = 'one'">One window</button>
+            <button type="button" class="h-[32px] rounded-sm border px-3 text-[12.5px]" :class="draft.window_mode === 'all' ? 'border-accent bg-accent text-accent-ink' : 'border-border bg-surface'" :disabled="saving" data-testid="project-gate-window-mode-all" @click="draft.window_mode = 'all'">Worst of all configured windows</button>
+          </div>
+          <span class="text-[12px] font-normal text-ink-3">Each inheriting service resolves its own configured target inventory inside the decision snapshot.</span>
+        </div>
         <div class="grid grid-cols-2 gap-4 max-[760px]:grid-cols-1">
-          <label class="flex flex-col gap-1 text-[12.5px] font-medium text-ink-2">SLO window
-            <select v-model="draft.window" class="h-[34px] rounded-sm border border-border bg-surface px-2 font-mono text-[13px]" :class="draftErrors.window ? 'border-down' : ''" :disabled="saving"><option v-for="window in GATE_WINDOWS" :key="window" :value="window">{{ window }}</option></select>
+          <label v-if="draft.window_mode === 'one'" class="flex flex-col gap-1 text-[12.5px] font-medium text-ink-2">SLO window
+            <select v-model="draft.window" class="h-[34px] rounded-sm border border-border bg-surface px-2 font-mono text-[13px]" :class="draftErrors.window ? 'border-down' : ''" :disabled="saving" data-testid="project-gate-window"><option v-for="window in GATE_WINDOWS" :key="window" :value="window">{{ window }}</option></select>
             <span v-if="draftErrors.window" class="text-[12px] text-down">{{ draftErrors.window }}</span>
           </label>
           <label class="flex flex-col gap-1 text-[12.5px] font-medium text-ink-2">When a fact is unavailable
@@ -200,7 +209,7 @@ onMounted(load);
           <label class="flex flex-col gap-1 text-[12.5px] font-medium text-ink-2">Budget consumed threshold, %<input v-model="draft.threshold" type="number" min="1" max="100" class="h-[34px] rounded-sm border border-border bg-surface px-2 font-mono text-[13px]" :class="draftErrors.threshold ? 'border-down' : ''" :disabled="saving"><span v-if="draftErrors.threshold" class="text-[12px] text-down">{{ draftErrors.threshold }}</span></label>
           <label class="flex flex-col gap-1 text-[12.5px] font-medium text-ink-2">Maximum seal lag, minutes<input v-model="draft.sealLagMinutes" type="number" min="1" class="h-[34px] rounded-sm border border-border bg-surface px-2 font-mono text-[13px]" :class="draftErrors['seal-lag'] ? 'border-down' : ''" :disabled="saving"><span v-if="draftErrors['seal-lag']" class="text-[12px] text-down">{{ draftErrors['seal-lag'] }}</span></label>
         </div>
-        <div class="flex gap-2"><button type="submit" class="h-[34px] rounded-sm bg-accent px-4 text-[12.5px] font-medium text-white disabled:opacity-50" :disabled="!canSave">{{ saving ? "Saving…" : "Save policy" }}</button><button type="button" class="h-[34px] rounded-sm border border-border px-4 text-[12.5px]" :disabled="saving" @click="discard">Cancel</button></div>
+        <div class="flex gap-2"><button type="submit" class="h-[34px] rounded-sm bg-accent px-4 text-[12.5px] font-medium text-white disabled:opacity-50" :disabled="!canSave" data-testid="project-gate-save">{{ saving ? "Saving…" : "Save policy" }}</button><button type="button" class="h-[34px] rounded-sm border border-border px-4 text-[12.5px]" :disabled="saving" @click="discard">Cancel</button></div>
       </form>
     </div>
   </section>

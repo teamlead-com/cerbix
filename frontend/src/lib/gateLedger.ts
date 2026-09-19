@@ -36,6 +36,7 @@ export {
   describeFailure,
   failureOf,
   isAbort,
+  reasonKind,
   shortId,
   statePill,
   transportFailure,

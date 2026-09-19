@@ -198,15 +198,19 @@ describe("ServiceGate — who sees which controls (check 1)", () => {
     expect(has(w, "gate-latest-empty")).toBe(true);
   });
 
-  it("editor, unconfigured: Configure is present; with no target it is disabled and says why", async () => {
+  it("editor, unconfigured: all-window policy can be configured even before a target exists", async () => {
     serve({});
     const w = mountGate({ slaTargets: [] });
     await settle();
     expect(has(w, "gate-configure")).toBe(true);
-    expect(disabled(w, "gate-configure")).toBe(true);
+    expect(disabled(w, "gate-configure")).toBe(false);
     expect(has(w, "gate-windows-none")).toBe(true);
-    await w.setProps({ slaTargets: TARGETS });
-    expect(disabled(w, "gate-configure"), "the inventory arrives: Configure enables").toBe(false);
+    await openEditor(w);
+    expect(disabled(w, "gate-save"), "one-window mode still needs a target").toBe(true);
+    await t(w, "gate-window-mode-all").trigger("click");
+    expect(has(w, "gate-window")).toBe(false);
+    expect(has(w, "gate-inventory-preview")).toBe(true);
+    expect(disabled(w, "gate-save"), "all-window mode accepts an empty inventory snapshot").toBe(false);
   });
 
   it("viewer with a policy: the read-only rendering, no form, and no override control even with one active", async () => {
@@ -338,7 +342,8 @@ describe("ServiceGate — the editor and the inventory (check 2)", () => {
     expect(req.params.path).toEqual({ projectID: "p1", serviceID: "s1" });
     expect(req.body).toEqual({
       expected_revision: 3,
-      schema_version: 1,
+      schema_version: 2,
+      window_mode: "one",
       window: "30d",
       clauses: { ...CLAUSES, service_incident_open: "block" },
       budget_consumed_percent: 95,
@@ -348,6 +353,28 @@ describe("ServiceGate — the editor and the inventory (check 2)", () => {
     expect(req.signal, "a write carries its AbortSignal too").toBeInstanceOf(AbortSignal);
     expect(calls(apiMock.GET, "/gate/policy").length, "the echo is not trusted: the policy is re-read").toBeGreaterThan(policyReadsBefore);
     expect(has(w, "gate-policy-form"), "the editor closes on success").toBe(false);
+  });
+
+  it("all-window mode hides the singular selector and saves schema v2 without window", async () => {
+    serve({ policy: ok(POLICY) });
+    apiMock.PUT.mockResolvedValue(ok({ revision: 4 }));
+    const w = mountGate();
+    await settle();
+    await openEditor(w);
+    await t(w, "gate-window-mode-all").trigger("click");
+    expect(has(w, "gate-window")).toBe(false);
+    expect(t(w, "gate-inventory-preview").text()).toContain("7d");
+    expect(t(w, "gate-inventory-preview").text()).toContain("30d");
+    await submitPolicy(w);
+    expect(apiMock.PUT.mock.calls[0][1].body).toEqual({
+      expected_revision: 3,
+      schema_version: 2,
+      window_mode: "all",
+      clauses: CLAUSES,
+      budget_consumed_percent: 90,
+      max_seal_lag_seconds: 900,
+      unknown_behavior: "warn",
+    });
   });
 
   it("creating: the template picks 30d from the inventory and expected_revision is null", async () => {
@@ -637,6 +664,61 @@ describe("ServiceGate — the latest decision is the ledger, never the gate (che
     expect(rows[1].text()).toContain("96.4 % burned");
     expect(rows[1].text()).toContain("in revision 3");
     expect(has(w, "gate-latest-stale-warning")).toBe(false);
+  });
+
+  it("all-window decision renders every target, retains healthy evidence, and marks the worst result", async () => {
+    const allDecision = {
+      ...DECISION,
+      schema_version: 2,
+      window_mode: "all",
+      window: undefined,
+      objective: undefined,
+      target_id: undefined,
+      evaluated_windows: [
+        { window: "7d", target_id: "t7", objective: 99.5, sealed_through: "2026-08-29T14:00:00Z", seal_lag: 182, facts_fresh_until: FUTURE, burn_leases: [], reasons: [] },
+        { window: "30d", target_id: "t30", objective: 99.9, sealed_through: "2026-08-29T14:00:00Z", seal_lag: 182, facts_fresh_until: FUTURE, burn_leases: [], reasons: [BUDGET_WARN] },
+        { window: "90d", target_id: "t90", objective: 99.99, sealed_through: "2026-08-29T14:00:00Z", seal_lag: 182, facts_fresh_until: FUTURE, burn_leases: [], reasons: [INCIDENT_BLOCK] },
+      ],
+    };
+    delete (allDecision as any).window;
+    delete (allDecision as any).objective;
+    delete (allDecision as any).target_id;
+    serve({ policy: ok({ ...POLICY, schema_version: 2, window_mode: "all" }), list: listOf(SUMMARY), record: ok(allDecision) });
+    const w = mountGate();
+    await settle();
+    expect(has(w, "gate-evaluated-windows")).toBe(true);
+    const rows = w.findAll('[data-testid="gate-evaluated-window"]');
+    expect(rows.map((row) => [row.attributes("data-window"), row.attributes("data-state")])).toEqual([
+      ["7d", "ALLOW"],
+      ["30d", "WARN"],
+      ["90d", "BLOCK"],
+    ]);
+    expect(rows[0].text()).toContain("healthy evidence retained");
+    expect(rows[2].text()).toContain("determining result");
+    expect(has(w, "gate-latest-window")).toBe(false);
+  });
+
+  it("all-window UNKNOWN identifies the unavailable target as determining", async () => {
+    const unavailable = { code: "never_sealed", clause: "budget_exhausted", assignment: "block" };
+    const allDecision = {
+      ...DECISION,
+      schema_version: 2,
+      state: "UNKNOWN",
+      action: "BLOCK",
+      window_mode: "all",
+      evaluated_windows: [
+        { window: "7d", target_id: "t7", objective: 99.5, burn_leases: [], reasons: [] },
+        { window: "30d", target_id: "t30", objective: 99.9, burn_leases: [], reasons: [unavailable] },
+      ],
+      reasons: [unavailable],
+    };
+    serve({ policy: ok({ ...POLICY, schema_version: 2, window_mode: "all" }), list: listOf({ ...SUMMARY, state: "UNKNOWN" }), record: ok(allDecision) });
+    const w = mountGate();
+    await settle();
+    const row = w.find('[data-testid="gate-evaluated-window"][data-window="30d"]');
+    expect(row.attributes("data-state")).toBe("UNKNOWN");
+    expect(row.text()).toContain("never_sealed");
+    expect(row.text()).toContain("determining result");
   });
 
   it("an override applied: the action chip, and the info naming the unoverridden_action", async () => {

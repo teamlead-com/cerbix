@@ -42,6 +42,17 @@ type deadlineTx struct {
 	parent      *deadlineTx
 }
 
+// deadlineTxStatementHook is a test seam, nil in production. It counts application statements
+// after their deadline bounds have been established; the SET LOCAL implementation detail is not
+// included. Fixed-statement-count regressions use it to prove bounded set-wise paths.
+var deadlineTxStatementHook func()
+
+func recordDeadlineTxStatement() {
+	if deadlineTxStatementHook != nil {
+		deadlineTxStatementHook()
+	}
+}
+
 // errSliceBudget says the caller-side budget is exhausted: not a failure of the data, a
 // refusal to start more work. Callers stop cleanly, keep what is committed-safe, and leave.
 var errSliceBudget = errors.New("store: slice budget exhausted")
@@ -86,6 +97,7 @@ func (d *deadlineTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.
 	if err := d.ensureBounds(ctx); err != nil {
 		return pgconn.CommandTag{}, err
 	}
+	recordDeadlineTxStatement()
 	return d.Tx.Exec(ctx, sql, args...)
 }
 
@@ -93,6 +105,7 @@ func (d *deadlineTx) Query(ctx context.Context, sql string, args ...any) (pgx.Ro
 	if err := d.ensureBounds(ctx); err != nil {
 		return nil, err
 	}
+	recordDeadlineTxStatement()
 	return d.Tx.Query(ctx, sql, args...)
 }
 
@@ -100,6 +113,7 @@ func (d *deadlineTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.
 	if err := d.ensureBounds(ctx); err != nil {
 		return errRow{err}
 	}
+	recordDeadlineTxStatement()
 	return d.Tx.QueryRow(ctx, sql, args...)
 }
 

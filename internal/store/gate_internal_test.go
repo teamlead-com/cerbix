@@ -151,6 +151,42 @@ func gateFreshLatches(t *testing.T, st *Store, ctx context.Context, f gateFixtur
 	gateLatch(t, st, ctx, f, gateTicketKey, false, 90*time.Second)
 }
 
+func gateAddTarget(t *testing.T, st *Store, ctx context.Context, f gateFixture, window string) string {
+	t.Helper()
+	var targetID string
+	if err := st.pool.QueryRow(ctx, `
+		INSERT INTO sla_targets (service_id, window_name, objective, burn_alert_enabled, burn_rules)
+		VALUES ($1, $2, 50, true, $3::jsonb)
+		RETURNING id`, f.serviceID, window, "["+gatePageRule+","+gateTicketRule+"]").Scan(&targetID); err != nil {
+		t.Fatalf("add %s target: %v", window, err)
+	}
+	return targetID
+}
+
+func gateTargetLatch(t *testing.T, st *Store, ctx context.Context, f gateFixture, targetID, ruleKey string, firing bool, lease time.Duration) {
+	t.Helper()
+	verdict := "clear"
+	if firing {
+		verdict = "fire"
+	}
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO service_burn_alert_state
+		  (service_id, project_id, sla_target_id, rule_key, firing, last_verdict, emitted_seq,
+		   target_generation, config_generation, evaluated_at, lease_until)
+		SELECT s.id, s.project_id, t.id, $3, $4, $5, CASE WHEN $4 THEN 1 ELSE 0 END,
+		       t.alert_generation, s.alert_config_generation, now(), now() + $6::interval
+		  FROM services s JOIN sla_targets t ON t.service_id = s.id
+		 WHERE s.id = $1 AND t.id = $2`, f.serviceID, targetID, ruleKey, firing, verdict, pgInterval(lease)); err != nil {
+		t.Fatalf("latch %s on %s: %v", ruleKey, targetID, err)
+	}
+}
+
+func gateFreshTargetLatches(t *testing.T, st *Store, ctx context.Context, f gateFixture, targetID string) {
+	t.Helper()
+	gateTargetLatch(t, st, ctx, f, targetID, gatePageKey, false, 90*time.Second)
+	gateTargetLatch(t, st, ctx, f, targetID, gateTicketKey, false, 90*time.Second)
+}
+
 func pgInterval(d time.Duration) string {
 	return strings.TrimSuffix(d.String(), "0s")
 }
@@ -193,6 +229,14 @@ func gateDoc(assign map[domain.GateClause]domain.ClauseAssignment) domain.GatePo
 	for _, c := range domain.GateClausesV1 {
 		doc.Clauses = append(doc.Clauses, domain.GateClauseEntry{Clause: c, Assignment: defaults[c]})
 	}
+	return doc
+}
+
+func gateAllWindowsDoc(assign map[domain.GateClause]domain.ClauseAssignment) domain.GatePolicyDocument {
+	doc := gateDoc(assign)
+	doc.SchemaVersion = domain.GatePolicySchemaV2
+	doc.WindowMode = domain.GateWindowModeAll
+	doc.Window = ""
 	return doc
 }
 

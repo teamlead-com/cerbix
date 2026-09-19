@@ -4,10 +4,23 @@ Operational guide. Grows as capabilities land.
 
 ## Inherited reliability-gate policy
 
-When a gate decision surprises an operator, inspect `policy_source`, `policy_owner_id` and
-`policy_revision` in the ledger first. `service` means an explicit service override won;
+When a gate decision surprises an operator, inspect `policy_source`, `policy_owner_id`,
+`policy_revision` and `window_mode` in the ledger first. `service` means an explicit service override won;
 `project` means no live service policy existed at that snapshot; `none` accompanies
 `NOT_CONFIGURED`. Do not copy the project document into a service to diagnose it.
+
+For `window_mode=all`, read `evaluated_windows` before the flattened `reasons`: it is the immutable,
+canonical `24h`, `7d`, `30d`, `90d` target inventory captured by the decision snapshot. Each entry
+names its `target_id`, objective/update time, `sealed_through`/`seal_lag`, fact-revision digest,
+burn-rule leases, `facts_fresh_until`, and window-scoped reasons, including healthy windows with an
+empty reason list. A target present there but absent from current `sla_targets` was deleted after the
+decision; a current target absent there was created after it. The flattened reasons preserve the
+same `window`/`target_id` attribution and show which known BLOCK or unavailable constraining fact
+determined the worst outcome. `service_incident_open` remains service-scoped and appears only once.
+Top-level `facts_fresh_until` is the earliest per-window constraining horizon. A
+`gate_budget_exceeded` response with four targets means the bounded transaction itself missed its
+budget; inventory size must not increase SQL statement count, so inspect PostgreSQL latency/locks
+rather than adding a per-window timeout or retry loop.
 
 To return one service to inheritance, delete only its explicit service policy using that service
 revision. The next effective read and decision will show the project tuple. A project policy mutation
@@ -1384,7 +1397,7 @@ an `absent()` alert, or a vanished leader reads as "no problem".
 
 | Metric (type) | Labels | Meaning |
 |---|---|---|
-| `cerbix_gate_decisions_total` (counter) | `state`, `action`, `overridden` | Decisions by observed state and effective action; a `NOT_CONFIGURED` decision has no action and carries `action="none"`. |
+| `cerbix_gate_decisions_total` (counter) | `state`, `action`, `policy_source`: `service` \| `project` \| `none`, `window_mode`: `one` \| `all` \| `none`, `overridden` | Decisions by observed state and effective action. `none` is used for both policy dimensions only with `NOT_CONFIGURED`; no window name or target id becomes a label. |
 | `cerbix_gate_evaluate_rejected_total` (counter) | `reason`: `process_inflight` \| `principal_inflight` \| `process_rate` \| `principal_rate` | Evaluations refused by a process-local bound BEFORE any transaction (a 429: no report, no ledger row, no rate token burnt). |
 | `cerbix_gate_evaluate_errors_total` (counter) | `kind`: `snapshot_conflict` \| `timeout` \| `ledger_unwritable` \| `error` | Admitted evaluations that failed. Evaluation errors ONLY — a maintenance failure never moves this family. |
 | `cerbix_gate_maintenance_errors_total` (counter) | `kind`: `lock_timeout` \| `statement_timeout` \| `partition_identity` \| `error` | Ledger maintenance statements refused or failed; each retried next pass, never escalated to a longer wait. |

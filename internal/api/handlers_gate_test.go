@@ -54,7 +54,7 @@ var (
 // gateFakeMetrics records every gate recorder call so a test can assert exactly what moved.
 type gateFakeMetrics struct {
 	mu        sync.Mutex
-	decisions []string // state/action/overridden
+	decisions []string // state/action/source/window_mode/overridden
 	rejected  []string
 	errors    []string
 	durations int
@@ -64,6 +64,12 @@ func (m *gateFakeMetrics) RecordGateDecision(state, action string, overridden bo
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.decisions = append(m.decisions, fmt.Sprintf("%s/%s/%t", state, action, overridden))
+	return nil
+}
+func (m *gateFakeMetrics) RecordGateDecisionWithPolicySourceAndWindowMode(state, action string, overridden bool, source, windowMode string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.decisions = append(m.decisions, fmt.Sprintf("%s/%s/%s/%s/%t", state, action, source, windowMode, overridden))
 	return nil
 }
 func (m *gateFakeMetrics) RecordGateEvaluateRejected(reason string) error {
@@ -109,11 +115,16 @@ func gatePtr[T any](v T) *T { return &v }
 var gateT0 = time.Date(2026, 8, 29, 10, 0, 0, 0, time.UTC)
 
 func gateDecisionFixture(state domain.GateState, action *domain.GateAction) domain.GateDecision {
-	return domain.GateDecision{
+	decision := domain.GateDecision{
 		SchemaVersion: domain.GateDecisionSchemaV1, DecisionID: gateDecID, EvaluatedAt: gateT0,
 		ServiceID: gatePtr(gateSvcID), ServiceSlug: "checkout", ServiceName: "Checkout",
 		State: state, Action: action, Reasons: []domain.GateReasonEntry{},
 	}
+	if state != domain.GateStateNotConfigured {
+		decision.PolicySource = gatePtr(domain.GatePolicySourceService)
+		decision.WindowMode = gatePtr(domain.GateWindowModeOne)
+	}
+	return decision
 }
 
 func gateOverrideFixture(id string, status domain.GateOverrideStatus) store.GateOverrideRecord {
@@ -204,7 +215,7 @@ func TestGateDecisionHappyPath(t *testing.T) {
 		t.Fatalf("budget handed to the store = %v, want 5s (gate.evaluate_tx_budget_ms)", g.budgets)
 	}
 	decisions, rejected, errs, durations := m.snapshot()
-	if len(decisions) != 3 || decisions[0] != "ALLOW/ALLOW/false" || len(rejected) != 0 || len(errs) != 0 || durations != 3 {
+	if len(decisions) != 3 || decisions[0] != "ALLOW/ALLOW/service/one/false" || len(rejected) != 0 || len(errs) != 0 || durations != 3 {
 		t.Fatalf("metrics = %v %v %v %d", decisions, rejected, errs, durations)
 	}
 }
@@ -291,7 +302,7 @@ func TestGateDecisionNotConfiguredHasNoActionKey(t *testing.T) {
 		t.Fatalf("body = %s", body)
 	}
 	decisions, _, _, _ := m.snapshot()
-	if len(decisions) != 1 || decisions[0] != "NOT_CONFIGURED//false" {
+	if len(decisions) != 1 || decisions[0] != "NOT_CONFIGURED//none/none/false" {
 		t.Fatalf("metric = %v, want NOT_CONFIGURED with no action", decisions)
 	}
 }
@@ -331,7 +342,7 @@ func TestGateDecisionOverriddenBlock(t *testing.T) {
 		t.Fatalf("override = %s", got["override"])
 	}
 	decisions, _, _, _ := m.snapshot()
-	if len(decisions) != 1 || decisions[0] != "BLOCK/ALLOW/true" {
+	if len(decisions) != 1 || decisions[0] != "BLOCK/ALLOW/service/one/true" {
 		t.Fatalf("metric = %v", decisions)
 	}
 }
@@ -526,7 +537,7 @@ func TestGatePolicyPutIsStrict(t *testing.T) {
 		{"seal lag not whole minutes", replace(`"max_seal_lag_seconds":900`, `"max_seal_lag_seconds":901`), "max_seal_lag_seconds: must be a whole number of minutes", true},
 		{"percent out of range", replace(`"budget_consumed_percent":90`, `"budget_consumed_percent":0`), "budget_consumed_percent: must be an integer between 1 and 100", true},
 		{"unknown_behavior invalid", replace(`"unknown_behavior":"warn"`, `"unknown_behavior":"ignore"`), "unknown_behavior: must be warn|block", true},
-		{"schema_version unknown", replace(`"schema_version":1`, `"schema_version":2`), "schema_version: must be 1", true},
+		{"schema_version unknown", replace(`"schema_version":1`, `"schema_version":3`), "schema_version: must be 1", true},
 	}
 	for _, tc := range cases {
 		before := len(fs.gateCalls())

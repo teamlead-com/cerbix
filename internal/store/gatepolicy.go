@@ -26,18 +26,25 @@ import (
 
 // gatePolicyColumns is the one SELECT list every policy read shares.
 const gatePolicyColumns = `
-	p.service_id, p.project_id, p.window_name, p.schema_version, p.clauses,
+	p.service_id, p.project_id, p.window_name, p.window_mode, p.schema_version, p.clauses,
 	p.budget_consumed_percent, p.max_seal_lag_seconds, p.unknown_behavior,
 	p.revision, p.deleted_at, p.updated_at, p.updated_by`
 
 func scanGatePolicy(row scannable) (domain.GatePolicy, error) {
 	var p domain.GatePolicy
 	var clauses []byte
-	err := row.Scan(&p.ServiceID, &p.ProjectID, &p.Window, &p.SchemaVersion, &clauses,
+	var window *string
+	err := row.Scan(&p.ServiceID, &p.ProjectID, &window, &p.WindowMode, &p.SchemaVersion, &clauses,
 		&p.BudgetConsumedPercent, &p.MaxSealLagSeconds, &p.UnknownBehavior,
 		&p.Revision, &p.DeletedAt, &p.UpdatedAt, &p.UpdatedBy)
 	if err != nil {
 		return domain.GatePolicy{}, err
+	}
+	if window != nil {
+		p.Window = *window
+	}
+	if p.WindowMode == "" {
+		p.WindowMode = domain.GateWindowModeOne
 	}
 	if err := json.Unmarshal(clauses, &p.Clauses); err != nil {
 		return domain.GatePolicy{}, fmt.Errorf("store: decode gate policy clauses: %w", err)
@@ -67,22 +74,6 @@ func readGatePolicyRowOn(ctx context.Context, q dbConn, serviceID string, forUpd
 		return domain.GatePolicy{}, false, fmt.Errorf("store: read gate policy: %w", err)
 	}
 	return p, true, nil
-}
-
-// liveGatePolicyRevisionOn is the service's current LIVE revision, nil when the policy is
-// absent or tombstoned — the argument domain.GateOverrideStatusAt takes.
-func liveGatePolicyRevisionOn(ctx context.Context, q dbConn, serviceID string) (*int64, error) {
-	var rev *int64
-	err := q.QueryRow(ctx,
-		`SELECT revision FROM service_gate_policies WHERE service_id = $1 AND deleted_at IS NULL`,
-		serviceID).Scan(&rev)
-	if noRows(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("store: read live gate policy revision: %w", err)
-	}
-	return rev, nil
 }
 
 // GetGatePolicy reads a service's LIVE policy. A foreign, unknown or malformed service id is
@@ -118,9 +109,12 @@ func (s *Store) GetGatePolicy(ctx context.Context, projectID, serviceID string) 
 func validateGatePolicyDocumentTx(
 	ctx context.Context, tx pgx.Tx, serviceID string, doc domain.GatePolicyDocument,
 ) (map[domain.GateClause]domain.ClauseAssignment, error) {
-	clauses, err := domain.ValidateGatePolicyV1(doc)
+	clauses, err := domain.ValidateGatePolicy(doc)
 	if err != nil {
 		return nil, err
+	}
+	if doc.SchemaVersion == domain.GatePolicySchemaV2 && doc.WindowMode == domain.GateWindowModeAll {
+		return clauses, nil
 	}
 	if _, ok := sla.WindowByName(doc.Window); !ok {
 		return nil, &domain.GatePolicyError{Field: "window",
@@ -153,7 +147,11 @@ func windowNames() string {
 // gatePolicyDocumentEqual is the D14 no-op comparison over the CANONICAL form: the version,
 // the window, every clause's assignment, both thresholds and the unknown behaviour.
 func gatePolicyDocumentEqual(stored domain.GatePolicy, doc domain.GatePolicyDocument, clauses map[domain.GateClause]domain.ClauseAssignment) bool {
-	if stored.SchemaVersion != doc.SchemaVersion || stored.Window != doc.Window ||
+	mode := doc.WindowMode
+	if mode == "" {
+		mode = domain.GateWindowModeOne
+	}
+	if stored.SchemaVersion != doc.SchemaVersion || stored.WindowMode != mode || stored.Window != doc.Window ||
 		stored.BudgetConsumedPercent != doc.BudgetConsumedPercent ||
 		stored.MaxSealLagSeconds != doc.MaxSealLagSeconds ||
 		stored.UnknownBehavior != doc.UnknownBehavior ||
@@ -175,12 +173,13 @@ func gatePolicyAuditText(doc *domain.GatePolicyDocument, clauses map[domain.Gate
 	}
 	raw, err := canonicalJSONBytes(struct {
 		SchemaVersion         int                                           `json:"schema_version"`
+		WindowMode            domain.GateWindowMode                         `json:"window_mode"`
 		Window                string                                        `json:"window"`
 		Clauses               map[domain.GateClause]domain.ClauseAssignment `json:"clauses"`
 		BudgetConsumedPercent int                                           `json:"budget_consumed_percent"`
 		MaxSealLagSeconds     int                                           `json:"max_seal_lag_seconds"`
 		UnknownBehavior       domain.GateUnknownBehavior                    `json:"unknown_behavior"`
-	}{doc.SchemaVersion, doc.Window, clauses, doc.BudgetConsumedPercent, doc.MaxSealLagSeconds, doc.UnknownBehavior})
+	}{doc.SchemaVersion, doc.WindowMode, doc.Window, clauses, doc.BudgetConsumedPercent, doc.MaxSealLagSeconds, doc.UnknownBehavior})
 	if err != nil {
 		return "unrenderable"
 	}
@@ -225,6 +224,9 @@ func (s *Store) PutGatePolicy(
 	if err := lockServiceRowTx(ctx, tx, projectID, serviceID); err != nil {
 		return 0, false, err
 	}
+	if doc.WindowMode == "" {
+		doc.WindowMode = domain.GateWindowModeOne
+	}
 	clauses, err := validateGatePolicyDocumentTx(ctx, tx, serviceID, doc)
 	if err != nil {
 		return 0, false, err
@@ -260,23 +262,23 @@ func (s *Store) PutGatePolicy(
 	if !found {
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO service_gate_policies
-			    (service_id, project_id, window_name, schema_version, clauses, budget_consumed_percent,
+			    (service_id, project_id, window_name, window_mode, schema_version, clauses, budget_consumed_percent,
 			     max_seal_lag_seconds, unknown_behavior, revision, deleted_at, updated_at, updated_by)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, NULL, statement_timestamp(), $9)
+			VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, $9, 1, NULL, statement_timestamp(), $10)
 			RETURNING revision`,
-			serviceID, projectID, doc.Window, doc.SchemaVersion, clausesJSON, doc.BudgetConsumedPercent,
+			serviceID, projectID, doc.Window, string(doc.WindowMode), doc.SchemaVersion, clausesJSON, doc.BudgetConsumedPercent,
 			doc.MaxSealLagSeconds, string(doc.UnknownBehavior), actor.Label).Scan(&revision); err != nil {
 			return 0, false, fmt.Errorf("store: insert gate policy: %w", err)
 		}
 	} else {
 		if err := tx.QueryRow(ctx, `
 			UPDATE service_gate_policies
-			   SET window_name = $2, schema_version = $3, clauses = $4, budget_consumed_percent = $5,
-			       max_seal_lag_seconds = $6, unknown_behavior = $7,
-			       revision = revision + 1, deleted_at = NULL, updated_at = statement_timestamp(), updated_by = $8
+			   SET window_name = NULLIF($2, ''), window_mode = $3, schema_version = $4, clauses = $5, budget_consumed_percent = $6,
+			       max_seal_lag_seconds = $7, unknown_behavior = $8,
+			       revision = revision + 1, deleted_at = NULL, updated_at = statement_timestamp(), updated_by = $9
 			 WHERE service_id = $1
 			RETURNING revision`,
-			serviceID, doc.Window, doc.SchemaVersion, clausesJSON, doc.BudgetConsumedPercent,
+			serviceID, doc.Window, string(doc.WindowMode), doc.SchemaVersion, clausesJSON, doc.BudgetConsumedPercent,
 			doc.MaxSealLagSeconds, string(doc.UnknownBehavior), actor.Label).Scan(&revision); err != nil {
 			return 0, false, fmt.Errorf("store: update gate policy: %w", err)
 		}

@@ -164,7 +164,7 @@ func (s *Store) CreateGateOverride(
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO service_gate_overrides
 		    (service_id, project_id, policy_revision, policy_source, policy_owner_id, actor_user_id, via_token, actor_label, reason, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, statement_timestamp())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, statement_timestamp())
 		RETURNING id`,
 		serviceID, projectID, policyRevision, string(effective.Source), effective.OwnerID, actor.userID(), actor.ViaToken, actor.Label, reason, expiresAt.UTC()).Scan(&id); err != nil {
 		return "", fmt.Errorf("store: insert gate override: %w", err)

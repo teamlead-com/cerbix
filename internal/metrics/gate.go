@@ -56,11 +56,12 @@ var gateDurationBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
 
 // gateDecisionKey is one series of cerbix_gate_decisions_total.
 type gateDecisionKey struct {
-	state, action, policySource string
-	overridden                  bool
+	state, action, policySource, windowMode string
+	overridden                              bool
 }
 
 var gatePolicySources = map[string]bool{"service": true, "project": true, "none": true}
+var gateWindowModes = map[string]bool{"one": true, "all": true, "none": true}
 
 // gateMetrics is the gate surface as held inside Registry, guarded by Registry.mu.
 type gateMetrics struct {
@@ -89,16 +90,22 @@ type gateLedgerStat struct {
 // sets, "none" with a configured state, a real action with NOT_CONFIGURED, or an overridden
 // NOT_CONFIGURED is refused with ErrGateMetricLabel and nothing is recorded.
 func (r *Registry) RecordGateDecision(state, action string, overridden bool) error {
-	return r.recordGateDecision(state, action, overridden, "")
+	return r.recordGateDecision(state, action, overridden, "", "")
 }
 
 // RecordGateDecisionWithPolicySource records the effective source without using an unbounded
 // service, project, or user label. `none` is required for NOT_CONFIGURED decisions.
 func (r *Registry) RecordGateDecisionWithPolicySource(state, action string, overridden bool, policySource string) error {
-	return r.recordGateDecision(state, action, overridden, policySource)
+	return r.recordGateDecision(state, action, overridden, policySource, "")
 }
 
-func (r *Registry) recordGateDecision(state, action string, overridden bool, policySource string) error {
+// RecordGateDecisionWithPolicySourceAndWindowMode records both bounded policy dimensions. `none`
+// is required for both dimensions when the service is NOT_CONFIGURED.
+func (r *Registry) RecordGateDecisionWithPolicySourceAndWindowMode(state, action string, overridden bool, policySource, windowMode string) error {
+	return r.recordGateDecision(state, action, overridden, policySource, windowMode)
+}
+
+func (r *Registry) recordGateDecision(state, action string, overridden bool, policySource, windowMode string) error {
 	if !gateStates[state] {
 		return fmt.Errorf("%w: state %q", ErrGateMetricLabel, state)
 	}
@@ -118,12 +125,15 @@ func (r *Registry) recordGateDecision(state, action string, overridden bool, pol
 	if policySource != "" && (!gatePolicySources[policySource] || (notConfigured) != (policySource == "none")) {
 		return fmt.Errorf("%w: policy_source %q with state %q", ErrGateMetricLabel, policySource, state)
 	}
+	if windowMode != "" && (!gateWindowModes[windowMode] || notConfigured != (windowMode == "none")) {
+		return fmt.Errorf("%w: window_mode %q with state %q", ErrGateMetricLabel, windowMode, state)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.gate.decisions == nil {
 		r.gate.decisions = map[gateDecisionKey]uint64{}
 	}
-	r.gate.decisions[gateDecisionKey{state: state, action: action, policySource: policySource, overridden: overridden}]++
+	r.gate.decisions[gateDecisionKey{state: state, action: action, policySource: policySource, windowMode: windowMode, overridden: overridden}]++
 	return nil
 }
 
@@ -231,7 +241,7 @@ func (g *gateMetrics) snapshot() gateMetrics {
 // so two scrapes with no new observation are byte-identical.
 func (g gateMetrics) write(w *prometheusWriter) {
 	if len(g.decisions) > 0 {
-		w.println(`# HELP cerbix_gate_decisions_total Gate decisions by observed state, effective action and whether an active override changed the action (FR-024 D9); a NOT_CONFIGURED decision has no action and carries action="none".`)
+		w.println(`# HELP cerbix_gate_decisions_total Gate decisions by observed state, effective action, policy source, window mode and whether an active override changed the action (FR-024 D9, FR-035); a NOT_CONFIGURED decision carries action="none", policy_source="none" and window_mode="none".`)
 		w.println("# TYPE cerbix_gate_decisions_total counter")
 		keys := make([]gateDecisionKey, 0, len(g.decisions))
 		for k := range g.decisions {
@@ -248,13 +258,18 @@ func (g gateMetrics) write(w *prometheusWriter) {
 			if a.policySource != b.policySource {
 				return a.policySource < b.policySource
 			}
+			if a.windowMode != b.windowMode {
+				return a.windowMode < b.windowMode
+			}
 			return !a.overridden && b.overridden
 		})
 		for _, k := range keys {
-			if k.policySource == "" {
+			if k.policySource == "" && k.windowMode == "" {
 				w.printf("cerbix_gate_decisions_total{state=%q,action=%q,overridden=%q} %d\n", k.state, k.action, strconv.FormatBool(k.overridden), g.decisions[k])
-			} else {
+			} else if k.windowMode == "" {
 				w.printf("cerbix_gate_decisions_total{state=%q,action=%q,policy_source=%q,overridden=%q} %d\n", k.state, k.action, k.policySource, strconv.FormatBool(k.overridden), g.decisions[k])
+			} else {
+				w.printf("cerbix_gate_decisions_total{state=%q,action=%q,policy_source=%q,window_mode=%q,overridden=%q} %d\n", k.state, k.action, k.policySource, k.windowMode, strconv.FormatBool(k.overridden), g.decisions[k])
 			}
 		}
 	}

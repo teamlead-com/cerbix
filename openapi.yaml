@@ -5122,10 +5122,11 @@ components:
     GatePolicy:
       type: object
       description: An effective gate policy. `policy_source` and `policy_owner_id` state whether a service override or a project policy supplied the document.
-      required: [schema_version, window, clauses, budget_consumed_percent, max_seal_lag_seconds, unknown_behavior, revision, updated_at, updated_by, policy_source, policy_owner_id]
+      required: [schema_version, clauses, budget_consumed_percent, max_seal_lag_seconds, unknown_behavior, revision, updated_at, updated_by, policy_source, policy_owner_id]
       additionalProperties: false
       properties:
-        schema_version: { type: integer, description: The clause vocabulary version; 1 is the only known one. }
+        schema_version: { type: integer, enum: [1, 2], description: The clause vocabulary version. }
+        window_mode: { type: string, enum: [one, all], description: Present for schema v2; `all` evaluates every configured service target. }
         window: { type: string, enum: [24h, 7d, 30d, 90d], description: The SLO window every budget and burn clause is evaluated against (D2). }
         clauses: { $ref: '#/components/schemas/GateClauses' }
         budget_consumed_percent: { type: integer, minimum: 1, maximum: 100, description: The `budget_consumed` clause's threshold over `burned_percent` (D3). }
@@ -5142,11 +5143,12 @@ components:
       description: >
         The PUT body — the whole document, nothing filled in server-side (FR-024 D11, D13a, D14).
         `expected_revision` is required: `null` claims nothing is configured.
-      required: [expected_revision, schema_version, window, clauses, budget_consumed_percent, max_seal_lag_seconds, unknown_behavior]
+      required: [expected_revision, schema_version, clauses, budget_consumed_percent, max_seal_lag_seconds, unknown_behavior]
       additionalProperties: false
       properties:
         expected_revision: { type: integer, format: int64, minimum: 0, nullable: true }
-        schema_version: { type: integer }
+        schema_version: { type: integer, enum: [1, 2] }
+        window_mode: { type: string, enum: [one, all], description: Required for schema v2; schema v1 implies `one`. }
         window: { type: string, enum: [24h, 7d, 30d, 90d] }
         clauses: { $ref: '#/components/schemas/GateClauses' }
         budget_consumed_percent: { type: integer, minimum: 1, maximum: 100 }
@@ -5211,6 +5213,8 @@ components:
         assignment: { $ref: '#/components/schemas/GateClauseAssignment' }
         value: { description: What the clause saw — a number, a rule key, an incident id. }
         source: { type: string, description: The owner the fact came from. }
+        window: { type: string, description: The SLA window that supplied all-window evidence. }
+        target_id: { type: string, format: uuid, description: The target that supplied all-window evidence. }
         docs: { type: string, format: uri }
     GateDecision:
       type: object
@@ -5241,7 +5245,46 @@ components:
           type: array
           items: { $ref: '#/components/schemas/GateReason' }
         policy_revision: { type: integer, format: int64 }
+        window_mode: { type: string, enum: [one, all], description: Present for schema v2 policies. }
         window: { type: string }
+        evaluated_windows:
+          type: array
+          description: Complete target inventory and its per-window evidence when window_mode is all.
+          items:
+            type: object
+            required: [window, burn_leases, reasons]
+            properties:
+              window: { type: string }
+              target_id: { type: string, format: uuid }
+              objective: { type: number, format: double }
+              objective_updated_at: { type: string, format: date-time }
+              sealed_through: { type: string, format: date-time }
+              seal_lag: { type: number, format: double }
+              fact_revisions:
+                type: object
+                required: [count, first_id, last_id, digest]
+                properties:
+                  count: { type: integer }
+                  first_id: { type: string, nullable: true }
+                  last_id: { type: string, nullable: true }
+                  digest: { type: string }
+              burn_leases:
+                type: array
+                items:
+                  type: object
+                  required: [rule_key, severity, firing, last_verdict, evaluated_at, lease_until, fresh]
+                  properties:
+                    rule_key: { type: string }
+                    severity: { type: string, enum: [page, ticket] }
+                    firing: { type: boolean, nullable: true }
+                    last_verdict: { type: string, nullable: true }
+                    evaluated_at: { type: string, format: date-time, nullable: true }
+                    lease_until: { type: string, format: date-time, nullable: true }
+                    fresh: { type: boolean }
+              facts_fresh_until: { type: string, format: date-time }
+              reasons:
+                type: array
+                items: { $ref: '#/components/schemas/GateReason' }
         unknown_behavior: { type: string, enum: [warn, block] }
         max_seal_lag_seconds: { type: integer }
         override_id: { type: string, format: uuid }

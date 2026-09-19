@@ -8516,13 +8516,21 @@ export interface components {
         };
         /** @description An effective gate policy. `policy_source` and `policy_owner_id` state whether a service override or a project policy supplied the document. */
         GatePolicy: {
-            /** @description The clause vocabulary version; 1 is the only known one. */
-            schema_version: number;
+            /**
+             * @description The clause vocabulary version.
+             * @enum {integer}
+             */
+            schema_version: 1 | 2;
+            /**
+             * @description Present for schema v2; `all` evaluates every configured service target.
+             * @enum {string}
+             */
+            window_mode?: "one" | "all";
             /**
              * @description The SLO window every budget and burn clause is evaluated against (D2).
              * @enum {string}
              */
-            window: "24h" | "7d" | "30d" | "90d";
+            window?: "24h" | "7d" | "30d" | "90d";
             clauses: components["schemas"]["GateClauses"];
             /** @description The `budget_consumed` clause's threshold over `burned_percent` (D3). */
             budget_consumed_percent: number;
@@ -8553,9 +8561,15 @@ export interface components {
         GatePolicyWrite: {
             /** Format: int64 */
             expected_revision: number | null;
-            schema_version: number;
+            /** @enum {integer} */
+            schema_version: 1 | 2;
+            /**
+             * @description Required for schema v2; schema v1 implies `one`.
+             * @enum {string}
+             */
+            window_mode?: "one" | "all";
             /** @enum {string} */
-            window: "24h" | "7d" | "30d" | "90d";
+            window?: "24h" | "7d" | "30d" | "90d";
             clauses: components["schemas"]["GateClauses"];
             budget_consumed_percent: number;
             max_seal_lag_seconds: number;
@@ -8636,6 +8650,13 @@ export interface components {
             value?: unknown;
             /** @description The owner the fact came from. */
             source?: string;
+            /** @description The SLA window that supplied all-window evidence. */
+            window?: string;
+            /**
+             * Format: uuid
+             * @description The target that supplied all-window evidence.
+             */
+            target_id?: string;
             /** Format: uri */
             docs?: string;
         };
@@ -8671,7 +8692,47 @@ export interface components {
             reasons: components["schemas"]["GateReason"][];
             /** Format: int64 */
             policy_revision?: number;
+            /**
+             * @description Present for schema v2 policies.
+             * @enum {string}
+             */
+            window_mode?: "one" | "all";
             window?: string;
+            /** @description Complete target inventory and its per-window evidence when window_mode is all. */
+            evaluated_windows?: {
+                window: string;
+                /** Format: uuid */
+                target_id?: string;
+                /** Format: double */
+                objective?: number;
+                /** Format: date-time */
+                objective_updated_at?: string;
+                /** Format: date-time */
+                sealed_through?: string;
+                /** Format: double */
+                seal_lag?: number;
+                fact_revisions?: {
+                    count: number;
+                    first_id: string | null;
+                    last_id: string | null;
+                    digest: string;
+                };
+                burn_leases: {
+                    rule_key: string;
+                    /** @enum {string} */
+                    severity: "page" | "ticket";
+                    firing: boolean | null;
+                    last_verdict: string | null;
+                    /** Format: date-time */
+                    evaluated_at: string | null;
+                    /** Format: date-time */
+                    lease_until: string | null;
+                    fresh: boolean;
+                }[];
+                /** Format: date-time */
+                facts_fresh_until?: string;
+                reasons: components["schemas"]["GateReason"][];
+            }[];
             /** @enum {string} */
             unknown_behavior?: "warn" | "block";
             max_seal_lag_seconds?: number;

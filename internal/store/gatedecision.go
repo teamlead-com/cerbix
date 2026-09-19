@@ -53,6 +53,7 @@ func runGateDecisionHook(ctx context.Context, attempt int, phase string, tx pgx.
 // gateTarget is the policy's window's service-scoped `sla_targets` row.
 type gateTarget struct {
 	id                 string
+	window             string
 	objective          float64
 	objectiveUpdatedAt time.Time
 	rules              []domain.BurnRule
@@ -175,8 +176,12 @@ func (s *Store) decideGateOnce(ctx context.Context, projectID, serviceID string,
 		return domain.GateDecision{}, effectiveErr
 	}
 	policy := effective.Policy
+	dec.SchemaVersion = policy.SchemaVersion
 	source, ownerID := effective.Source, effective.OwnerID
 	dec.PolicySource, dec.PolicyOwnerID = &source, &ownerID
+	if policy.SchemaVersion == domain.GatePolicySchemaV2 && policy.WindowMode == domain.GateWindowModeAll {
+		return s.decideAllWindowsGateTx(ctx, tx, attempt, projectID, serviceID, evaluatedAt, dec, policy, effective)
+	}
 	window, ok := sla.WindowByName(policy.Window)
 	if !ok {
 		return domain.GateDecision{}, fmt.Errorf("store: gate policy window %q is not an SLA window", policy.Window)
@@ -251,9 +256,9 @@ func gateTargetTx(ctx context.Context, tx pgx.Tx, serviceID, window string) (*ga
 	var t gateTarget
 	var rules []byte
 	err := tx.QueryRow(ctx, `
-		SELECT id, objective::float8, updated_at, burn_rules, burn_alert_enabled
+		SELECT id, window_name, objective::float8, updated_at, burn_rules, burn_alert_enabled
 		  FROM sla_targets WHERE service_id = $1 AND window_name = $2`, serviceID, window).
-		Scan(&t.id, &t.objective, &t.objectiveUpdatedAt, &rules, &t.burnAlertEnabled)
+		Scan(&t.id, &t.window, &t.objective, &t.objectiveUpdatedAt, &rules, &t.burnAlertEnabled)
 	if noRows(err) {
 		return nil, nil
 	}
@@ -265,6 +270,234 @@ func gateTargetTx(ctx context.Context, tx pgx.Tx, serviceID, window string) (*ga
 		return nil, fmt.Errorf("store: gate decision burn rules: %w", err)
 	}
 	return &t, nil
+}
+
+func (s *Store) decideAllWindowsGateTx(
+	ctx context.Context, tx pgx.Tx, attempt int, projectID, serviceID string, evaluatedAt time.Time,
+	dec domain.GateDecision, policy domain.GatePolicy, effective domain.EffectiveGatePolicy,
+) (domain.GateDecision, error) {
+	override, err := activeGateOverrideTx(ctx, tx, serviceID, evaluatedAt, effective)
+	if err != nil {
+		return domain.GateDecision{}, err
+	}
+	targets, err := gateTargetsTx(ctx, tx, serviceID)
+	if err != nil {
+		return domain.GateDecision{}, err
+	}
+	targetIDs := make([]string, 0, len(targets))
+	for _, target := range targets {
+		targetIDs = append(targetIDs, target.id)
+	}
+	latches, err := burnLatchTx(ctx, tx, targetIDs)
+	if err != nil {
+		return domain.GateDecision{}, err
+	}
+	var incident *domain.Incident
+	switch inc, err := s.FindOpenAutoIncidentByService(ctx, tx, serviceID); {
+	case err == nil:
+		incident = &inc
+	case errors.Is(err, ErrNotFound):
+	default:
+		return domain.GateDecision{}, err
+	}
+	coverage, err := serviceAlertingStateOn(ctx, tx, projectID, serviceID)
+	if err != nil {
+		return domain.GateDecision{}, err
+	}
+	governing, err := governingRevisionTx(ctx, tx, serviceID, evaluatedAt)
+	if err != nil {
+		return domain.GateDecision{}, err
+	}
+
+	reports, err := gateAllWindowReportsTx(ctx, tx, projectID, serviceID, targets, evaluatedAt)
+	if err != nil {
+		return domain.GateDecision{}, err
+	}
+	inputs := make([]gateClauseInputs, 0, len(targets))
+	for index := range targets {
+		target := &targets[index]
+		inputs = append(inputs, gateClauseInputs{policy: policy, evaluatedAt: evaluatedAt, report: reports[index], target: target, latches: latches})
+	}
+	if err := runGateDecisionHook(ctx, attempt, gatePhaseReadsDone, tx); err != nil {
+		return domain.GateDecision{}, err
+	}
+
+	verdicts := make([]domain.GateClauseVerdict, 0, len(targets)*4+1)
+	evaluated := make([]domain.GateEvaluatedWindow, 0, len(inputs))
+	for _, input := range inputs {
+		windowVerdicts := windowScopedGateVerdicts(evaluateGateClauses(input), input.target)
+		_, _, reasons := domain.DecideGateAlgebra(windowVerdicts, policy.UnknownBehavior)
+		evaluated = append(evaluated, gateEvaluatedWindowOf(input, reasons))
+		verdicts = append(verdicts, windowVerdicts...)
+	}
+	if len(inputs) == 0 {
+		verdicts = append(verdicts, allWindowsMissingObjectiveVerdicts(policy)...)
+	}
+	incidentVerdict := domain.GateClauseVerdict{
+		Clause: domain.ClauseServiceIncidentOpen, Assignment: policy.Clauses[domain.ClauseServiceIncidentOpen], Source: gateSourceIncidents,
+	}
+	if incident != nil {
+		incidentVerdict.Matched, incidentVerdict.Value = true, incident.ID
+	}
+	verdicts = append(verdicts, incidentVerdict)
+	assembleAllWindowsGateDecision(&dec, policy, verdicts, evaluated, inputs, override, coverage, governing)
+
+	if err := insertGateDecisionTx(ctx, tx, projectID, dec, &policy); err != nil {
+		return domain.GateDecision{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.GateDecision{}, fmt.Errorf("store: commit all-window gate decision: %w", err)
+	}
+	return dec, nil
+}
+
+func windowScopedGateVerdicts(verdicts []domain.GateClauseVerdict, target *gateTarget) []domain.GateClauseVerdict {
+	out := make([]domain.GateClauseVerdict, 0, len(verdicts)-1)
+	for _, verdict := range verdicts {
+		if verdict.Clause == domain.ClauseServiceIncidentOpen {
+			continue
+		}
+		targetID := target.id
+		verdict.Window, verdict.TargetID = target.window, &targetID
+		out = append(out, verdict)
+	}
+	return out
+}
+
+func gateEvaluatedWindowOf(in gateClauseInputs, reasons []domain.GateReasonEntry) domain.GateEvaluatedWindow {
+	targetID, objective, objectiveAt := in.target.id, in.target.objective, in.target.objectiveUpdatedAt
+	out := domain.GateEvaluatedWindow{
+		Window: in.target.window, TargetID: &targetID, Objective: &objective, ObjectiveUpdatedAt: &objectiveAt,
+		BurnLeases: gateBurnLeases(in), FactsFreshUntil: factsFreshUntil(in), Reasons: reasons,
+	}
+	if lag, sealed := in.report.SealLag(); sealed {
+		sealedThrough, seconds := in.report.SealedThrough.UTC(), lag.Seconds()
+		factRevisions := factRevisionsOf(in.report)
+		out.SealedThrough, out.SealLagSeconds, out.FactRevisions = &sealedThrough, &seconds, &factRevisions
+	}
+	return out
+}
+
+func gateBurnLeases(in gateClauseInputs) []domain.GateBurnLease {
+	if in.target == nil {
+		return []domain.GateBurnLease{}
+	}
+	leases := make([]domain.GateBurnLease, 0, len(in.target.rules))
+	for _, rule := range dedupedRules(in.target.rules) {
+		lease := domain.GateBurnLease{RuleKey: rule.Key(), Severity: rule.Severity}
+		if latch, ok := in.latches[burnLatchKey{targetID: in.target.id, ruleKey: rule.Key()}]; ok {
+			firing, verdict := latch.firing, latch.lastVerdict
+			evaluatedAt, leaseUntil := latch.evaluatedAt.UTC(), latch.leaseUntil.UTC()
+			lease.Firing, lease.LastVerdict = &firing, &verdict
+			lease.EvaluatedAt, lease.LeaseUntil = &evaluatedAt, &leaseUntil
+			lease.Fresh = latchFresh(latch, in.evaluatedAt)
+		}
+		leases = append(leases, lease)
+	}
+	return leases
+}
+
+func allWindowsMissingObjectiveVerdicts(policy domain.GatePolicy) []domain.GateClauseVerdict {
+	out := make([]domain.GateClauseVerdict, 0, 4)
+	for _, clause := range domain.GateClausesFor(policy.SchemaVersion) {
+		if clause == domain.ClauseServiceIncidentOpen {
+			continue
+		}
+		out = append(out, domain.GateClauseVerdict{
+			Clause: clause, Assignment: policy.Clauses[clause], Unavailable: domain.GateReasonNoObjective,
+			Source: gateSourceReportBudget,
+		})
+	}
+	return out
+}
+
+func assembleAllWindowsGateDecision(
+	dec *domain.GateDecision, policy domain.GatePolicy, verdicts []domain.GateClauseVerdict,
+	evaluated []domain.GateEvaluatedWindow, inputs []gateClauseInputs, override *domain.GateOverride,
+	coverage ServiceAlertingState, governing *domain.GateGoverningRevision,
+) {
+	state, action, reasons := domain.DecideGateAlgebra(verdicts, policy.UnknownBehavior)
+	dec.State, dec.Reasons, dec.EvaluatedWindows = state, reasons, evaluated
+	dec.Action = &action
+	revision, mode, unknown, lagMax := policy.Revision, domain.GateWindowModeAll, policy.UnknownBehavior, policy.MaxSealLagSeconds
+	dec.PolicyRevision, dec.WindowMode = &revision, &mode
+	dec.UnknownBehavior, dec.MaxSealLagSeconds = &unknown, &lagMax
+	if governing != nil {
+		g := *governing
+		dec.GoverningRevision = &g
+	} else {
+		dec.Reasons = append(dec.Reasons, domain.GateReasonEntry{Code: string(domain.GateReasonNoGoverningRevision), Source: gateSourceRevisions})
+	}
+	if coverage.Live.EvaluatedAt != nil {
+		if coverage.Live.LeaseUntil != nil {
+			until := coverage.Live.LeaseUntil.UTC()
+			dec.CoverageLeaseUntil = &until
+		}
+		dec.CoverageState = &domain.GateCoverageState{
+			Live: domain.GateCoverageSignal{Armed: coverage.Live.Armed, Reason: coverage.Live.Reason},
+			Burn: domain.GateCoverageSignal{Armed: coverage.Burn.Armed, Reason: coverage.Burn.Reason},
+		}
+	} else {
+		dec.Reasons = append(dec.Reasons, domain.GateReasonEntry{Code: string(domain.GateReasonNeverEvaluated), Source: gateSourceCoverage})
+	}
+	for _, input := range inputs {
+		fresh := factsFreshUntil(input)
+		if fresh == nil || (dec.FactsFreshUntil != nil && !fresh.Before(*dec.FactsFreshUntil)) {
+			continue
+		}
+		value := fresh.UTC()
+		dec.FactsFreshUntil = &value
+	}
+	if override != nil && action == domain.GateActionBlock {
+		was, allow := action, domain.GateActionAllow
+		dec.Action, dec.UnoverriddenAction = &allow, &was
+		id := override.ID
+		dec.OverrideID = &id
+		dec.Override = &domain.GateOverrideApplied{ID: override.ID, ActorLabel: override.ActorLabel, Reason: override.Reason, ExpiresAt: override.ExpiresAt.UTC()}
+	}
+}
+
+// gateTargetsTx reads the service's complete target inventory once. The caller retains this
+// ordered inventory in decision evidence rather than letting later target edits change history.
+func gateTargetsTx(ctx context.Context, tx pgx.Tx, serviceID string) ([]gateTarget, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id, window_name, objective::float8, updated_at, burn_rules, burn_alert_enabled
+		  FROM sla_targets
+		 WHERE service_id = $1`, serviceID)
+	if err != nil {
+		return nil, fmt.Errorf("store: gate decision targets: %w", err)
+	}
+	defer rows.Close()
+	var targets []gateTarget
+	for rows.Next() {
+		var target gateTarget
+		var rules []byte
+		if err := rows.Scan(&target.id, &target.window, &target.objective, &target.objectiveUpdatedAt, &rules, &target.burnAlertEnabled); err != nil {
+			return nil, fmt.Errorf("store: gate decision target row: %w", err)
+		}
+		if _, ok := sla.WindowByName(target.window); !ok {
+			return nil, fmt.Errorf("store: gate decision target window %q is not an SLA window", target.window)
+		}
+		if err := json.Unmarshal(rules, &target.rules); err != nil {
+			return nil, fmt.Errorf("store: gate decision target burn rules: %w", err)
+		}
+		target.objectiveUpdatedAt = target.objectiveUpdatedAt.UTC()
+		targets = append(targets, target)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate gate decision targets: %w", err)
+	}
+	sort.Slice(targets, func(i, j int) bool { return gateWindowRank(targets[i].window) < gateWindowRank(targets[j].window) })
+	return targets, nil
+}
+
+func gateWindowRank(name string) int {
+	for index, window := range sla.StandardWindows {
+		if window.Name == name {
+			return index
+		}
+	}
+	return len(sla.StandardWindows)
 }
 
 // governingRevisionTx is the declaration revision in force at `at` — the effective revision
@@ -402,24 +635,15 @@ func assembleGateDecision(
 	dec.Action = &act
 
 	// Policy fields: present when a policy exists.
-	rev, win, ub, lagMax := policy.Revision, policy.Window, policy.UnknownBehavior, policy.MaxSealLagSeconds
-	dec.PolicyRevision, dec.Window = &rev, &win
+	rev, mode, win, ub, lagMax := policy.Revision, policy.WindowMode, policy.Window, policy.UnknownBehavior, policy.MaxSealLagSeconds
+	dec.PolicyRevision, dec.WindowMode, dec.Window = &rev, &mode, &win
 	dec.UnknownBehavior, dec.MaxSealLagSeconds = &ub, &lagMax
 
 	// Target fields: when the window's target exists.
 	if in.target != nil {
 		tid, obj, at := in.target.id, in.target.objective, in.target.objectiveUpdatedAt
 		dec.TargetID, dec.Objective, dec.ObjectiveUpdatedAt = &tid, &obj, &at
-		leases := make([]domain.GateBurnLease, 0, len(in.target.rules))
-		for _, r := range dedupedRules(in.target.rules) {
-			lease := domain.GateBurnLease{RuleKey: r.Key(), Severity: r.Severity}
-			if l, ok := in.latches[burnLatchKey{targetID: in.target.id, ruleKey: r.Key()}]; ok {
-				firing, verdict, evalAt, until := l.firing, l.lastVerdict, l.evaluatedAt.UTC(), l.leaseUntil.UTC()
-				lease.Firing, lease.LastVerdict, lease.EvaluatedAt, lease.LeaseUntil = &firing, &verdict, &evalAt, &until
-				lease.Fresh = latchFresh(l, in.evaluatedAt)
-			}
-			leases = append(leases, lease)
-		}
+		leases := gateBurnLeases(in)
 		dec.BurnLeases = &leases
 	}
 
@@ -546,6 +770,18 @@ func insertGateDecisionTx(ctx context.Context, tx pgx.Tx, projectID string, dec 
 	if err != nil {
 		return fmt.Errorf("store: encode gate evidence: %w", err)
 	}
+	var evaluatedWindows any
+	if policy != nil {
+		evaluated := dec.EvaluatedWindows
+		if evaluated == nil {
+			evaluated = []domain.GateEvaluatedWindow{}
+		}
+		raw, err := canonicalJSONBytes(evaluated)
+		if err != nil {
+			return fmt.Errorf("store: encode evaluated gate windows: %w", err)
+		}
+		evaluatedWindows = raw
+	}
 	var action *string
 	if dec.Action != nil {
 		a := string(*dec.Action)
@@ -554,22 +790,27 @@ func insertGateDecisionTx(ctx context.Context, tx pgx.Tx, projectID string, dec 
 	// A nil interface is an explicit SQL NULL for the jsonb column (a nil []byte would not be).
 	var snapshot any
 	var window *string
+	var windowMode *string
 	if policy != nil {
 		raw, err := canonicalJSONBytes(policy.Snapshot())
 		if err != nil {
 			return fmt.Errorf("store: encode gate policy snapshot: %w", err)
 		}
 		snapshot = raw
-		w := policy.Window
-		window = &w
+		if policy.Window != "" {
+			w := policy.Window
+			window = &w
+		}
+		mode := string(policy.WindowMode)
+		windowMode = &mode
 	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO service_gate_decisions
 		    (id, project_id, service_id, service_slug, service_name, state, action, reasons, evidence,
-		     policy_revision, policy_source, policy_owner_id, window_name, policy_snapshot, override_id, evaluated_at, sealed_through)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+		     policy_revision, policy_source, policy_owner_id, window_name, window_mode, evaluated_windows, policy_snapshot, override_id, evaluated_at, sealed_through)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
 		dec.DecisionID, projectID, dec.ServiceID, dec.ServiceSlug, dec.ServiceName, string(dec.State), action,
-		reasons, evidence, dec.PolicyRevision, dec.PolicySource, dec.PolicyOwnerID, window, snapshot, dec.OverrideID, dec.EvaluatedAt, dec.SealedThrough)
+		reasons, evidence, dec.PolicyRevision, dec.PolicySource, dec.PolicyOwnerID, window, windowMode, evaluatedWindows, snapshot, dec.OverrideID, dec.EvaluatedAt, dec.SealedThrough)
 	switch {
 	case err == nil:
 		return nil

@@ -111,6 +111,42 @@ func TestGateDecisionRefusesLabelsOutsideClosedSet(t *testing.T) {
 	}
 }
 
+func TestGateDecisionWindowModeLabelIsClosed(t *testing.T) {
+	reg := New(buildinfo.Info{}, "api")
+	for _, record := range []struct {
+		state, action, source, mode string
+	}{
+		{"ALLOW", "ALLOW", "service", "one"},
+		{"BLOCK", "BLOCK", "project", "all"},
+		{"NOT_CONFIGURED", "", "none", "none"},
+	} {
+		if err := reg.RecordGateDecisionWithPolicySourceAndWindowMode(record.state, record.action, false, record.source, record.mode); err != nil {
+			t.Fatalf("record %+v: %v", record, err)
+		}
+	}
+	got := gateLines(t, reg)
+	for _, want := range []string{
+		`cerbix_gate_decisions_total{state="ALLOW",action="ALLOW",policy_source="service",window_mode="one",overridden="false"} 1`,
+		`cerbix_gate_decisions_total{state="BLOCK",action="BLOCK",policy_source="project",window_mode="all",overridden="false"} 1`,
+		`cerbix_gate_decisions_total{state="NOT_CONFIGURED",action="none",policy_source="none",window_mode="none",overridden="false"} 1`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	for _, bad := range []struct {
+		state, action, source, mode string
+	}{
+		{"ALLOW", "ALLOW", "service", "none"},
+		{"NOT_CONFIGURED", "", "none", "one"},
+		{"ALLOW", "ALLOW", "service", "30d"},
+	} {
+		if err := reg.RecordGateDecisionWithPolicySourceAndWindowMode(bad.state, bad.action, false, bad.source, bad.mode); !errors.Is(err, ErrGateMetricLabel) {
+			t.Fatalf("bad record %+v: want ErrGateMetricLabel, got %v", bad, err)
+		}
+	}
+}
+
 // One test per closed single-label family: every allowed value lands on its own series, an
 // unknown value is refused and leaves the family untouched.
 func TestGateSingleLabelFamiliesAreClosed(t *testing.T) {
@@ -312,7 +348,7 @@ func TestGateFamilyExpositionIsByteStable(t *testing.T) {
 		t.Fatalf("two scrapes with no new observation differ\n--- first ---\n%s\n--- second ---\n%s", first, second)
 	}
 	golden := strings.Join([]string{
-		`# HELP cerbix_gate_decisions_total Gate decisions by observed state, effective action and whether an active override changed the action (FR-024 D9); a NOT_CONFIGURED decision has no action and carries action="none".`,
+		`# HELP cerbix_gate_decisions_total Gate decisions by observed state, effective action, policy source, window mode and whether an active override changed the action (FR-024 D9, FR-035); a NOT_CONFIGURED decision carries action="none", policy_source="none" and window_mode="none".`,
 		"# TYPE cerbix_gate_decisions_total counter",
 		`cerbix_gate_decisions_total{state="ALLOW",action="ALLOW",overridden="false"} 1`,
 		`cerbix_gate_decisions_total{state="BLOCK",action="ALLOW",overridden="true"} 1`,
@@ -364,7 +400,7 @@ func TestGateFamilyExpositionIsByteStable(t *testing.T) {
 // family is fixed here; a new label name is a spec change, not a code change.
 func TestGateFamiliesCarryOnlyClosedLabels(t *testing.T) {
 	reg := New(buildinfo.Info{}, "all")
-	_ = reg.RecordGateDecision("WARN", "WARN", false)
+	_ = reg.RecordGateDecisionWithPolicySourceAndWindowMode("WARN", "WARN", false, "project", "all")
 	_ = reg.RecordGateEvaluateRejected("process_rate")
 	_ = reg.RecordGateEvaluateError("timeout")
 	_ = reg.RecordGateMaintenanceError("error")
@@ -372,7 +408,7 @@ func TestGateFamiliesCarryOnlyClosedLabels(t *testing.T) {
 	reg.SetGateLedgerGauges(0, 0, 0, 0)
 
 	allowed := map[string]map[string]bool{
-		"cerbix_gate_decisions_total":                        {"state": true, "action": true, "overridden": true},
+		"cerbix_gate_decisions_total":                        {"state": true, "action": true, "policy_source": true, "window_mode": true, "overridden": true},
 		"cerbix_gate_evaluate_rejected_total":                {"reason": true},
 		"cerbix_gate_evaluate_errors_total":                  {"kind": true},
 		"cerbix_gate_maintenance_errors_total":               {"kind": true},

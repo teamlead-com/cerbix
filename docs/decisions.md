@@ -8332,9 +8332,29 @@ project-admin `gate:override` authorization action because its grant set is exac
 global_admin/org_admin/project_admin, while service policy writes remain editor+.
 
 **Consequence.** [`mock-project-gate-policy.html`](design/mock-project-gate-policy.html) received
-explicit owner approval on 2026-09-19. The project-policy SPA editor and inherited-service panel are
-authorized; FR-034/NFR-028 and DoD-0185 remain `IN_PROGRESS` until their integration, browser and
-PostgreSQL gates pass.
+explicit owner approval on 2026-09-19 and explicit re-approval after its CSS, shell, typography and
+component grammar were aligned byte-for-byte with the canonical release-gate mock. The project-policy
+SPA editor and inherited-service panel are authorized; FR-034/NFR-028 and DoD-0185 remain
+`IN_PROGRESS` until their integration, browser and PostgreSQL gates pass.
+
+## D-0255 — iter-0186 approves all-window gate aggregation (2026-09-19)
+
+**Decision.** The owner instruction opening `iter-0186` approves revision 1 of
+[`func-reliability-gate-all-windows.md`](specs/func-reliability-gate-all-windows.md) and supersedes
+FR-024 D2's one-window-only evaluation rule. Policy schema v2 may therefore use `window_mode=one|all`;
+all-window evaluation is exhaustive and canonical, never averaged or early-exited. Backend, schema,
+storage, API, CLI, ledger, metrics, runbook and tests are authorized. The material SPA changes remain
+blocked on an approved artifact mock. The owner approved
+[`mock-reliability-gate-all-windows.html`](design/mock-reliability-gate-all-windows.html) on 2026-09-19,
+so that design gate is now discharged and SPA implementation is authorized.
+
+**Consequence.** Existing v1 rows preserve one-window semantics and revision. `FR-035/NFR-029` is
+`IN_PROGRESS`; the UI control may now be implemented from the approved artifact. The backend report owner loads all
+configured windows in five set-wise phases (watermark, revision boundary, segments, burn aggregates,
+repair ranges), so one and four targets issue the same number of decision statements. Each ledger
+window keeps objective, sealed watermark/lag, fact-revision digest, burn leases and its own freshness
+horizon. Because the inventory is hard-bounded to four standard windows, the ledger byte checks are
+bounded at 16 KiB for evidence and 4 KiB for flattened reasons rather than truncating evidence.
 
 ## D-0253 — audit retention contract approved for iter-0184 (2026-09-19)
 

@@ -66,6 +66,11 @@ async function pipelineDecides(page: Page, projectID: string, svcID: string) {
 test.describe("reliability gate UI", () => {
   test.afterEach(async ({ page }) => {
     const { projectID } = await ensureE2EWorkspace(page);
+    const projectPolicy = await page.request.get(`/api/v1/projects/${projectID}/gate/policy`);
+    if (projectPolicy.ok()) {
+      const policy = await projectPolicy.json();
+      await page.request.delete(`/api/v1/projects/${projectID}/gate/policy?expected_revision=${policy.revision}`);
+    }
     for (const s of await apiGet(page, `/api/v1/projects/${projectID}/services`)) {
       if ((s.service.slug as string).startsWith(PREFIX)) {
         await apiSend(page, "delete", `/api/v1/projects/${projectID}/services/${s.service.id}`);
@@ -321,5 +326,110 @@ test.describe("reliability gate UI", () => {
     } finally {
       await stale.close();
     }
+  });
+
+  test("iter-0186: inherited all-window policy, mode switching, UNKNOWN evidence, override, and mixed worst-result presentation", async ({ page }) => {
+    await page.goto("/services");
+    const { projectID } = await ensureE2EWorkspace(page);
+    const slug = `${PREFIX}-all-windows`;
+    const svcID = await createGovernedService(page, projectID, slug);
+    const secondTarget = await apiSend(page, "put", `/api/v1/projects/${projectID}/services/${svcID}/sla-target`, { window: "7d", objective: 99.5 });
+    expect(secondTarget.status(), await secondTarget.text()).toBe(200);
+
+    const clauses = { budget_exhausted: "block", budget_consumed: "warn", page_burn_firing: "block", ticket_burn_firing: "warn", service_incident_open: "warn" };
+    const inherited = await apiSend(page, "put", `/api/v1/projects/${projectID}/gate/policy`, {
+      expected_revision: null,
+      schema_version: 2,
+      window_mode: "all",
+      clauses,
+      budget_consumed_percent: 90,
+      max_seal_lag_seconds: 900,
+      unknown_behavior: "block",
+    });
+    expect(inherited.status(), await inherited.text()).toBe(200);
+    const inheritedPolicy = await inherited.json();
+
+    await page.goto(`/services/${svcID}`);
+    await expect(page.getByTestId("gate-policy-chip")).toHaveText(`inherited from project · revision ${inheritedPolicy.revision}`);
+    await expect(page.getByTestId("gate-readonly-window-mode")).toHaveText("Worst of all configured windows");
+
+    // A service override starts from the effective project document, but CAS starts at null.
+    await page.getByTestId("gate-configure").click();
+    await expect(page.getByTestId("gate-window-mode-all")).toBeVisible();
+    await expect(page.getByTestId("gate-window")).toHaveCount(0);
+    await expect(page.getByTestId("gate-inventory-preview")).toContainText("7d");
+    await expect(page.getByTestId("gate-inventory-preview")).toContainText("30d");
+    await page.getByTestId("gate-window-mode-one").click();
+    await expect(page.getByTestId("gate-window")).toBeVisible();
+    await page.getByTestId("gate-window-mode-all").click();
+    await expect(page.getByTestId("gate-window")).toHaveCount(0);
+    await page.getByTestId("gate-save").click();
+    await expect(page.getByTestId("gate-policy-chip")).toHaveText("revision 1");
+    const servicePolicy = await apiGet(page, `/api/v1/projects/${projectID}/services/${svcID}/gate/policy`);
+    expect(servicePolicy).toMatchObject({ schema_version: 2, window_mode: "all", policy_source: "service", revision: 1 });
+    expect("window" in servicePolicy, "all mode does not persist a copied singular window").toBe(false);
+
+    // Fresh service: both configured targets are retained and UNKNOWN, never early-exited.
+    const first = await pipelineDecides(page, projectID, svcID);
+    expect(first).toMatchObject({ schema_version: 2, window_mode: "all", state: "UNKNOWN", action: "BLOCK" });
+    expect(first.evaluated_windows.map((item: any) => item.window)).toEqual(["7d", "30d"]);
+    expect(first.evaluated_windows.every((item: any) => item.reasons.some((reason: any) => reason.code === "never_sealed"))).toBe(true);
+    await page.reload();
+    await expect(page.getByTestId("gate-evaluated-window")).toHaveCount(2);
+    await expect(page.locator('[data-testid="gate-evaluated-window"][data-window="7d"]')).toHaveAttribute("data-state", "UNKNOWN");
+    await expect(page.locator('[data-testid="gate-evaluated-window"][data-window="30d"]')).toContainText("determining result");
+
+    // Override remains action-only for the all-window decision.
+    await page.getByTestId("gate-override-input-reason").fill("e2e-gate-ui: all-window hotfix");
+    await page.getByTestId("gate-override-input-until").fill(tomorrowLocal());
+    await page.getByTestId("gate-override-create").click();
+    await expect(page.getByTestId("gate-override-active")).toBeVisible();
+    const second = await pipelineDecides(page, projectID, svcID);
+    expect(second).toMatchObject({ window_mode: "all", state: "UNKNOWN", action: "ALLOW", unoverridden_action: "BLOCK" });
+    await page.goto(`/gate/decisions/${second.decision_id}`);
+    await expect(page.getByTestId("gate-decision-window-mode")).toHaveText("worst of all configured windows");
+    await expect(page.getByTestId("gate-decision-evaluated-window")).toHaveCount(2);
+
+    // The mixed outcome is a presentation contract: keep healthy, warning and blocking evidence
+    // together and highlight the worst result. Backend precedence/snapshot truth is covered by the
+    // PostgreSQL and domain gates; this route fixture isolates the real browser rendering.
+    const mixedID = "0191c2a4-7f3e-4c1b-9a2d-000000005b04";
+    await page.route(`**/api/v1/projects/${projectID}/gate/decisions/${mixedID}`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          schema_version: 2,
+          decision_id: mixedID,
+          evaluated_at: "2026-09-19T14:03:02Z",
+          service_id: svcID,
+          service_slug: slug,
+          service_name: `E2E Gate UI ${slug}`,
+          state: "BLOCK",
+          action: "BLOCK",
+          policy_revision: 1,
+          window_mode: "all",
+          unknown_behavior: "block",
+          max_seal_lag_seconds: 900,
+          evaluated_windows: [
+            { window: "7d", target_id: "00000000-0000-4000-8000-000000000007", objective: 99.5, burn_leases: [], reasons: [] },
+            { window: "30d", target_id: "00000000-0000-4000-8000-000000000030", objective: 99.9, burn_leases: [], reasons: [{ code: "budget_consumed", clause: "budget_consumed", assignment: "warn", value: 96.4, window: "30d" }] },
+            { window: "90d", target_id: "00000000-0000-4000-8000-000000000090", objective: 99.99, burn_leases: [], reasons: [{ code: "service_incident_open", clause: "service_incident_open", assignment: "block", value: "inc-1", window: "90d" }] },
+          ],
+          reasons: [
+            { code: "budget_consumed", clause: "budget_consumed", assignment: "warn", value: 96.4, window: "30d" },
+            { code: "service_incident_open", clause: "service_incident_open", assignment: "block", value: "inc-1", window: "90d" },
+          ],
+        }),
+      });
+    });
+    await page.goto(`/gate/decisions/${mixedID}`);
+    const mixedRows = page.getByTestId("gate-decision-evaluated-window");
+    await expect(mixedRows).toHaveCount(3);
+    await expect(mixedRows.nth(0)).toHaveAttribute("data-state", "ALLOW");
+    await expect(mixedRows.nth(1)).toHaveAttribute("data-state", "WARN");
+    await expect(mixedRows.nth(2)).toHaveAttribute("data-state", "BLOCK");
+    await expect(mixedRows.nth(0)).toContainText("healthy evidence retained");
+    await expect(mixedRows.nth(2)).toContainText("determining result");
   });
 });

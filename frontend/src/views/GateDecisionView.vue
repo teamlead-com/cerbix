@@ -20,6 +20,7 @@ import {
   CHIP_ACC,
   CHIP_BASE,
   CHIP_DORM,
+  CHIP_DOWN,
   CHIP_PLAIN,
   PILL_BASE,
   PILL_DOT,
@@ -27,16 +28,19 @@ import {
   failureOf,
   formatValue,
   isAbort,
+  reasonKind,
   reasonChip,
   secondsLabel,
   shortId,
   statePill,
   transportFailure,
+  type GateState,
 } from "@/lib/gateLedger";
 import { sealedLabel } from "@/lib/services";
 import { useWorkspace } from "@/stores/workspace";
 
 type Decision = components["schemas"]["GateDecision"];
+type EvaluatedWindow = NonNullable<Decision["evaluated_windows"]>[number];
 
 const ws = useWorkspace();
 const route = useRoute();
@@ -111,6 +115,15 @@ function yesNo(v: boolean | null | undefined): string {
 function stamp(iso: string | null | undefined): string {
   return iso ? sealedLabel(iso) : "—";
 }
+function evaluatedWindowState(item: EvaluatedWindow): GateState {
+  if (item.reasons.some((reason) => reasonKind(reason) === "matched" && reason.assignment === "block")) return "BLOCK";
+  if (item.reasons.some((reason) => reasonKind(reason) === "unavailable" && reason.assignment !== "ignore")) return "UNKNOWN";
+  if (item.reasons.some((reason) => reasonKind(reason) === "matched" && reason.assignment === "warn")) return "WARN";
+  return "ALLOW";
+}
+function evaluatedWindowDetermines(item: EvaluatedWindow): boolean {
+  return !!decision.value && evaluatedWindowState(item) === decision.value.state;
+}
 </script>
 
 <template>
@@ -172,6 +185,10 @@ function stamp(iso: string | null | undefined): string {
             <template v-if="decision.policy_revision !== undefined">
               <dt class="text-ink-3">Policy</dt>
               <dd class="font-mono text-[12.5px]">rev {{ decision.policy_revision }}</dd>
+            </template>
+            <template v-if="decision.window_mode !== undefined">
+              <dt class="text-ink-3">Window evaluation</dt>
+              <dd class="font-mono text-[12.5px]" data-testid="gate-decision-window-mode">{{ decision.window_mode === "all" ? "worst of all configured windows" : "one window" }}</dd>
             </template>
             <template v-if="decision.window !== undefined">
               <dt class="text-ink-3">Window</dt>
@@ -248,6 +265,39 @@ function stamp(iso: string | null | undefined): string {
               <dd class="font-mono text-[12.5px] tnum">{{ sealedLabel(decision.coverage_lease_until) }}</dd>
             </template>
           </dl>
+
+          <div v-if="decision.window_mode === 'all'" class="border-t border-border" data-testid="gate-decision-evaluated-windows">
+            <div class="flex flex-wrap items-center gap-2 px-4 pt-[12px]">
+              <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Evaluated windows</span>
+              <span :class="[CHIP_BASE, CHIP_PLAIN, 'font-mono text-[10.5px]']">{{ decision.evaluated_windows?.length ?? 0 }} targets · complete snapshot</span>
+            </div>
+            <div class="m-4 mt-3 overflow-hidden rounded border border-border">
+              <div
+                v-for="item in decision.evaluated_windows ?? []"
+                :key="item.window"
+                class="flex flex-wrap items-center gap-[9px] border-b border-border px-4 py-[11px] last:border-b-0"
+                :class="evaluatedWindowDetermines(item) ? 'bg-down-weak' : ''"
+                data-testid="gate-decision-evaluated-window"
+                :data-window="item.window"
+                :data-state="evaluatedWindowState(item)"
+              >
+                <span :class="[CHIP_BASE, CHIP_PLAIN, 'font-mono text-[10.5px]']">{{ item.window }}</span>
+                <span :class="[PILL_BASE, statePill(evaluatedWindowState(item)).cls]">
+                  <span :class="[PILL_DOT, statePill(evaluatedWindowState(item)).dot]"></span>{{ statePill(evaluatedWindowState(item)).label }}
+                </span>
+                <span class="font-mono text-[12px] text-ink-2">{{ item.objective == null ? "no target objective" : `objective ${pct(item.objective)}` }}</span>
+                <span class="flex-1"></span>
+                <span v-if="evaluatedWindowDetermines(item)" :class="[CHIP_BASE, CHIP_DOWN]">determining result</span>
+                <span v-if="item.sealed_through" class="basis-full font-mono text-[11.5px] text-ink-3">sealed {{ sealedLabel(item.sealed_through) }}<template v-if="item.seal_lag != null"> · lag {{ secondsLabel(item.seal_lag) }}</template></span>
+                <span v-if="!item.reasons.length" class="basis-full text-[12px] text-ink-3">No clauses matched; healthy evidence retained.</span>
+                <span v-for="(windowReason, reasonIndex) in item.reasons" :key="reasonIndex" class="basis-full text-[12px] text-ink-2">
+                  <span :class="[CHIP_BASE, reasonChip(windowReason).cls, 'font-mono text-[10.5px]']">{{ windowReason.code }}</span>
+                  <span v-if="windowReason.clause" class="ml-2 font-mono">{{ windowReason.clause }}</span>
+                </span>
+              </div>
+              <div v-if="!decision.evaluated_windows?.length" class="px-4 py-[11px] text-[12.5px] text-ink-3">No configured service targets were present in this immutable snapshot.</div>
+            </div>
+          </div>
 
           <div v-if="decision.burn_leases && decision.burn_leases.length" class="border-t border-border">
             <div class="px-4 pt-[12px] text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Burn leases</div>

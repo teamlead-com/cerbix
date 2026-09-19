@@ -14,16 +14,23 @@ import (
 )
 
 const projectGatePolicyColumns = `
-	p.project_id, p.window_name, p.schema_version, p.clauses, p.budget_consumed_percent,
+	p.project_id, p.window_name, p.window_mode, p.schema_version, p.clauses, p.budget_consumed_percent,
 	p.max_seal_lag_seconds, p.unknown_behavior, p.revision, p.deleted_at, p.updated_at, p.updated_by`
 
 func scanProjectGatePolicy(row scannable) (domain.GatePolicy, error) {
 	var policy domain.GatePolicy
 	var clauses []byte
-	if err := row.Scan(&policy.ProjectID, &policy.Window, &policy.SchemaVersion, &clauses,
+	var window *string
+	if err := row.Scan(&policy.ProjectID, &window, &policy.WindowMode, &policy.SchemaVersion, &clauses,
 		&policy.BudgetConsumedPercent, &policy.MaxSealLagSeconds, &policy.UnknownBehavior,
 		&policy.Revision, &policy.DeletedAt, &policy.UpdatedAt, &policy.UpdatedBy); err != nil {
 		return domain.GatePolicy{}, err
+	}
+	if window != nil {
+		policy.Window = *window
+	}
+	if policy.WindowMode == "" {
+		policy.WindowMode = domain.GateWindowModeOne
 	}
 	if err := json.Unmarshal(clauses, &policy.Clauses); err != nil {
 		return domain.GatePolicy{}, fmt.Errorf("store: decode project gate policy clauses: %w", err)
@@ -85,9 +92,12 @@ func (s *Store) GetProjectGatePolicy(ctx context.Context, projectID string) (dom
 }
 
 func validateProjectGatePolicyDocument(doc domain.GatePolicyDocument) (map[domain.GateClause]domain.ClauseAssignment, error) {
-	clauses, err := domain.ValidateGatePolicyV1(doc)
+	clauses, err := domain.ValidateGatePolicy(doc)
 	if err != nil {
 		return nil, err
+	}
+	if doc.SchemaVersion == domain.GatePolicySchemaV2 && doc.WindowMode == domain.GateWindowModeAll {
+		return clauses, nil
 	}
 	if _, ok := sla.WindowByName(doc.Window); !ok {
 		return nil, &domain.GatePolicyError{Field: "window", Msg: fmt.Sprintf("%q is not an SLA window (the windows are %s)", doc.Window, windowNames())}
@@ -108,6 +118,9 @@ func (s *Store) PutProjectGatePolicy(ctx context.Context, projectID string, expe
 	defer tx.Rollback(ctx) //nolint:errcheck
 	if err := lockProjectRowTx(ctx, tx, projectID); err != nil {
 		return 0, false, err
+	}
+	if doc.WindowMode == "" {
+		doc.WindowMode = domain.GateWindowModeOne
 	}
 	clauses, err := validateProjectGatePolicyDocument(doc)
 	if err != nil {
@@ -130,9 +143,9 @@ func (s *Store) PutProjectGatePolicy(ctx context.Context, projectID string, expe
 	}
 	var revision int64
 	if !found {
-		err = tx.QueryRow(ctx, `INSERT INTO project_gate_policies (project_id, window_name, schema_version, clauses, budget_consumed_percent, max_seal_lag_seconds, unknown_behavior, revision, updated_at, updated_by) VALUES ($1,$2,$3,$4,$5,$6,$7,1,statement_timestamp(),$8) RETURNING revision`, projectID, doc.Window, doc.SchemaVersion, raw, doc.BudgetConsumedPercent, doc.MaxSealLagSeconds, string(doc.UnknownBehavior), actor.Label).Scan(&revision)
+		err = tx.QueryRow(ctx, `INSERT INTO project_gate_policies (project_id, window_name, window_mode, schema_version, clauses, budget_consumed_percent, max_seal_lag_seconds, unknown_behavior, revision, updated_at, updated_by) VALUES ($1,NULLIF($2,''),$3,$4,$5,$6,$7,$8,1,statement_timestamp(),$9) RETURNING revision`, projectID, doc.Window, string(doc.WindowMode), doc.SchemaVersion, raw, doc.BudgetConsumedPercent, doc.MaxSealLagSeconds, string(doc.UnknownBehavior), actor.Label).Scan(&revision)
 	} else {
-		err = tx.QueryRow(ctx, `UPDATE project_gate_policies SET window_name=$2, schema_version=$3, clauses=$4, budget_consumed_percent=$5, max_seal_lag_seconds=$6, unknown_behavior=$7, revision=revision+1, deleted_at=NULL, updated_at=statement_timestamp(), updated_by=$8 WHERE project_id=$1 RETURNING revision`, projectID, doc.Window, doc.SchemaVersion, raw, doc.BudgetConsumedPercent, doc.MaxSealLagSeconds, string(doc.UnknownBehavior), actor.Label).Scan(&revision)
+		err = tx.QueryRow(ctx, `UPDATE project_gate_policies SET window_name=NULLIF($2,''), window_mode=$3, schema_version=$4, clauses=$5, budget_consumed_percent=$6, max_seal_lag_seconds=$7, unknown_behavior=$8, revision=revision+1, deleted_at=NULL, updated_at=statement_timestamp(), updated_by=$9 WHERE project_id=$1 RETURNING revision`, projectID, doc.Window, string(doc.WindowMode), doc.SchemaVersion, raw, doc.BudgetConsumedPercent, doc.MaxSealLagSeconds, string(doc.UnknownBehavior), actor.Label).Scan(&revision)
 	}
 	if err != nil {
 		return 0, false, fmt.Errorf("store: write project gate policy: %w", err)

@@ -598,6 +598,279 @@ func TestGateDecisionIsOneSnapshot(t *testing.T) {
 	}
 }
 
+func TestGateAllWindowsTargetInventoryIsSnapshotStableAndLedgerReplayable(t *testing.T) {
+	st, ctx := gateStore(t)
+	f := gateService(t, st, ctx, 2*time.Minute, minute, 0)
+	gateFreshLatches(t, st, ctx, f)
+	target7d := gateAddTarget(t, st, ctx, f, "7d")
+	gateFreshTargetLatches(t, st, ctx, f, target7d)
+	doc := gateAllWindowsDoc(map[domain.GateClause]domain.ClauseAssignment{
+		domain.ClauseBudgetExhausted: domain.ClauseAssignIgnore,
+		domain.ClauseBudgetConsumed:  domain.ClauseAssignIgnore,
+	})
+	gatePut(t, st, ctx, f, nil, doc)
+
+	mutated := false
+	gateDecisionHook = func(hctx context.Context, _ int, phase string, _ pgx.Tx) error {
+		if phase != gatePhaseReadsDone || mutated {
+			return nil
+		}
+		mutated = true
+		if _, err := st.pool.Exec(hctx, `DELETE FROM sla_targets WHERE id = $1`, target7d); err != nil {
+			return err
+		}
+		_, err := st.pool.Exec(hctx, `
+			INSERT INTO sla_targets (service_id, window_name, objective, burn_alert_enabled, burn_rules)
+			VALUES ($1, '30d', 50, true, '[]'::jsonb)`, f.serviceID)
+		return err
+	}
+	t.Cleanup(func() { gateDecisionHook = nil })
+
+	decision := gateDecide(t, st, ctx, f)
+	if decision.SchemaVersion != domain.GateDecisionSchemaV2 {
+		t.Fatalf("decision schema_version = %d, want %d", decision.SchemaVersion, domain.GateDecisionSchemaV2)
+	}
+	if decision.WindowMode == nil || *decision.WindowMode != domain.GateWindowModeAll || decision.Window != nil {
+		t.Fatalf("mode/window = %v/%v, want all/absent", decision.WindowMode, decision.Window)
+	}
+	wantWindows := []string{"24h", "7d"}
+	if len(decision.EvaluatedWindows) != len(wantWindows) {
+		t.Fatalf("evaluated windows = %+v, want %v", decision.EvaluatedWindows, wantWindows)
+	}
+	for index, want := range wantWindows {
+		if decision.EvaluatedWindows[index].Window != want {
+			t.Fatalf("evaluated_windows[%d] = %q, want %q", index, decision.EvaluatedWindows[index].Window, want)
+		}
+	}
+
+	replayed, err := st.GetGateDecision(ctx, f.projectID, decision.DecisionID)
+	if err != nil {
+		t.Fatalf("replay decision: %v", err)
+	}
+	if replayed.SchemaVersion != domain.GateDecisionSchemaV2 {
+		t.Fatalf("replayed schema_version = %d, want %d", replayed.SchemaVersion, domain.GateDecisionSchemaV2)
+	}
+	if len(replayed.EvaluatedWindows) != 2 || replayed.EvaluatedWindows[1].Window != "7d" {
+		t.Fatalf("ledger replay lost deleted target evidence: %+v", replayed.EvaluatedWindows)
+	}
+	listed, _, err := st.ListGateDecisions(ctx, f.projectID, decision.EvaluatedAt.Add(-time.Minute), decision.EvaluatedAt.Add(time.Minute), nil, nil, nil, 10)
+	if err != nil {
+		t.Fatalf("list decisions: %v", err)
+	}
+	if len(listed) != 1 || listed[0].SchemaVersion != domain.GateDecisionSchemaV2 {
+		t.Fatalf("listed decisions = %+v, want one schema v2 summary", listed)
+	}
+	var liveWindows []string
+	rows, err := st.pool.Query(ctx, `SELECT window_name FROM sla_targets WHERE service_id = $1 ORDER BY window_name`, f.serviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var window string
+		if err := rows.Scan(&window); err != nil {
+			t.Fatal(err)
+		}
+		liveWindows = append(liveWindows, window)
+	}
+	if strings.Join(liveWindows, ",") != "24h,30d" {
+		t.Fatalf("live inventory = %v, want the post-snapshot 24h/30d inventory", liveWindows)
+	}
+}
+
+func TestGateAllWindowsFourTargetEvaluationFitsExistingBudget(t *testing.T) {
+	st, ctx := gateStore(t)
+	f := gateService(t, st, ctx, 2*time.Minute, minute, 0)
+	gateFreshLatches(t, st, ctx, f)
+	for _, window := range []string{"7d", "30d", "90d"} {
+		targetID := gateAddTarget(t, st, ctx, f, window)
+		gateFreshTargetLatches(t, st, ctx, f, targetID)
+	}
+	doc := gateAllWindowsDoc(map[domain.GateClause]domain.ClauseAssignment{
+		domain.ClauseBudgetExhausted: domain.ClauseAssignIgnore,
+		domain.ClauseBudgetConsumed:  domain.ClauseAssignIgnore,
+	})
+	gatePut(t, st, ctx, f, nil, doc)
+
+	started := time.Now()
+	decision := gateDecide(t, st, ctx, f)
+	elapsed := time.Since(started)
+	if len(decision.EvaluatedWindows) != len(sla.StandardWindows) {
+		t.Fatalf("evaluated %d windows, want %d", len(decision.EvaluatedWindows), len(sla.StandardWindows))
+	}
+	for index, standard := range sla.StandardWindows {
+		if decision.EvaluatedWindows[index].Window != standard.Name {
+			t.Fatalf("window[%d] = %q, want canonical %q", index, decision.EvaluatedWindows[index].Window, standard.Name)
+		}
+	}
+	if elapsed >= gateBudget {
+		t.Fatalf("four-window evaluation took %s, exceeding the existing %s budget", elapsed, gateBudget)
+	}
+}
+
+func TestGateAllWindowsStatementCountIsIndependentOfTargetCount(t *testing.T) {
+	st, ctx := gateStore(t)
+	var statements int
+	deadlineTxStatementHook = func() { statements++ }
+	t.Cleanup(func() { deadlineTxStatementHook = nil })
+
+	one := gateService(t, st, ctx, 2*time.Minute, minute, 0)
+	gateFreshLatches(t, st, ctx, one)
+	gatePut(t, st, ctx, one, nil, gateAllWindowsDoc(map[domain.GateClause]domain.ClauseAssignment{
+		domain.ClauseBudgetExhausted: domain.ClauseAssignIgnore,
+		domain.ClauseBudgetConsumed:  domain.ClauseAssignIgnore,
+	}))
+	statements = 0
+	gateDecide(t, st, ctx, one)
+	oneTargetStatements := statements
+	if err := st.TruncateAll(ctx); err != nil {
+		t.Fatalf("reset one-target fixture: %v", err)
+	}
+	if _, err := st.pool.Exec(ctx, `DELETE FROM service_gate_decisions`); err != nil {
+		t.Fatalf("reset gate ledger: %v", err)
+	}
+
+	four := gateService(t, st, ctx, 2*time.Minute, minute, 0)
+	gateFreshLatches(t, st, ctx, four)
+	for _, window := range []string{"7d", "30d", "90d"} {
+		targetID := gateAddTarget(t, st, ctx, four, window)
+		gateFreshTargetLatches(t, st, ctx, four, targetID)
+	}
+	gatePut(t, st, ctx, four, nil, gateAllWindowsDoc(map[domain.GateClause]domain.ClauseAssignment{
+		domain.ClauseBudgetExhausted: domain.ClauseAssignIgnore,
+		domain.ClauseBudgetConsumed:  domain.ClauseAssignIgnore,
+	}))
+	statements = 0
+	gateDecide(t, st, ctx, four)
+	fourTargetStatements := statements
+
+	if fourTargetStatements != oneTargetStatements {
+		t.Fatalf("all-window decision statements grew with inventory: one=%d four=%d", oneTargetStatements, fourTargetStatements)
+	}
+}
+
+func TestGateAllWindowsPreservesPerWindowEvidenceAndEarliestFreshness(t *testing.T) {
+	st, ctx := gateStore(t)
+	f := gateService(t, st, ctx, 2*time.Minute, minute, 0)
+	gateFreshLatches(t, st, ctx, f)
+	target7d := gateAddTarget(t, st, ctx, f, "7d")
+	gateTargetLatch(t, st, ctx, f, target7d, gatePageKey, false, 20*time.Second)
+	gateTargetLatch(t, st, ctx, f, target7d, gateTicketKey, false, 90*time.Second)
+	doc := gateAllWindowsDoc(map[domain.GateClause]domain.ClauseAssignment{
+		domain.ClauseBudgetExhausted:     domain.ClauseAssignIgnore,
+		domain.ClauseBudgetConsumed:      domain.ClauseAssignIgnore,
+		domain.ClauseServiceIncidentOpen: domain.ClauseAssignIgnore,
+	})
+	gatePut(t, st, ctx, f, nil, doc)
+
+	var earliest time.Time
+	if err := st.pool.QueryRow(ctx, `
+		SELECT min(lease_until) FROM service_burn_alert_state
+		 WHERE service_id = $1 AND sla_target_id = $2`, f.serviceID, target7d).Scan(&earliest); err != nil {
+		t.Fatalf("read earliest lease: %v", err)
+	}
+	decision := gateDecide(t, st, ctx, f)
+	wantOutcome(t, decision, domain.GateStateAllow, domain.GateActionAllow)
+	if decision.FactsFreshUntil == nil || !decision.FactsFreshUntil.Equal(earliest) {
+		t.Fatalf("facts_fresh_until = %v, want earliest window lease %s", decision.FactsFreshUntil, earliest)
+	}
+	if len(decision.EvaluatedWindows) != 2 {
+		t.Fatalf("evaluated windows = %+v, want 24h and 7d", decision.EvaluatedWindows)
+	}
+	for _, evaluated := range decision.EvaluatedWindows {
+		if evaluated.TargetID == nil || evaluated.Objective == nil || evaluated.ObjectiveUpdatedAt == nil {
+			t.Errorf("%s target evidence is incomplete: %+v", evaluated.Window, evaluated)
+		}
+		if evaluated.SealedThrough == nil || evaluated.SealLagSeconds == nil || evaluated.FactRevisions == nil {
+			t.Errorf("%s sealed evidence is incomplete: %+v", evaluated.Window, evaluated)
+		}
+		if evaluated.FactRevisions != nil && evaluated.FactRevisions.Count != 1 {
+			t.Errorf("%s fact revision count = %d, want 1", evaluated.Window, evaluated.FactRevisions.Count)
+		}
+		if len(evaluated.BurnLeases) != 2 {
+			t.Errorf("%s burn leases = %+v, want both target rules", evaluated.Window, evaluated.BurnLeases)
+		}
+		if evaluated.Window == "7d" && (evaluated.FactsFreshUntil == nil || !evaluated.FactsFreshUntil.Equal(earliest)) {
+			t.Errorf("7d facts_fresh_until = %v, want %s", evaluated.FactsFreshUntil, earliest)
+		}
+	}
+}
+
+func TestGateAllWindowsUsesInheritedProjectPolicy(t *testing.T) {
+	st, ctx := gateStore(t)
+	f := gateService(t, st, ctx, 2*time.Minute, minute, 0)
+	gateFreshLatches(t, st, ctx, f)
+	doc := gateAllWindowsDoc(map[domain.GateClause]domain.ClauseAssignment{
+		domain.ClauseBudgetExhausted: domain.ClauseAssignIgnore,
+		domain.ClauseBudgetConsumed:  domain.ClauseAssignIgnore,
+	})
+	if _, _, err := st.PutProjectGatePolicy(ctx, f.projectID, nil, doc, gateActorToken); err != nil {
+		t.Fatalf("put project policy: %v", err)
+	}
+
+	decision := gateDecide(t, st, ctx, f)
+	if decision.PolicySource == nil || *decision.PolicySource != domain.GatePolicySourceProject {
+		t.Fatalf("policy source = %v, want project", decision.PolicySource)
+	}
+	if decision.PolicyOwnerID == nil || *decision.PolicyOwnerID != f.projectID {
+		t.Fatalf("policy owner = %v, want %s", decision.PolicyOwnerID, f.projectID)
+	}
+	if decision.WindowMode == nil || *decision.WindowMode != domain.GateWindowModeAll || decision.Window != nil {
+		t.Fatalf("mode/window = %v/%v, want inherited all/absent", decision.WindowMode, decision.Window)
+	}
+	if len(decision.EvaluatedWindows) != 1 || decision.EvaluatedWindows[0].Window != gateWindow {
+		t.Fatalf("inherited inventory = %+v, want the service's 24h target", decision.EvaluatedWindows)
+	}
+}
+
+func TestGateAllWindowsWithoutTargetsUsesUnknownAlgebra(t *testing.T) {
+	st, ctx := gateStore(t)
+	f := gateService(t, st, ctx, 2*time.Minute, minute, 0)
+	if _, err := st.pool.Exec(ctx, `DELETE FROM sla_targets WHERE service_id = $1`, f.serviceID); err != nil {
+		t.Fatalf("delete targets: %v", err)
+	}
+	gatePut(t, st, ctx, f, nil, gateAllWindowsDoc(nil))
+
+	decision := gateDecide(t, st, ctx, f)
+	wantOutcome(t, decision, domain.GateStateUnknown, domain.GateActionWarn)
+	if len(decision.EvaluatedWindows) != 0 {
+		t.Fatalf("evaluated_windows = %+v, want canonical empty inventory", decision.EvaluatedWindows)
+	}
+	for _, reason := range decision.Reasons {
+		if reason.Clause == "" || reason.Clause == domain.ClauseServiceIncidentOpen {
+			continue
+		}
+		if reason.Code != string(domain.GateReasonNoObjective) {
+			t.Errorf("reason = %+v, want no_objective for every window-scoped clause", reason)
+		}
+	}
+}
+
+func TestGateOneToAllPolicyChangeRevokesOverride(t *testing.T) {
+	st, ctx := gateStore(t)
+	f := gateService(t, st, ctx, 2*time.Minute, minute, 0)
+	gateFreshLatches(t, st, ctx, f)
+	revision := gatePut(t, st, ctx, f, nil, gateDoc(nil))
+	expires := gateDBNow(t, st, ctx).Add(time.Hour)
+	overrideID, err := st.CreateGateOverride(ctx, f.projectID, f.serviceID, revision, "release recovery", expires, gateActorToken)
+	if err != nil {
+		t.Fatalf("create override: %v", err)
+	}
+	gatePut(t, st, ctx, f, &revision, gateAllWindowsDoc(nil))
+
+	var revokedReason string
+	if err := st.pool.QueryRow(ctx, `SELECT revoked_reason FROM service_gate_overrides WHERE id = $1`, overrideID).Scan(&revokedReason); err != nil {
+		t.Fatalf("read override: %v", err)
+	}
+	if revokedReason != string(domain.GateRevokedPolicyChanged) {
+		t.Fatalf("revoked_reason = %q, want %q", revokedReason, domain.GateRevokedPolicyChanged)
+	}
+	decision := gateDecide(t, st, ctx, f)
+	if decision.Override != nil || decision.OverrideID != nil {
+		t.Fatalf("one→all decision applied revoked override: %+v", decision.Override)
+	}
+}
+
 // A REAL serialization failure (a locking read after a concurrent committed update of the same
 // row, under REPEATABLE READ) is retried once; a second one is ErrGateSnapshotConflict with no
 // ledger row written.

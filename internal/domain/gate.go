@@ -101,8 +101,21 @@ const (
 	ClauseServiceIncidentOpen GateClause = "service_incident_open"
 )
 
-// GatePolicySchemaV1 is the only policy schema version the server knows (D14).
-const GatePolicySchemaV1 = 1
+const (
+	GatePolicySchemaV1 = 1
+	GatePolicySchemaV2 = 2
+)
+
+type GateWindowMode string
+
+const (
+	GateWindowModeOne GateWindowMode = "one"
+	GateWindowModeAll GateWindowMode = "all"
+)
+
+func ValidGateWindowMode(mode GateWindowMode) bool {
+	return mode == GateWindowModeOne || mode == GateWindowModeAll
+}
 
 // GateClausesV1 is the exhaustive, ordered clause set of schema_version 1 (D11). A write must
 // assign every one of them exactly once; the order is the order reasons are reported in.
@@ -116,7 +129,7 @@ var GateClausesV1 = []GateClause{
 
 // GateClausesFor returns the clause set of a schema version, or nil for an unknown one.
 func GateClausesFor(schemaVersion int) []GateClause {
-	if schemaVersion == GatePolicySchemaV1 {
+	if schemaVersion == GatePolicySchemaV1 || schemaVersion == GatePolicySchemaV2 {
 		out := make([]GateClause, len(GateClausesV1))
 		copy(out, GateClausesV1)
 		return out
@@ -219,6 +232,7 @@ type GateClauseEntry struct {
 // here is what the caller wrote.
 type GatePolicyDocument struct {
 	SchemaVersion         int
+	WindowMode            GateWindowMode
 	Window                string
 	Clauses               []GateClauseEntry
 	BudgetConsumedPercent int
@@ -314,6 +328,33 @@ func ValidateGatePolicyV1(doc GatePolicyDocument) (map[GateClause]ClauseAssignme
 	return clauses, nil
 }
 
+// ValidateGatePolicy validates every accepted document version. V1 predates window_mode and is
+// therefore semantically `one`; V2 makes the mode explicit and forbids a singular window for all.
+func ValidateGatePolicy(doc GatePolicyDocument) (map[GateClause]ClauseAssignment, error) {
+	if doc.SchemaVersion == GatePolicySchemaV1 {
+		if doc.WindowMode != "" && doc.WindowMode != GateWindowModeOne {
+			return nil, gateErr("window_mode", "schema_version 1 supports only %q", GateWindowModeOne)
+		}
+		return ValidateGatePolicyV1(doc)
+	}
+	if doc.SchemaVersion != GatePolicySchemaV2 {
+		return nil, gateErr("schema_version", "must be %d or %d, got %d", GatePolicySchemaV1, GatePolicySchemaV2, doc.SchemaVersion)
+	}
+	if !ValidGateWindowMode(doc.WindowMode) {
+		return nil, gateErr("window_mode", "must be %q or %q, got %q", GateWindowModeOne, GateWindowModeAll, doc.WindowMode)
+	}
+	if doc.WindowMode == GateWindowModeOne && (strings.TrimSpace(doc.Window) == "" || doc.Window != strings.TrimSpace(doc.Window)) {
+		return nil, gateErr("window", "is required when window_mode is %q", GateWindowModeOne)
+	}
+	if doc.WindowMode == GateWindowModeAll && doc.Window != "" {
+		return nil, gateErr("window", "must be absent when window_mode is %q", GateWindowModeAll)
+	}
+	// Reuse the exhaustive v1 vocabulary/bounds after substituting a harmless canonical window.
+	copy := doc
+	copy.SchemaVersion, copy.Window, copy.WindowMode = GatePolicySchemaV1, "v2", ""
+	return ValidateGatePolicyV1(copy)
+}
+
 func joinClauses(cs []GateClause) string {
 	names := make([]string, len(cs))
 	for i, c := range cs {
@@ -331,6 +372,7 @@ type GatePolicy struct {
 	ServiceID             string                          `json:"service_id"`
 	ProjectID             string                          `json:"project_id"`
 	Window                string                          `json:"window"`
+	WindowMode            GateWindowMode                  `json:"window_mode"`
 	SchemaVersion         int                             `json:"schema_version"`
 	Clauses               map[GateClause]ClauseAssignment `json:"clauses"`
 	BudgetConsumedPercent int                             `json:"budget_consumed_percent"`
@@ -385,6 +427,7 @@ func (p GatePolicy) Document() GatePolicyDocument {
 	}
 	return GatePolicyDocument{
 		SchemaVersion:         p.SchemaVersion,
+		WindowMode:            p.WindowMode,
 		Window:                p.Window,
 		Clauses:               entries,
 		BudgetConsumedPercent: p.BudgetConsumedPercent,
@@ -493,8 +536,12 @@ func GateOverrideStatusAt(o GateOverride, now time.Time, currentLiveRevision *in
 
 // ── The decision response (D7) and its ledger evidence (D10) ─────────────────────────────
 
-// GateDecisionSchemaV1 is the `schema_version` every decision response carries (D7).
-const GateDecisionSchemaV1 = 1
+// Gate decision schema versions track the policy/evidence shape used for the decision. V1 is the
+// original singular-window contract; V2 adds window_mode and complete evaluated_windows evidence.
+const (
+	GateDecisionSchemaV1 = 1
+	GateDecisionSchemaV2 = 2
+)
 
 // GateDocsURL is the documentation link a NOT_CONFIGURED decision carries in its one reason
 // (D4): the service has no policy, the response says so, and what to do with that is the
@@ -511,6 +558,8 @@ type GateReasonEntry struct {
 	Assignment ClauseAssignment `json:"assignment,omitempty"`
 	Value      any              `json:"value,omitempty"`
 	Source     string           `json:"source,omitempty"`
+	Window     string           `json:"window,omitempty"`
+	TargetID   *string          `json:"target_id,omitempty"`
 	Docs       string           `json:"docs,omitempty"`
 }
 
@@ -574,9 +623,10 @@ type GateOverrideApplied struct {
 // back on a ledger read so the by-id response is the decision as it was. Every field follows
 // the D7 presence table: a nil pointer is ABSENT on the wire, never null.
 type GateDecisionEvidence struct {
-	UnoverriddenAction *GateAction          `json:"unoverridden_action,omitempty"`
-	UnknownBehavior    *GateUnknownBehavior `json:"unknown_behavior,omitempty"`
-	MaxSealLagSeconds  *int                 `json:"max_seal_lag_seconds,omitempty"`
+	EvaluatedWindows   []GateEvaluatedWindow `json:"evaluated_windows,omitempty"`
+	UnoverriddenAction *GateAction           `json:"unoverridden_action,omitempty"`
+	UnknownBehavior    *GateUnknownBehavior  `json:"unknown_behavior,omitempty"`
+	MaxSealLagSeconds  *int                  `json:"max_seal_lag_seconds,omitempty"`
 
 	TargetID           *string    `json:"target_id,omitempty"`
 	Objective          *float64   `json:"objective,omitempty"`
@@ -592,6 +642,22 @@ type GateDecisionEvidence struct {
 	CoverageState      *GateCoverageState     `json:"coverage_state,omitempty"`
 	Override           *GateOverrideApplied   `json:"override,omitempty"`
 	FactsFreshUntil    *time.Time             `json:"facts_fresh_until,omitempty"`
+}
+
+// GateEvaluatedWindow preserves one target inventory member and its window-scoped reasons.
+// Healthy windows stay present with an empty reasons list so a later target deletion cannot
+// rewrite the historical decision.
+type GateEvaluatedWindow struct {
+	Window             string             `json:"window"`
+	TargetID           *string            `json:"target_id,omitempty"`
+	Objective          *float64           `json:"objective,omitempty"`
+	ObjectiveUpdatedAt *time.Time         `json:"objective_updated_at,omitempty"`
+	SealedThrough      *time.Time         `json:"sealed_through,omitempty"`
+	SealLagSeconds     *float64           `json:"seal_lag,omitempty"`
+	FactRevisions      *GateFactRevisions `json:"fact_revisions,omitempty"`
+	BurnLeases         []GateBurnLease    `json:"burn_leases"`
+	FactsFreshUntil    *time.Time         `json:"facts_fresh_until,omitempty"`
+	Reasons            []GateReasonEntry  `json:"reasons"`
 }
 
 // GateDecision is the D7 response and, column for column, one ledger row (D10). The
@@ -614,6 +680,7 @@ type GateDecision struct {
 	PolicyRevision *int64            `json:"policy_revision,omitempty"`
 	PolicySource   *GatePolicySource `json:"policy_source,omitempty"`
 	PolicyOwnerID  *string           `json:"policy_owner_id,omitempty"`
+	WindowMode     *GateWindowMode   `json:"window_mode,omitempty"`
 	Window         *string           `json:"window,omitempty"`
 	// OverrideID is present exactly when an override was applied — the id the listing carries;
 	// Override (in the evidence) is the same override with its attribution.
@@ -668,6 +735,7 @@ type GatePolicySnapshot struct {
 	Revision              int64                           `json:"revision"`
 	SchemaVersion         int                             `json:"schema_version"`
 	Window                string                          `json:"window"`
+	WindowMode            GateWindowMode                  `json:"window_mode"`
 	Clauses               map[GateClause]ClauseAssignment `json:"clauses"`
 	BudgetConsumedPercent int                             `json:"budget_consumed_percent"`
 	MaxSealLagSeconds     int                             `json:"max_seal_lag_seconds"`
@@ -680,6 +748,7 @@ func (p GatePolicy) Snapshot() GatePolicySnapshot {
 		Revision:              p.Revision,
 		SchemaVersion:         p.SchemaVersion,
 		Window:                p.Window,
+		WindowMode:            p.WindowMode,
 		Clauses:               p.Clauses,
 		BudgetConsumedPercent: p.BudgetConsumedPercent,
 		MaxSealLagSeconds:     p.MaxSealLagSeconds,
@@ -704,6 +773,9 @@ type GateClauseVerdict struct {
 	Value any
 	// Source names the owner the fact came from.
 	Source string
+	// Window and TargetID identify window-scoped evidence in schema v2 all-window mode.
+	Window   string
+	TargetID *string
 }
 
 // DecideGateAlgebra is D4's total, deterministic algebra over ALL clauses of a policy:
@@ -724,6 +796,7 @@ func DecideGateAlgebra(verdicts []GateClauseVerdict, unknown GateUnknownBehavior
 		case v.Unavailable != "":
 			reasons = append(reasons, GateReasonEntry{
 				Code: string(v.Unavailable), Clause: v.Clause, Assignment: v.Assignment, Source: v.Source,
+				Window: v.Window, TargetID: v.TargetID,
 			})
 			if v.Assignment.Constrains() {
 				anyUnavailable = true
@@ -731,6 +804,7 @@ func DecideGateAlgebra(verdicts []GateClauseVerdict, unknown GateUnknownBehavior
 		case v.Matched:
 			reasons = append(reasons, GateReasonEntry{
 				Code: string(v.Clause), Clause: v.Clause, Assignment: v.Assignment, Value: v.Value, Source: v.Source,
+				Window: v.Window, TargetID: v.TargetID,
 			})
 			switch v.Assignment {
 			case ClauseAssignBlock:

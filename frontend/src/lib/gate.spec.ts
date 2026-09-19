@@ -95,6 +95,20 @@ describe("gate validators mirror the server's rules", () => {
       "seal-lag": SEAL_LAG_MIN_MESSAGE,
     });
   });
+
+  it("all-window mode does not require or serialize a singular window", () => {
+    const all = { ...createTemplate([]), window_mode: "all" as const, window: "" as const };
+    expect(validateDraft(all, [])).toEqual({});
+    expect(draftToBody(all, 7)).toEqual({
+      expected_revision: 7,
+      schema_version: 2,
+      window_mode: "all",
+      clauses: all.clauses,
+      budget_consumed_percent: 90,
+      max_seal_lag_seconds: 900,
+      unknown_behavior: "warn",
+    });
+  });
 });
 
 describe("the create template", () => {
@@ -118,7 +132,8 @@ describe("the create template", () => {
     });
     expect(draftToBody(d, null)).toEqual({
       expected_revision: null,
-      schema_version: 1,
+      schema_version: 2,
+      window_mode: "one",
       window: "30d",
       clauses: d.clauses,
       budget_consumed_percent: 90,

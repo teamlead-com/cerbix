@@ -29,20 +29,22 @@ const GateListLimitMax = 200
 // gateDecisionColumns is the by-id read's SELECT list: every top-level column plus the
 // canonical evidence, from which the D7 response is reconstructed as it was.
 const gateDecisionColumns = `
+	COALESCE((policy_snapshot->>'schema_version')::integer, 1),
 	id, service_id, service_slug, service_name, state, action, reasons, evidence,
-	policy_revision, policy_source, policy_owner_id, window_name, override_id, evaluated_at, sealed_through`
+	policy_revision, policy_source, policy_owner_id, window_name, window_mode, evaluated_windows,
+	override_id, evaluated_at, sealed_through`
 
 func scanGateDecision(row scannable) (domain.GateDecision, error) {
 	var (
-		dec               domain.GateDecision
-		action            *string
-		reasons, evidence []byte
+		dec                                 domain.GateDecision
+		action                              *string
+		reasons, evidence, evaluatedWindows []byte
 	)
-	if err := row.Scan(&dec.DecisionID, &dec.ServiceID, &dec.ServiceSlug, &dec.ServiceName, &dec.State, &action,
-		&reasons, &evidence, &dec.PolicyRevision, &dec.PolicySource, &dec.PolicyOwnerID, &dec.Window, &dec.OverrideID, &dec.EvaluatedAt, &dec.SealedThrough); err != nil {
+	if err := row.Scan(&dec.SchemaVersion, &dec.DecisionID, &dec.ServiceID, &dec.ServiceSlug, &dec.ServiceName, &dec.State, &action,
+		&reasons, &evidence, &dec.PolicyRevision, &dec.PolicySource, &dec.PolicyOwnerID, &dec.Window, &dec.WindowMode,
+		&evaluatedWindows, &dec.OverrideID, &dec.EvaluatedAt, &dec.SealedThrough); err != nil {
 		return domain.GateDecision{}, err
 	}
-	dec.SchemaVersion = domain.GateDecisionSchemaV1
 	dec.EvaluatedAt = dec.EvaluatedAt.UTC()
 	if dec.SealedThrough != nil {
 		t := dec.SealedThrough.UTC()
@@ -60,6 +62,11 @@ func scanGateDecision(row scannable) (domain.GateDecision, error) {
 	}
 	if err := json.Unmarshal(evidence, &dec.GateDecisionEvidence); err != nil {
 		return domain.GateDecision{}, fmt.Errorf("store: decode gate evidence: %w", err)
+	}
+	if evaluatedWindows != nil {
+		if err := json.Unmarshal(evaluatedWindows, &dec.EvaluatedWindows); err != nil {
+			return domain.GateDecision{}, fmt.Errorf("store: decode evaluated gate windows: %w", err)
+		}
 	}
 	return dec, nil
 }
@@ -135,6 +142,7 @@ func DecodeGateCursor(s string) (GateCursor, error) {
 // gateSummaryColumns is the listing's SELECT list — the summary's fields, nothing from the
 // evidence.
 const gateSummaryColumns = `
+	COALESCE((policy_snapshot->>'schema_version')::integer, 1),
 	id, service_id, service_slug, service_name, state, action, reasons, policy_revision, override_id, evaluated_at`
 
 // ListGateDecisions is one page of the project's ledger over [from, to) (§5), newest first,
@@ -195,11 +203,10 @@ func (s *Store) ListGateDecisions(
 			action  *string
 			reasons []byte
 		)
-		if err := rows.Scan(&it.DecisionID, &it.ServiceID, &it.ServiceSlug, &it.ServiceName, &it.State, &action,
+		if err := rows.Scan(&it.SchemaVersion, &it.DecisionID, &it.ServiceID, &it.ServiceSlug, &it.ServiceName, &it.State, &action,
 			&reasons, &it.PolicyRevision, &it.OverrideID, &it.EvaluatedAt); err != nil {
 			return nil, nil, fmt.Errorf("store: scan gate decision summary: %w", err)
 		}
-		it.SchemaVersion = domain.GateDecisionSchemaV1
 		it.EvaluatedAt = it.EvaluatedAt.UTC()
 		if action != nil {
 			a := domain.GateAction(*action)

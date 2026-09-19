@@ -1,4 +1,4 @@
-<title>Cerbix Release Gate · Project Policy</title>
+<title>Cerbix Release Gate · All Windows</title>
 
 <style>
 /* Tokens VERBATIM from frontend/src/style.css (the block every approved mock carries). FR-024 adds
@@ -195,7 +195,7 @@ body.hide-notes .note{display:none}
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-3z"/></svg>
     <span class="wm mono">cerbix</span>
   </div>
-  <span class="chip mono">FR-034 · project policy</span>
+  <span class="chip mono">FR-035 · all windows</span>
   <div class="spacer"></div>
   <button class="tbtn on" id="notesBtn" aria-pressed="true">Spec notes</button>
   <button class="tbtn" id="themeBtn">Theme</button>
@@ -204,9 +204,9 @@ body.hide-notes .note{display:none}
 <nav class="screens" id="screens" aria-label="Mocked screens"></nav>
 <div class="wrap" id="view"></div>
 <footer class="foot">
-  FR-034 / NFR-028 <b>design track</b> · approved project-policy mock · tokens verbatim from
+  FR-035 / NFR-029 <b>design track</b> · mock for the owner's approval BEFORE any frontend code · tokens verbatim from
   <span class="mono">frontend/src/style.css</span> · behaviour follows
-  <span class="mono">docs/specs/func-project-gate-policy.md</span> revision 1 (approved by the owner on 2026-09-19).
+  <span class="mono">docs/specs/func-reliability-gate-all-windows.md</span> revision 1.
 </footer>
 
 <script>
@@ -751,68 +751,138 @@ $ echo $?
     here the same number as everywhere else.`)}`;
 }
 
-function sProjectPolicy() {
-  return `<div class="head"><h1>Project gate policy · payments</h1><p class="sub">The default reliability-gate policy for services that do not have an explicit service policy.</p></div>
-  <div class="info"><span>ℹ</span><div><b>Inherited by 12 services.</b> Saving a new revision revokes active overrides only where this project policy is the effective source. Services with their own policy are unchanged.</div></div>
+function sAllEditor() {
+  return `<div class="head">
+    <h1>Release gate · checkout</h1>
+    <p class="sub">Choose whether this policy evaluates one SLO target or the service's complete configured window inventory.</p>
+  </div>
+
   <div class="card">
-    <header><h2>Policy editor</h2><span class="chip acc mono">project policy</span><span class="spacer"></span><span class="chip mono">revision 12</span></header>
+    <header><h2>Policy editor</h2><span class="chip acc mono">service policy</span><span class="spacer"></span><span class="chip mono">schema v2 · revision 7</span></header>
     <div class="body stack">
+      <div class="field">
+        <label>Window evaluation</label>
+        <div style="display:flex; gap:8px; flex-wrap:wrap">
+          <button class="btn">One window</button>
+          <button class="btn pri">Worst of all configured windows</button>
+        </div>
+        <span class="hint">The singular window selector is absent in this mode. The saved document carries <span class="mono">window_mode: all</span> and no <span class="mono">window</span>.</span>
+      </div>
+
       <div class="grid2">
-        <div class="field"><label>SLO window</label><span class="inp sel mono" style="width:160px">30d</span></div>
+        <div class="field"><label>budget_consumed threshold</label><span class="inp mono" style="width:150px">90 <span class="unit">%</span></span></div>
         <div class="field"><label>When constraining evidence is unavailable</label><span class="inp sel mono" style="width:190px">warn</span></div>
       </div>
-      <div class="field"><label>budget_consumed threshold</label><span class="inp mono" style="width:150px">90 <span class="unit">%</span></span></div>
     </div>
-    <div style="border-top:1px solid var(--border)">
-      <div class="row"><span class="nm">Budget exhausted</span><span class="hint">burned budget is 100 % or more</span><span class="spacer"></span>${seg("block")}</div>
-      <div class="row"><span class="nm">Budget consumed</span><span class="hint">project threshold</span><span class="spacer"></span>${seg("warn")}</div>
-      <div class="row"><span class="nm">Page burn firing</span><span class="hint">page-severity burn alert is firing</span><span class="spacer"></span>${seg("block")}</div>
-      <div class="row"><span class="nm">Ticket burn firing</span><span class="hint">ticket-severity burn alert is firing</span><span class="spacer"></span>${seg("warn")}</div>
-      <div class="row"><span class="nm">Service incident open</span><span class="hint">unresolved auto-incident on the service</span><span class="spacer"></span>${seg("warn")}</div>
-    </div>
-    <div class="body" style="display:flex; justify-content:flex-end; gap:8px; border-top:1px solid var(--border)"><button class="btn danger">Delete policy</button><button class="btn pri">Save revision 13</button></div>
   </div>
-  <div class="grid2">
-    <div class="card"><header><h2>Effective-source contract</h2><span class="spacer"></span><span class="chip">one winner</span></header><div><div class="row"><span class="chip acc mono">1</span><span class="nm">Service policy</span><span class="spacer"></span><span class="hint">a live explicit policy wins</span></div><div class="row"><span class="chip acc mono">2</span><span class="nm">Project policy</span><span class="spacer"></span><span class="hint">otherwise inherit this document</span></div><div class="row"><span class="chip dorm mono">3</span><span class="nm">No policy</span><span class="spacer"></span>${st("NOT_CONFIGURED")}</div></div></div>
-    <div class="card"><header><h2>Last change</h2><span class="spacer"></span><span class="chip mono">today · 14:32 Z</span></header><div class="body stack"><div class="kv"><span class="k">Actor</span><span class="mono">project_admin: ana</span><span class="k">Change</span><span class="mono">revision 11 → 12</span><span class="k">Source tuple</span><span class="mono">project / payments / 12</span></div><p class="hint">Save carries <span class="mono">expected_revision: 12</span>; a stale editor reloads instead of overwriting a newer source.</p></div></div>
-  </div>
-  ${note("FR-034 §4 · §7", `<b>Project admin only.</b> Editors may create an explicit service policy, but cannot mutate the project default. Inheritance is resolved at evaluation time; saving here never materializes service policy rows.`)}`;
-}
 
-function sInheritedService() {
-  return `<div class="head"><h1>Release gate · checkout</h1><p class="sub">Checkout has no service policy; its effective policy is supplied by payments.</p></div>
-  <div class="info"><span>ℹ</span><div><b>Inherited from project.</b> Decisions, ledger evidence and any emergency override bind to <span class="mono">project / payments / revision 12</span>, not to a copied service row.</div></div>
-  <div class="grid2">
-    <div class="card"><header><h2>Effective policy</h2><span class="chip acc">inherited from project</span><span class="spacer"></span><span class="chip mono">revision 12</span></header><div class="body stack"><div class="kv"><span class="k">Policy source</span><span class="mono">project</span><span class="k">Policy owner</span><span class="mono">payments</span><span class="k">Window</span><span class="mono">30d · objective from checkout</span><span class="k">Budget consumed</span><span class="mono">warn at 90 %</span><span class="k">Unknown behavior</span><span class="mono">warn</span></div><button class="btn" style="width:max-content">Create service policy</button></div></div>
-    <div class="card"><header><h2>Active override</h2><span class="spacer"></span><span class="chip dorm">none</span></header><div class="body stack"><p style="color:var(--ink-2); font-size:13px">A new emergency override binds to the full effective source tuple:</p><div class="code mono">policy_source=project<br>policy_owner_id=payments<br>policy_revision=12</div><p class="hint">A later project revision makes that override inert; creating a service policy also changes the effective tuple.</p></div></div>
-  </div>
-  <div class="card"><header><h2>Creating an explicit service policy</h2><span class="spacer"></span><span class="chip mono">service CAS is separate</span></header><div class="body stack"><p style="color:var(--ink-2); font-size:13px">The service write sends <span class="mono">expected_revision: null</span> because no service policy exists. Project revision 12 is never accepted as a service revision.</p><div style="display:flex; gap:8px; flex-wrap:wrap"><span class="chip">Editor · may create service policy</span><span class="chip acc">Project admin · may edit project default</span></div></div></div>
-  ${note("FR-034 §3 · §5", `The UI exposes the same source tuple the evaluator and ledger use. Deleting the later service policy returns checkout to this project policy without deleting or mutating the project document.`)}`;
-}
-
-function sNoPolicy() {
-  return `<div class="head"><h1>Release gate · sandbox</h1><p class="sub">Sandbox has neither a live service policy nor a project policy to inherit.</p></div>
   <div class="card">
-    <header><h2>Effective policy</h2>${st("NOT_CONFIGURED", true)}<span class="spacer"></span><span class="chip mono">source none</span></header>
+    <header><h2>Target inventory preview</h2><span class="spacer"></span><span class="chip mono">canonical order · max 4</span></header>
+    <div>
+      <div class="row"><span class="chip acc mono">24h</span><span class="nm">99.90 % objective</span><span class="spacer"></span><span class="chip">configured</span></div>
+      <div class="row"><span class="chip acc mono">7d</span><span class="nm">99.95 % objective</span><span class="spacer"></span><span class="chip">configured</span></div>
+      <div class="row"><span class="chip acc mono">30d</span><span class="nm">99.95 % objective</span><span class="spacer"></span><span class="chip">configured</span></div>
+      <div class="row"><span class="chip acc mono">90d</span><span class="nm">99.99 % objective</span><span class="spacer"></span><span class="chip">configured</span></div>
+    </div>
+    <div class="body" style="border-top:1px solid var(--border)"><p class="hint">Preview only. Saving this policy does not copy target ids or objectives. Every decision resolves the service inventory inside its own database snapshot.</p></div>
+  </div>
+
+  <div class="card">
+    <header><h2>Clause assignments</h2><span class="spacer"></span><span class="chip">same algebra · expanded per window</span></header>
+    <div>
+      <div class="row"><span class="nm">Budget exhausted</span><span class="hint">evaluated for every target</span><span class="spacer"></span>${seg("block")}</div>
+      <div class="row"><span class="nm">Budget consumed</span><span class="hint">threshold applied independently per target</span><span class="spacer"></span>${seg("warn")}</div>
+      <div class="row"><span class="nm">Page burn firing</span><span class="hint">evaluated for every target</span><span class="spacer"></span>${seg("block")}</div>
+      <div class="row"><span class="nm">Ticket burn firing</span><span class="hint">evaluated for every target</span><span class="spacer"></span>${seg("warn")}</div>
+      <div class="row"><span class="nm">Service incident open</span><span class="hint">evaluated once for the service</span><span class="spacer"></span>${seg("warn")}</div>
+    </div>
+    <div class="body" style="display:flex; justify-content:flex-end; gap:8px; border-top:1px solid var(--border)"><button class="btn danger">Delete policy</button><button class="btn pri">Save revision 8</button></div>
+  </div>
+
+  ${note("FR-035 §3 · §8", `The editor is a strict tagged union. <b>One window</b> requires the familiar selector; <b>Worst of all configured windows</b> removes it. The inventory below is a read-only preview from Service reliability, not a second owner of target configuration.`)}`;
+}
+
+function allWindowRows(kind) {
+  if (kind === "unknown") return `<div style="border:1px solid var(--border); border-radius:7px">
+    <div class="row"><span class="chip mono">24h</span>${st("WARN")}<span class="nm mono">budget_consumed</span><span class="mono" style="color:var(--ink-2)">94 % ≥ 90 %</span><span class="spacer"></span><span class="hint">known warning</span></div>
+    <div class="row"><span class="chip mono">7d</span>${st("UNKNOWN")}<span class="nm mono">page_burn_firing</span><span class="mono" style="color:var(--ink-2)">seal_stale · assigned block</span><span class="spacer"></span><span class="hint">determines UNKNOWN</span></div>
+    <div class="row"><span class="chip mono">30d</span>${st("ALLOW")}<span class="nm">No clauses matched</span><span class="spacer"></span><span class="hint">healthy evidence retained</span></div>
+    <div class="row"><span class="chip mono">90d</span>${st("ALLOW")}<span class="nm">No clauses matched</span><span class="spacer"></span><span class="hint">healthy evidence retained</span></div>
+  </div>`;
+  return `<div style="border:1px solid var(--border); border-radius:7px">
+    <div class="row" style="background:var(--down-weak)"><span class="chip mono">24h</span>${st("BLOCK")}<span class="nm mono">budget_exhausted</span><span class="mono" style="color:var(--ink-2)">112 %</span><span class="spacer"></span><span class="chip downc">determining reason</span></div>
+    <div class="row"><span class="chip mono">7d</span>${st("UNKNOWN")}<span class="nm mono">seal_stale</span><span class="mono" style="color:var(--ink-2)">facts unavailable</span><span class="spacer"></span><span class="hint">known BLOCK takes precedence</span></div>
+    <div class="row"><span class="chip mono">30d</span>${st("WARN")}<span class="nm mono">budget_consumed</span><span class="mono" style="color:var(--ink-2)">93 % ≥ 90 %</span><span class="spacer"></span><span class="hint">complete evidence retained</span></div>
+    <div class="row"><span class="chip mono">90d</span>${st("ALLOW")}<span class="nm">No clauses matched</span><span class="spacer"></span><span class="hint">healthy evidence retained</span></div>
+  </div>`;
+}
+
+function sAllMixed() {
+  return `<div class="head"><h1>Release gate · checkout</h1><p class="sub">Latest recorded decision · every evaluated target is shown, including healthy and unavailable windows.</p></div>
+  <div class="card">
+    <header><h2>Latest decision</h2>${st("BLOCK", true)}<span class="chip downc mono">action BLOCK · exit 2</span><span class="spacer"></span><span class="chip mono">mode all · policy rev 7</span></header>
     <div class="body stack">
-      <p style="color:var(--ink-2); font-size:13px">A gate check records <b>NOT_CONFIGURED</b> with no action and exits 4. Nothing is silently allowed.</p>
-      <div class="kv"><span class="k">Policy source</span><span class="mono">none</span><span class="k">Policy owner</span><span class="mono">—</span><span class="k">Policy revision</span><span class="mono">—</span></div>
-      <div style="display:flex; gap:8px; flex-wrap:wrap"><button class="btn">Create service policy</button><button class="btn pri">Set project default</button></div>
+      <div class="grid2">
+        <div class="kv"><span class="k">Evaluated</span><span class="mono">2026-09-19 14:32:10 Z</span><span class="k">Policy source</span><span class="mono">service / checkout / rev 7</span><span class="k">Facts fresh until</span><span class="mono">14:17 Z · earliest window horizon</span><span class="k">Decision</span><span class="mono">0199-7b20…d42a</span></div>
+        <div><div class="lbl">Worst effective outcome</div><div class="kpi" style="color:var(--down)">BLOCK<small>24h determines the result</small></div><p class="hint" style="margin-top:6px">No average, quorum or healthy-window cancellation.</p></div>
+      </div>
+      ${allWindowRows("mixed")}
+    </div>
+  </div>
+  ${note("FR-035 §5 · §6", `A known matching <b>block</b> wins even when another target is unavailable. There is no early exit: the 7d deficiency, 30d warning and healthy 90d target all remain in the response and immutable ledger evidence.`)}`;
+}
+
+function sAllUnknown() {
+  return `<div class="head"><h1>Release gate · checkout</h1><p class="sub">No known block matched; one constraining target is unavailable.</p></div>
+  <div class="card">
+    <header><h2>Latest decision</h2>${st("UNKNOWN", true)}<span class="chip warnc mono">action WARN · exit 0</span><span class="spacer"></span><span class="chip mono">mode all · policy rev 7</span></header>
+    <div class="body stack">
+      <div class="grid2">
+        <div class="kv"><span class="k">Evaluated</span><span class="mono">2026-09-19 14:32:10 Z</span><span class="k">Unavailable constraint</span><span class="mono">page_burn_firing · 7d</span><span class="k">Unknown behavior</span><span class="mono">warn</span><span class="k">Facts fresh until</span><span class="mono">14:17 Z · already past</span></div>
+        <div><div class="lbl">Evidence status</div><div class="kpi" style="color:var(--ink-3)">UNKNOWN<small>not rewritten as WARN</small></div><p class="hint" style="margin-top:6px">Policy behavior changes the action, never the observed state.</p></div>
+      </div>
+      ${allWindowRows("unknown")}
+      <div class="warnb"><span>⚠</span><div><b>The 7d materializer is outside the 15-minute seal-lag bound.</b> Restore its sealed facts, then run a new explicit gate check. Opening this page never creates a decision.</div></div>
+    </div>
+  </div>
+  ${note("FR-035 §5", `With no known block, unavailable evidence for a constraining clause outranks a known warning. The card therefore says <b>UNKNOWN</b>; <span class="mono">unknown_behavior: warn</span> only explains action WARN and exit 0.`)}`;
+}
+
+function sAllOverride() {
+  return `<div class="head"><h1>Release gate · checkout</h1><p class="sub">The override changes effective action only; the worst observed outcome and every window remain visible.</p></div>
+  <div class="card">
+    <header><h2>Latest decision</h2>${st("BLOCK", true)}<span class="chip acc mono">effective action ALLOW · exit 0</span><span class="spacer"></span><span class="chip mono">mode all · overridden</span></header>
+    <div class="body stack">
+      <div class="info"><span>ℹ</span><div><b>Without the override the pipeline would have been told BLOCK.</b> The state, determining reason, all window evidence and ledger row are unchanged.</div></div>
+      ${allWindowRows("mixed")}
     </div>
   </div>
   <div class="grid2">
-    <div class="card"><header><h2>Set project default</h2><span class="spacer"></span><span class="chip acc">project admin</span></header><div class="body"><p style="color:var(--ink-2); font-size:13px">The next effective read and next explicit gate evaluation show <b>inherited from project</b>. No synchronization job creates a sandbox policy row.</p></div></div>
-    <div class="card"><header><h2>Create service policy</h2><span class="spacer"></span><span class="chip">editor</span></header><div class="body"><p style="color:var(--ink-2); font-size:13px">Scopes the policy to sandbox only. A later project default does not replace it because the service source has precedence.</p></div></div>
+    <div class="card"><header><h2>Active override</h2><span class="chip acc">in force</span><span class="spacer"></span><span class="chip mono">bound to service / checkout / rev 7</span></header><div class="body stack"><div class="kv"><span class="k">Reason</span><span>Payment cutover approved in CHG-4821.</span><span class="k">Created by</span><span class="mono">project_admin: ana</span><span class="k">Created</span><span class="mono">2026-09-19 14:20 Z</span><span class="k">Expires</span><span class="mono">2026-09-19 18:30 Z</span></div><button class="btn danger" style="width:max-content">Revoke this override</button></div></div>
+    <div class="card"><header><h2>Mode changes are revisions</h2><span class="spacer"></span><span class="chip mono">one ↔ all</span></header><div class="body stack"><p style="color:var(--ink-2); font-size:13px">Changing the policy mode creates a new revision and closes this override as <span class="mono">policy_changed</span> in the same transaction.</p><p class="hint">An override never follows a different target-selection contract.</p></div></div>
   </div>
-  ${note("FR-034 §2", `The empty state offers both legitimate next actions and says how their scope differs. It never invents an opt-out or a disabled state: the closed resolution order is service → project → none.`)}`;
+  ${note("FR-035 §7", `The override remains bound to the effective policy source tuple. It cannot erase the bad 24h target or make the observed state ALLOW; it changes only the action delivered to the caller.`)}`;
+}
+
+function sAllInherited() {
+  return `<div class="head"><h1>Release gate · ledger-api</h1><p class="sub">This service has no service policy; its effective all-window policy is inherited from payments.</p></div>
+  <div class="info"><span>ℹ</span><div><b>Inherited from project.</b> The policy source is <span class="mono">project / payments / revision 12</span>. The target inventory still belongs to ledger-api and is resolved inside the decision snapshot.</div></div>
+  <div class="grid2">
+    <div class="card"><header><h2>Effective policy</h2><span class="chip acc">inherited from project</span><span class="spacer"></span><span class="chip mono">schema v2</span></header><div class="body stack"><div class="kv"><span class="k">Policy source</span><span class="mono">project</span><span class="k">Policy owner</span><span class="mono">payments</span><span class="k">Policy revision</span><span class="mono">12</span><span class="k">Window mode</span><span class="mono">all</span><span class="k">Service inventory</span><span class="mono">24h · 30d</span></div><button class="btn" style="width:max-content">Create service policy</button></div></div>
+    <div class="card"><header><h2>Source contract</h2><span class="spacer"></span><span class="chip">no copied rows</span></header><div class="body stack"><p style="color:var(--ink-2); font-size:13px">A new override binds to the project source tuple. A new explicit service policy starts with a null service CAS, not project revision 12.</p><p class="hint">Project objectives are reporting-only and never enter this service inventory.</p></div></div>
+  </div>
+  <div class="card"><header><h2>Latest decision</h2>${st("WARN")}<span class="spacer"></span><span class="chip mono">mode all · inherited source</span></header><div><div class="row"><span class="chip mono">24h</span>${st("WARN")}<span class="nm mono">budget_consumed</span><span class="mono" style="color:var(--ink-2)">91 % ≥ 90 %</span><span class="spacer"></span><span class="chip warnc">determining reason</span></div><div class="row"><span class="chip mono">30d</span>${st("ALLOW")}<span class="nm">No clauses matched</span><span class="spacer"></span><span class="hint">healthy evidence retained</span></div></div></div>
+  ${note("FR-035 §7 · iter-0185", `Policy source identity and target inventory identity are deliberately separate. CAS and override binding use <span class="mono">project / payments / 12</span>; evaluated target ids and objectives are ledger-api's snapshot evidence.`)}`;
 }
 
 const SCREENS = [
-  ["project", "Project policy", sProjectPolicy],
-  ["inherited", "Inherited service", sInheritedService],
-  ["empty", "No policy", sNoPolicy],
+  ["editor", "Policy editor", sAllEditor],
+  ["mixed", "Mixed BLOCK", sAllMixed],
+  ["unknown", "Unknown evidence", sAllUnknown],
+  ["override", "Active override", sAllOverride],
+  ["inherited", "Inherited project policy", sAllInherited],
 ];
-let active = "project";
+let active = "editor";
 const nav = document.getElementById("screens");
 const view = document.getElementById("view");
 nav.innerHTML = SCREENS.map(([k, t], i) =>

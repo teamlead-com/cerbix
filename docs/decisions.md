@@ -8238,3 +8238,34 @@ removed. Both binding kinds now take the same authoritative path.
 
 **What this does not change.** The conversion path, the SPA and the API contract are untouched —
 they already described this behaviour. What changed is the server catching up with them.
+## D-0250 — alert-routing tenancy is a persistence invariant, not an HTTP preflight (iter-0182, 2026-09-19)
+
+`fix/status-page-service-component` exposed a class rather than an isolated defect: an HTTP handler
+could reject a cross-project reference while the store method and schema still accepted the same
+write. Alert routing had four instances of that shape — monitor/channel links, escalation targets,
+on-call participants and override channels — plus frozen service escalation snapshots that carry
+recipient JSONB after the live policy changes.
+
+**Decision: each routing write has one owner at the persistence boundary.** Store writers require a
+live target in the owning project and return `ErrRoutingReferenceNotInProject` for missing,
+malformed or foreign references. The API maps that one result to a generic `400`; it does not load
+the target first and does not reveal whether another tenant owns the id. Fake stores used by HTTP
+tests enforce the same contract so a green handler suite cannot depend on a check production store
+callers do not have.
+
+Relational edges carry `project_id` and use composite foreign keys. JSONB cannot, so policies,
+schedules and incident escalation snapshots use a tenant guard that rejects an id resolving in a
+different project. Store writers are intentionally stricter than the trigger: they require a live
+same-project reference, while the trigger permits an absent/deleted historical target and rejects
+only an existing foreign one. This preserves old incident evidence without allowing it to page
+across tenants. Migration `00106` backfills and validates; it deletes and silently rewrites nothing,
+and an invalid deployed row stops the upgrade for explicit operator repair.
+
+Updates match `(id, project_id)`, not `id` alone. Runtime escalation resolution also carries the
+incident project through policy, schedule and channel reads, so a pre-existing or manually corrupted
+JSONB value is skipped rather than delivered even before considering schema guarantees. No target id
+is added as a metric label: the stable signals are the generic client refusal, existing API error
+telemetry and a fail-fast migration.
+
+The decision number is intentionally `D-0250`: `D-0249` belongs to the parallel `iter-0181`
+status-page fix, which merged first.

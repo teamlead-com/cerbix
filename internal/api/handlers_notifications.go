@@ -190,17 +190,7 @@ func (h *Handler) linkMonitorChannel(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	ch, err := h.store.GetNotificationChannel(r.Context(), body.ChannelID)
-	if errors.Is(err, store.ErrNotFound) || (err == nil && ch.ProjectID != mon.ProjectID) {
-		writeError(w, http.StatusBadRequest, "channel is not in this monitor's project")
-		return
-	}
-	if err != nil {
-		h.serverError(w, "get_channel", err)
-		return
-	}
-	if err := h.store.LinkMonitorChannel(r.Context(), mon.ID, ch.ID); err != nil {
-		h.serverError(w, "link_monitor_channel", err)
+	if err := h.store.LinkMonitorChannel(r.Context(), mon.ID, body.ChannelID); h.routingReferenceError(w, "link_monitor_channel", err) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

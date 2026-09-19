@@ -465,6 +465,42 @@ The channel TYPE is not editable: another type requires another config, which is
 channel. A body carrying `type` is refused as an unknown field. Pausing is unchanged —
 `{"enabled":false}` keeps the config and delivery skips the channel.
 
+## Alert-routing tenant guard (migration 00106)
+
+Alert routing can wake a human, so monitor/channel links, escalation targets, on-call
+participants and overrides are constrained to one project at both the store and schema layers.
+The API returns a generic `400` for a missing, malformed or foreign routing reference; it does
+not reveal whether the id exists in another tenant.
+
+Migration `00106_alert_routing_tenancy.sql` is deliberately fail-fast and deletes nothing. It
+backfills `project_id` on monitor links and overrides, installs composite foreign keys, and
+validates JSONB policy/schedule references. If deployment stops on this migration, keep the old
+application version running, identify and correct the invalid references after confirming the
+intended project ownership, then rerun the migration. Do not drop the guard, fabricate a project
+id, or add runtime fallback.
+
+Useful read-only checks before retrying are:
+
+```sql
+SELECT mn.monitor_id, mn.channel_id, m.project_id AS monitor_project, c.project_id AS channel_project
+  FROM monitor_notifications mn
+  JOIN monitors m ON m.id = mn.monitor_id
+  JOIN notification_channels c ON c.id = mn.channel_id
+ WHERE m.project_id <> c.project_id;
+
+SELECT o.id, o.schedule_id, o.channel_id, s.project_id AS schedule_project, c.project_id AS channel_project
+  FROM oncall_overrides o
+  JOIN oncall_schedules s ON s.id = o.schedule_id
+  JOIN notification_channels c ON c.id = o.channel_id
+ WHERE s.project_id <> c.project_id;
+```
+
+For JSONB references, inspect escalation `steps` and schedule `participants` against
+`notification_channels.project_id` / `oncall_schedules.project_id`; repair through the
+project-scoped API where possible. A successful retry needs no manual backfill and emits no new
+high-cardinality metric; migration failure and existing API error telemetry are the operational
+signals.
+
 ## Synthetic scenarios and their secrets (FR-028)
 
 A synthetic monitor's scenario is a credential-bearing document, and since 2026-09-02 it is

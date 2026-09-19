@@ -35,6 +35,9 @@ func (s *Store) CreateEscalationPolicy(ctx context.Context, p domain.EscalationP
 	if err := p.Validate(); err != nil {
 		return domain.EscalationPolicy{}, fmt.Errorf("store: invalid escalation policy: %w", err)
 	}
+	if err := assertEscalationTargetsInProject(ctx, s.pool, p.ProjectID, p.Steps); err != nil {
+		return domain.EscalationPolicy{}, err
+	}
 	steps, err := json.Marshal(p.Steps)
 	if err != nil {
 		return domain.EscalationPolicy{}, fmt.Errorf("store: encode escalation steps: %w", err)
@@ -87,14 +90,17 @@ func (s *Store) UpdateEscalationPolicy(ctx context.Context, p domain.EscalationP
 	if err := p.Validate(); err != nil {
 		return domain.EscalationPolicy{}, fmt.Errorf("store: invalid escalation policy: %w", err)
 	}
+	if err := assertEscalationTargetsInProject(ctx, s.pool, p.ProjectID, p.Steps); err != nil {
+		return domain.EscalationPolicy{}, err
+	}
 	steps, err := json.Marshal(p.Steps)
 	if err != nil {
 		return domain.EscalationPolicy{}, fmt.Errorf("store: encode escalation steps: %w", err)
 	}
 	row := s.pool.QueryRow(ctx,
 		`UPDATE escalation_policies SET name = $2, repeat_last = $3, steps = $4, updated_at = now()
-		  WHERE id = $1 RETURNING `+escalationPolicyColumns,
-		p.ID, p.Name, p.RepeatLast, steps)
+		  WHERE id = $1 AND project_id = $5 RETURNING `+escalationPolicyColumns,
+		p.ID, p.Name, p.RepeatLast, steps, p.ProjectID)
 	updated, err := scanEscalationPolicy(row)
 	if noRows(err) {
 		return domain.EscalationPolicy{}, ErrNotFound
@@ -197,14 +203,17 @@ func (s *Store) UpdateOnCallSchedule(ctx context.Context, sc domain.OnCallSchedu
 	if err := sc.Validate(); err != nil {
 		return domain.OnCallSchedule{}, fmt.Errorf("store: invalid on-call schedule: %w", err)
 	}
+	if err := assertParticipantsAreChannelsTx(ctx, s.pool, sc.ProjectID, sc.Participants); err != nil {
+		return domain.OnCallSchedule{}, err
+	}
 	participants, err := json.Marshal(sc.Participants)
 	if err != nil {
 		return domain.OnCallSchedule{}, fmt.Errorf("store: encode participants: %w", err)
 	}
 	row := s.pool.QueryRow(ctx,
 		`UPDATE oncall_schedules SET name = $2, shift_seconds = $3, anchor_at = $4, participants = $5, updated_at = now()
-		  WHERE id = $1 RETURNING `+oncallColumns,
-		sc.ID, sc.Name, sc.ShiftSeconds, sc.AnchorAt, participants)
+		  WHERE id = $1 AND project_id = $6 RETURNING `+oncallColumns,
+		sc.ID, sc.Name, sc.ShiftSeconds, sc.AnchorAt, participants, sc.ProjectID)
 	updated, err := scanOnCallSchedule(row)
 	if noRows(err) {
 		return domain.OnCallSchedule{}, ErrNotFound
@@ -257,13 +266,35 @@ func (s *Store) AddOnCallOverride(ctx context.Context, o domain.OnCallOverride) 
 	if err := o.Validate(); err != nil {
 		return domain.OnCallOverride{}, fmt.Errorf("store: invalid override: %w", err)
 	}
-	row := s.pool.QueryRow(ctx,
-		`INSERT INTO oncall_overrides (schedule_id, channel_id, starts_at, ends_at)
-		 VALUES ($1,$2,$3,$4) RETURNING `+overrideColumns,
-		o.ScheduleID, o.ChannelID, o.StartsAt, o.EndsAt)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.OnCallOverride{}, fmt.Errorf("store: begin add override: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	var projectID string
+	err = tx.QueryRow(ctx,
+		`SELECT sc.project_id::text
+		   FROM oncall_schedules sc
+		   JOIN notification_channels c ON c.id = $2 AND c.project_id = sc.project_id
+		  WHERE sc.id = $1
+		  FOR KEY SHARE OF sc, c`, o.ScheduleID, o.ChannelID).Scan(&projectID)
+	if noRows(err) {
+		return domain.OnCallOverride{}, ErrRoutingReferenceNotInProject
+	}
+	if err != nil {
+		return domain.OnCallOverride{}, fmt.Errorf("store: resolve override tenancy: %w", err)
+	}
+	row := tx.QueryRow(ctx,
+		`INSERT INTO oncall_overrides (schedule_id, channel_id, project_id, starts_at, ends_at)
+		 VALUES ($1,$2,$3,$4,$5) RETURNING `+overrideColumns,
+		o.ScheduleID, o.ChannelID, projectID, o.StartsAt, o.EndsAt)
 	var created domain.OnCallOverride
 	if err := row.Scan(&created.ID, &created.ScheduleID, &created.ChannelID, &created.StartsAt, &created.EndsAt, &created.CreatedAt); err != nil {
 		return domain.OnCallOverride{}, fmt.Errorf("store: add override: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.OnCallOverride{}, fmt.Errorf("store: commit add override: %w", err)
 	}
 	return created, nil
 }
@@ -347,7 +378,7 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 
 	rows, err := tx.Query(ctx,
 		`SELECT i.id, i.monitor_id, i.started_at, i.escalation_step, i.last_escalated_at,
-		        m.name, m.escalation_policy_id, m.renotify_seconds
+		        m.name, m.escalation_policy_id, m.renotify_seconds, m.project_id::text
 		   FROM incidents i
 		   JOIN monitors m ON m.id = i.monitor_id
 		  WHERE i.source = 'auto' AND i.status <> 'resolved' AND i.acknowledged_at IS NULL
@@ -385,7 +416,7 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		return pass, fmt.Errorf("store: select escalating incidents: %w", err)
 	}
 	type openInc struct {
-		id, monitorID, name, policyID string
+		id, monitorID, name, policyID, projectID string
 		// serviceID is the FR-023 anchor; exactly one of monitorID/serviceID is set, as the
 		// incident's own anchor CHECK guarantees. `name` is the SUBJECT's name either way.
 		serviceID string
@@ -406,7 +437,7 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 	var incs []openInc
 	for rows.Next() {
 		var o openInc
-		if err := rows.Scan(&o.id, &o.monitorID, &o.startedAt, &o.step, &o.lastEscalated, &o.name, &o.policyID, &o.renotifySeconds); err != nil {
+		if err := rows.Scan(&o.id, &o.monitorID, &o.startedAt, &o.step, &o.lastEscalated, &o.name, &o.policyID, &o.renotifySeconds, &o.projectID); err != nil {
 			rows.Close()
 			return pass, fmt.Errorf("store: scan escalating incident: %w", err)
 		}
@@ -452,7 +483,7 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		// the NEXT incident's ladder.
 		`SELECT i.id, i.service_id, i.started_at, i.escalation_step, i.last_escalated_at,
 		        s.name, COALESCE(esc.policy_id::text, ''), esc.policy_name, esc.repeat_last, esc.steps,
-		        esc.due_base, s.renotify_seconds
+		        esc.due_base, s.renotify_seconds, s.project_id::text
 		   FROM incidents i
 		   JOIN services s ON s.id = i.service_id
 		   JOIN service_alert_state st ON st.service_id = s.id
@@ -477,7 +508,7 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		var rawSteps []byte
 		if err := srows.Scan(&o.id, &o.serviceID, &o.startedAt, &o.step, &o.lastEscalated,
 			&o.name, &o.policyID, &frozen.Name, &frozen.RepeatLast, &rawSteps, &o.dueBase,
-			&o.renotifySeconds); err != nil {
+			&o.renotifySeconds, &o.projectID); err != nil {
 			srows.Close()
 			return pass, fmt.Errorf("store: scan escalating service incident: %w", err)
 		}
@@ -485,7 +516,7 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 			srows.Close()
 			return pass, fmt.Errorf("store: decode frozen escalation ladder: %w", err)
 		}
-		frozen.ID, frozen.ProjectID = o.policyID, ""
+		frozen.ID, frozen.ProjectID = o.policyID, o.projectID
 		o.frozen = &frozen
 		// `renotify_seconds` comes from the SERVICE, live, and is deliberately NOT part of the frozen
 		// ladder (D-0185). The snapshot exists so an incident climbs the steps it started with —
@@ -505,23 +536,29 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 
 	policies := map[string]domain.EscalationPolicy{}
 	schedules := map[string]domain.OnCallSchedule{}
-	loadPolicy := func(id string) (domain.EscalationPolicy, error) {
-		if p, ok := policies[id]; ok {
+	loadPolicy := func(projectID, id string) (domain.EscalationPolicy, error) {
+		key := projectID + "\x00" + id
+		if p, ok := policies[key]; ok {
 			return p, nil
 		}
-		row := tx.QueryRow(ctx, `SELECT `+escalationPolicyColumns+` FROM escalation_policies WHERE id = $1`, id)
+		row := tx.QueryRow(ctx,
+			`SELECT `+escalationPolicyColumns+` FROM escalation_policies WHERE id = $1 AND project_id = $2`,
+			id, projectID)
 		p, err := scanEscalationPolicy(row)
 		if err != nil {
 			return domain.EscalationPolicy{}, err
 		}
-		policies[id] = p
+		policies[key] = p
 		return p, nil
 	}
-	loadSchedule := func(id string) (domain.OnCallSchedule, error) {
-		if sc, ok := schedules[id]; ok {
+	loadSchedule := func(projectID, id string) (domain.OnCallSchedule, error) {
+		key := projectID + "\x00" + id
+		if sc, ok := schedules[key]; ok {
 			return sc, nil
 		}
-		row := tx.QueryRow(ctx, `SELECT `+oncallColumns+` FROM oncall_schedules WHERE id = $1`, id)
+		row := tx.QueryRow(ctx,
+			`SELECT `+oncallColumns+` FROM oncall_schedules WHERE id = $1 AND project_id = $2`,
+			id, projectID)
 		sc, err := scanOnCallSchedule(row)
 		if err != nil {
 			return domain.OnCallSchedule{}, err
@@ -529,10 +566,23 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		if sc.Overrides, err = loadOverrides(ctx, tx, id); err != nil {
 			return domain.OnCallSchedule{}, err
 		}
-		schedules[id] = sc
+		schedules[key] = sc
 		return sc, nil
 	}
-	resolveTargets := func(step domain.EscalationStep) ([]string, error) {
+	channelInProject := func(projectID, id string) (bool, error) {
+		var ok bool
+		err := tx.QueryRow(ctx,
+			`SELECT true FROM notification_channels WHERE id::text = $1 AND project_id = $2`,
+			id, projectID).Scan(&ok)
+		if noRows(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("store: resolve escalation channel tenancy: %w", err)
+		}
+		return true, nil
+	}
+	resolveTargets := func(projectID string, step domain.EscalationStep) ([]string, error) {
 		seen := map[string]bool{}
 		var out []string
 		add := func(id string) {
@@ -544,16 +594,29 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		for _, t := range step.Targets {
 			switch t.Type {
 			case domain.EscalationTargetChannel:
-				add(t.ID)
+				ok, err := channelInProject(projectID, t.ID)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					add(t.ID)
+				}
 			case domain.EscalationTargetSchedule:
-				sc, err := loadSchedule(t.ID)
+				sc, err := loadSchedule(projectID, t.ID)
 				if err != nil {
 					if noRows(err) {
 						continue // schedule deleted — skip its target
 					}
 					return nil, err
 				}
-				add(sc.OnCall(now))
+				channelID := sc.OnCall(now)
+				ok, err := channelInProject(projectID, channelID)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					add(channelID)
+				}
 			}
 		}
 		return out, nil
@@ -583,7 +646,7 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 			p = *inc.frozen
 		} else {
 			var err error
-			p, err = loadPolicy(inc.policyID)
+			p, err = loadPolicy(inc.projectID, inc.policyID)
 			if err != nil {
 				if noRows(err) {
 					continue // policy deleted since the monitor referenced it
@@ -602,7 +665,7 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 			if now.Before(due) {
 				break
 			}
-			targets, err := resolveTargets(p.Steps[step])
+			targets, err := resolveTargets(inc.projectID, p.Steps[step])
 			if err != nil {
 				return pass, err
 			}
@@ -622,7 +685,7 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 			ready := lastEsc == nil || !now.Before(lastEsc.Add(time.Duration(inc.renotifySeconds)*time.Second))
 			if ready {
 				last := len(p.Steps) - 1
-				targets, err := resolveTargets(p.Steps[last])
+				targets, err := resolveTargets(inc.projectID, p.Steps[last])
 				if err != nil {
 					return pass, err
 				}
@@ -681,10 +744,41 @@ func assertParticipantsAreChannelsTx(ctx context.Context, q dbConn, projectID st
 			`SELECT true FROM notification_channels WHERE id::text = $1 AND project_id = $2`,
 			p, projectID).Scan(&ok)
 		if noRows(err) {
-			return fmt.Errorf("store: on-call schedule: participant %d (%s) is not a channel of this project", i+1, p)
+			return fmt.Errorf("%w: on-call schedule participant %d (%q) is not a channel of this project",
+				ErrRoutingReferenceNotInProject, i+1, p)
 		}
 		if err != nil {
 			return fmt.Errorf("store: verify schedule participant: %w", err)
+		}
+	}
+	return nil
+}
+
+func assertEscalationTargetsInProject(
+	ctx context.Context, q dbConn, projectID string, steps []domain.EscalationStep,
+) error {
+	for stepIndex, step := range steps {
+		for targetIndex, target := range step.Targets {
+			var table string
+			switch target.Type {
+			case domain.EscalationTargetChannel:
+				table = "notification_channels"
+			case domain.EscalationTargetSchedule:
+				table = "oncall_schedules"
+			default:
+				continue
+			}
+			var ok bool
+			err := q.QueryRow(ctx,
+				`SELECT true FROM `+table+` WHERE id::text = $1 AND project_id = $2`,
+				target.ID, projectID).Scan(&ok)
+			if noRows(err) {
+				return fmt.Errorf("%w: escalation step %d target %d",
+					ErrRoutingReferenceNotInProject, stepIndex+1, targetIndex+1)
+			}
+			if err != nil {
+				return fmt.Errorf("store: verify escalation target: %w", err)
+			}
 		}
 	}
 	return nil

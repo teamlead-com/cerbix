@@ -45,12 +45,8 @@ func (h *Handler) createEscalationPolicy(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !h.escalationStepsInProject(w, r, p.Steps, proj.ID) {
-		return
-	}
 	created, err := h.store.CreateEscalationPolicy(r.Context(), p)
-	if err != nil {
-		h.serverError(w, "create_escalation_policy", err)
+	if h.routingReferenceError(w, "create_escalation_policy", err) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
@@ -70,12 +66,8 @@ func (h *Handler) updateEscalationPolicy(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !h.escalationStepsInProject(w, r, p.Steps, p.ProjectID) {
-		return
-	}
 	updated, err := h.store.UpdateEscalationPolicy(r.Context(), p)
-	if err != nil {
-		h.serverError(w, "update_escalation_policy", err)
+	if h.routingReferenceError(w, "update_escalation_policy", err) {
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
@@ -149,12 +141,8 @@ func (h *Handler) createOnCallSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !h.channelsInProject(w, r, sc.Participants, proj.ID) {
-		return
-	}
 	created, err := h.store.CreateOnCallSchedule(r.Context(), sc)
-	if err != nil {
-		h.serverError(w, "create_oncall_schedule", err)
+	if h.routingReferenceError(w, "create_oncall_schedule", err) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
@@ -174,12 +162,8 @@ func (h *Handler) updateOnCallSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !h.channelsInProject(w, r, sc.Participants, sc.ProjectID) {
-		return
-	}
 	updated, err := h.store.UpdateOnCallSchedule(r.Context(), sc)
-	if err != nil {
-		h.serverError(w, "update_oncall_schedule", err)
+	if h.routingReferenceError(w, "update_oncall_schedule", err) {
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
@@ -243,12 +227,8 @@ func (h *Handler) addOverride(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !h.channelInProject(w, r, o.ChannelID, sc.ProjectID) {
-		return
-	}
 	created, err := h.store.AddOnCallOverride(r.Context(), o)
-	if err != nil {
-		h.serverError(w, "add_override", err)
+	if h.routingReferenceError(w, "add_override", err) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)

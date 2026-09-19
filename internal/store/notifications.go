@@ -198,11 +198,33 @@ func (s *Store) DeleteNotificationChannel(ctx context.Context, id string) error 
 
 // LinkMonitorChannel links a monitor to a channel (idempotent).
 func (s *Store) LinkMonitorChannel(ctx context.Context, monitorID, channelID string) error {
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO monitor_notifications (monitor_id, channel_id) VALUES ($1,$2)
-		 ON CONFLICT DO NOTHING`, monitorID, channelID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin link monitor channel: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	var projectID string
+	err = tx.QueryRow(ctx,
+		`SELECT m.project_id::text
+		   FROM monitors m
+		   JOIN notification_channels c ON c.id = $2 AND c.project_id = m.project_id
+		  WHERE m.id = $1
+		  FOR KEY SHARE OF m, c`, monitorID, channelID).Scan(&projectID)
+	if noRows(err) {
+		return ErrRoutingReferenceNotInProject
+	}
+	if err != nil {
+		return fmt.Errorf("store: resolve monitor channel tenancy: %w", err)
+	}
+	_, err = tx.Exec(ctx,
+		`INSERT INTO monitor_notifications (monitor_id, channel_id, project_id) VALUES ($1,$2,$3)
+		 ON CONFLICT DO NOTHING`, monitorID, channelID, projectID)
 	if err != nil {
 		return fmt.Errorf("store: link monitor channel: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit link monitor channel: %w", err)
 	}
 	return nil
 }

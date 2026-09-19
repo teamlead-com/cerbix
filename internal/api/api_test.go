@@ -977,6 +977,9 @@ func (f *fakeStore) RevokeAgentToken(_ context.Context, id string) error {
 }
 
 func (f *fakeStore) CreateEscalationPolicy(_ context.Context, p domain.EscalationPolicy) (domain.EscalationPolicy, error) {
+	if !f.escalationTargetsInProject(p.ProjectID, p.Steps) {
+		return domain.EscalationPolicy{}, store.ErrRoutingReferenceNotInProject
+	}
 	if f.escPolicies == nil {
 		f.escPolicies = map[string]domain.EscalationPolicy{}
 	}
@@ -1004,6 +1007,9 @@ func (f *fakeStore) UpdateEscalationPolicy(_ context.Context, p domain.Escalatio
 	if _, ok := f.escPolicies[p.ID]; !ok {
 		return domain.EscalationPolicy{}, store.ErrNotFound
 	}
+	if !f.escalationTargetsInProject(p.ProjectID, p.Steps) {
+		return domain.EscalationPolicy{}, store.ErrRoutingReferenceNotInProject
+	}
 	f.escPolicies[p.ID] = p
 	return p, nil
 }
@@ -1015,7 +1021,40 @@ func (f *fakeStore) DeleteEscalationPolicy(_ context.Context, id string) error {
 	return nil
 }
 
+func (f *fakeStore) escalationTargetsInProject(projectID string, steps []domain.EscalationStep) bool {
+	for _, step := range steps {
+		for _, target := range step.Targets {
+			switch target.Type {
+			case domain.EscalationTargetChannel:
+				channel, ok := f.channels[target.ID]
+				if !ok || channel.ProjectID != projectID {
+					return false
+				}
+			case domain.EscalationTargetSchedule:
+				schedule, ok := f.oncall[target.ID]
+				if !ok || schedule.ProjectID != projectID {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func (f *fakeStore) channelsBelongToProject(projectID string, channelIDs []string) bool {
+	for _, channelID := range channelIDs {
+		channel, ok := f.channels[channelID]
+		if !ok || channel.ProjectID != projectID {
+			return false
+		}
+	}
+	return true
+}
+
 func (f *fakeStore) CreateOnCallSchedule(_ context.Context, sc domain.OnCallSchedule) (domain.OnCallSchedule, error) {
+	if !f.channelsBelongToProject(sc.ProjectID, sc.Participants) {
+		return domain.OnCallSchedule{}, store.ErrRoutingReferenceNotInProject
+	}
 	if f.oncall == nil {
 		f.oncall = map[string]domain.OnCallSchedule{}
 	}
@@ -1043,6 +1082,9 @@ func (f *fakeStore) UpdateOnCallSchedule(_ context.Context, sc domain.OnCallSche
 	if _, ok := f.oncall[sc.ID]; !ok {
 		return domain.OnCallSchedule{}, store.ErrNotFound
 	}
+	if !f.channelsBelongToProject(sc.ProjectID, sc.Participants) {
+		return domain.OnCallSchedule{}, store.ErrRoutingReferenceNotInProject
+	}
 	f.oncall[sc.ID] = sc
 	return sc, nil
 }
@@ -1054,6 +1096,11 @@ func (f *fakeStore) DeleteOnCallSchedule(_ context.Context, id string) error {
 	return nil
 }
 func (f *fakeStore) AddOnCallOverride(_ context.Context, o domain.OnCallOverride) (domain.OnCallOverride, error) {
+	schedule, scheduleOK := f.oncall[o.ScheduleID]
+	channel, channelOK := f.channels[o.ChannelID]
+	if !scheduleOK || !channelOK || schedule.ProjectID != channel.ProjectID {
+		return domain.OnCallOverride{}, store.ErrRoutingReferenceNotInProject
+	}
 	if f.overrides == nil {
 		f.overrides = map[string]domain.OnCallOverride{}
 	}
@@ -1701,6 +1748,11 @@ func (f *fakeStore) DeleteNotificationChannel(_ context.Context, id string) erro
 	return nil
 }
 func (f *fakeStore) LinkMonitorChannel(_ context.Context, monitorID, channelID string) error {
+	monitor, monitorOK := f.monitors[monitorID]
+	channel, channelOK := f.channels[channelID]
+	if !monitorOK || !channelOK || monitor.ProjectID != channel.ProjectID {
+		return store.ErrRoutingReferenceNotInProject
+	}
 	f.monLinks[monitorID] = append(f.monLinks[monitorID], channelID)
 	return nil
 }

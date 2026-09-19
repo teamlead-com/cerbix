@@ -23,6 +23,12 @@ import (
 // ErrNotFound is returned when a lookup matches no row.
 var ErrNotFound = errors.New("store: not found")
 
+// ErrRoutingReferenceNotInProject is returned when alert routing names a channel,
+// schedule, or policy outside the subject's project. Missing, malformed, and foreign
+// identifiers deliberately share one refusal so callers cannot use the distinction as
+// a cross-tenant existence oracle.
+var ErrRoutingReferenceNotInProject = errors.New("store: routing reference does not belong to this project")
+
 // ErrAlreadyOpen is returned by CreateIncident when a monitor already has an open
 // auto-incident (the incidents_one_open_auto partial unique index fired). The
 // caller treats it as a benign no-op — the concurrent create won the race.

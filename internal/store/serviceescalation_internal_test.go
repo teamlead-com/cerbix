@@ -199,9 +199,16 @@ func TestAServiceCannotBorrowAnotherProjectsEscalationPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("other project: %v", err)
 	}
+	otherChannel, err := st.CreateNotificationChannel(ctx, domain.NotificationChannel{
+		ProjectID: otherProj.ID, Type: domain.ChannelWebhook, Name: "their-ops",
+		Config: map[string]string{"url": "https://hook.example/their-ops"}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("other channel: %v", err)
+	}
 	alien, err := st.CreateEscalationPolicy(ctx, domain.EscalationPolicy{
 		ProjectID: otherProj.ID, Name: "theirs", Steps: []domain.EscalationStep{
-			{AfterSeconds: 0, Targets: []domain.EscalationTarget{{Type: domain.EscalationTargetChannel, ID: f.channelID}}},
+			{AfterSeconds: 0, Targets: []domain.EscalationTarget{{Type: domain.EscalationTargetChannel, ID: otherChannel.ID}}},
 		},
 	})
 	if err != nil {
@@ -468,9 +475,16 @@ func TestSetServiceEscalationPolicyIsAuditedAndRefusesCarefully(t *testing.T) {
 	if err != nil {
 		t.Fatalf("other project: %v", err)
 	}
+	otherChannel, err := st.CreateNotificationChannel(ctx, domain.NotificationChannel{
+		ProjectID: otherProj.ID, Type: domain.ChannelWebhook, Name: "their-ops",
+		Config: map[string]string{"url": "https://hook.example/their-ops"}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("other channel: %v", err)
+	}
 	alien, err := st.CreateEscalationPolicy(ctx, domain.EscalationPolicy{
 		ProjectID: otherProj.ID, Name: "theirs", Steps: []domain.EscalationStep{
-			{AfterSeconds: 0, Targets: []domain.EscalationTarget{{Type: domain.EscalationTargetChannel, ID: f.channelID}}},
+			{AfterSeconds: 0, Targets: []domain.EscalationTarget{{Type: domain.EscalationTargetChannel, ID: otherChannel.ID}}},
 		},
 	})
 	if err != nil {

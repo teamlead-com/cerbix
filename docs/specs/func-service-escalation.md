@@ -182,6 +182,11 @@ since phase 5.
     SPA — clearing is a choice, not the absence of one — and that control is independent of the paging
     declaration: separate write, separate save, separate error, and it does not disappear when the
     declaration cannot be read.
+17. **HARDENED in iter-0182.** Every recipient reference that can wake a human is project-scoped at the
+    persistence boundary: escalation targets, on-call participants and override channels are checked by
+    store writers; policy and schedule updates match both `id` and `project_id`; composite foreign keys
+    protect relational links; and JSONB tenant guards reject direct SQL. HTTP preflight lookups are not
+    the owner of this rule and cannot drift from CLI or background writers.
 
 ## 7. Required test matrix (written before the code)
 

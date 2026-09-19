@@ -6,6 +6,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [v0.2.1] - 2026-09-19
+
+This patch release combines the status-page service-component repair from `iter-0181` with the
+alert-routing tenant-boundary hardening from `iter-0182`. Together they fix one visible status-page
+failure and move the analogous ownership checks below HTTP handlers so direct store and SQL writers
+cannot bypass them.
+
+### 🩹 Fixed
+
+- **Status-page components can be bound to services again.** The API contract and SPA already sent
+  `service_id`, and the store already persisted it, but the HTTP request decoder did not accept the
+  field. Because unknown JSON fields are rejected, every valid service-backed component request
+  failed as `400 invalid JSON body`. The handler now accepts `service_id`, validates both binding ID
+  formats at the transport boundary, and returns the created component with its derived `service`
+  source.
+
+- **Binding failures now keep their correct HTTP meaning.** A missing or unauthorized monitor or
+  service returns the same non-oracular `400 binding not found`; a status page deleted during the
+  create transaction remains a real `404`; and database or infrastructure failures are logged and
+  returned as `500` rather than being mislabeled as caller errors.
+
+- **The live status-page regression cleans up after partial failures.** Its service fixture is now
+  registered for cleanup immediately, so a page-create or response-decoding failure does not leave
+  test data behind.
+
+### 🔒 Security
+
+- **Status-page binding ownership is now enforced transactionally by the store.** Monitor and
+  service bindings must belong to the page's organization and, for project-scoped pages, to the
+  page's project. A retained monitor/service pair must resolve to one compatible source project.
+  HTTP and non-HTTP callers therefore use the same validation owner, without a separate
+  monitor-only preflight that could drift or expose cross-tenant existence.
+
+- **Alert-routing references are now same-project persistence invariants.** Monitor/channel links,
+  escalation-policy targets, on-call schedule participants and updates, override channels, and
+  frozen service-escalation snapshots are validated at store and schema boundaries. Updates match
+  both object ID and project ID, and runtime escalation resolution carries the incident project
+  through policy, schedule, and channel reads so a pre-existing malformed reference cannot deliver
+  across projects.
+
+- **Missing and foreign routing IDs share one generic client refusal.** The API maps the store-owned
+  refusal to `400` without revealing whether an identifier exists in another tenant. No target ID is
+  added to metrics or logs as a label.
+
+### ⚙️ Upgrade notes
+
+- Migration `00106_alert_routing_tenancy.sql` backfills project identity for relational routing
+  edges, adds composite tenant foreign keys, and installs JSONB tenant guards for policies,
+  schedules, and frozen snapshots. It deletes no heartbeat, incident, audit, or historical routing
+  data and performs no silent repair.
+
+- **The migration intentionally fails fast if deployed data already contains a cross-project
+  routing reference.** Diagnose the offending row read-only, repair it explicitly, and rerun the
+  migration; the runbook contains the operator procedure. Valid existing routing data requires no
+  manual action.
+
+- No configuration key or public API schema is removed. The status-page change makes the server
+  honor the already-published `service_id` contract; valid same-project alert-routing behavior is
+  unchanged.
+
+<sub>`iter-0181` / D-0249 and `iter-0182` / D-0250 · full Go tests, targeted race, vet, build,
+documentation checks and configured lint green · live status-page Playwright regression included in
+71 passed / 1 skipped / 0 failed · PostgreSQL 16 migration and direct-SQL tenant regressions green,
+including the full DB-backed `internal/store` package.</sub>
+
+---
+
 ## [v0.2.0] - 2026-09-08
 
 One defect, found by an independent reviewer about an hour after `v0.1.9` was published, and

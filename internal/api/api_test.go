@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,9 +19,17 @@ import (
 	"github.com/teamlead-com/cerbix/internal/api"
 	"github.com/teamlead-com/cerbix/internal/auth"
 	"github.com/teamlead-com/cerbix/internal/authz"
+	"github.com/teamlead-com/cerbix/internal/contracttest"
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/sla"
 	"github.com/teamlead-com/cerbix/internal/store"
+)
+
+const (
+	componentBindingID         = "00000000-0000-4000-8000-000000000001"
+	componentBindingProjectBID = "00000000-0000-4000-8000-000000000002"
+	componentBindingForeignID  = "00000000-0000-4000-8000-000000000003"
+	componentBindingMissingID  = "00000000-0000-4000-8000-000000000099"
 )
 
 // fakeStore implements api.Store in memory for hermetic handler tests.
@@ -1256,6 +1265,53 @@ func (f *fakeStore) CreateComponent(_ context.Context, c domain.Component) (doma
 	if f.createComponentErr != nil {
 		return domain.Component{}, f.createComponentErr
 	}
+	sp, ok := f.pages[c.StatusPageID]
+	if !ok {
+		return domain.Component{}, store.ErrNotFound
+	}
+	if err := c.Validate(); err != nil {
+		return domain.Component{}, err
+	}
+	bindingProject := ""
+	resolveProject := func(projectID string, exists bool) (string, error) {
+		project, projectExists := f.projects[projectID]
+		if !exists || !projectExists || project.OrgID != sp.OrgID {
+			return "", store.ErrComponentBindingNotFound
+		}
+		return projectID, nil
+	}
+	if c.ServiceID != "" {
+		service, exists := f.serviceStore()[c.ServiceID]
+		projectID := ""
+		if exists {
+			projectID = service.svc.ProjectID
+		}
+		var err error
+		bindingProject, err = resolveProject(projectID, exists)
+		if err != nil {
+			return domain.Component{}, err
+		}
+	} else if c.MonitorID != "" {
+		monitor, exists := f.monitors[c.MonitorID]
+		var err error
+		bindingProject, err = resolveProject(monitor.ProjectID, exists)
+		if err != nil {
+			return domain.Component{}, err
+		}
+	}
+	if sp.ProjectID != "" && bindingProject != "" && sp.ProjectID != bindingProject {
+		return domain.Component{}, store.ErrComponentConversionTarget
+	}
+	if c.MonitorID != "" && c.ServiceID != "" {
+		monitor, monitorExists := f.monitors[c.MonitorID]
+		service, serviceExists := f.serviceStore()[c.ServiceID]
+		if !monitorExists || !serviceExists {
+			return domain.Component{}, store.ErrComponentBindingNotFound
+		}
+		if monitor.ProjectID != service.svc.ProjectID {
+			return domain.Component{}, store.ErrComponentConversionTarget
+		}
+	}
 	c.ID = "c-new"
 	// Mirrors the store: the source is DERIVED, never taken from the caller, and a service
 	// binding wins over a leftover monitor one.
@@ -1267,11 +1323,105 @@ func (f *fakeStore) CreateComponent(_ context.Context, c domain.Component) (doma
 	default:
 		c.Source = domain.ComponentSourceManual
 	}
-	if sp, ok := f.pages[c.StatusPageID]; ok {
-		c.OrgID = sp.OrgID
-	}
+	c.OrgID = sp.OrgID
+	c.SourceProject = bindingProject
 	f.components[c.ID] = c
 	return c, nil
+}
+
+func TestFakeStoreComponentCreateContract(t *testing.T) {
+	for _, contract := range contracttest.ComponentCreateCases {
+		t.Run(contract.Name, func(t *testing.T) {
+			fs := seededStore()
+			seedComponentContractBindings(fs)
+			fs.pages["sp-project-a"] = domain.StatusPage{ID: "sp-project-a", OrgID: "o1", ProjectID: "p1", Slug: "project-a", Title: "Project A", Visibility: domain.VisibilityInternal}
+			component := domain.Component{
+				StatusPageID: componentContractPageID(contract.Page),
+				Name:         "Contract component",
+				MonitorID:    componentContractRefID(contract.Monitor),
+				ServiceID:    componentContractRefID(contract.Service),
+			}
+			created, err := fs.CreateComponent(context.Background(), component)
+			if got := componentContractError(err); got != contract.WantError {
+				t.Fatalf("error class = %q, want %q: %v", got, contract.WantError, err)
+			}
+			if contract.WantError != contracttest.ComponentOK {
+				return
+			}
+			if string(created.Source) != contract.WantSource {
+				t.Fatalf("source = %q, want %q", created.Source, contract.WantSource)
+			}
+			if created.SourceProject != componentContractProjectID(contract.WantSourceProject) {
+				t.Fatalf("source project = %q, want %q", created.SourceProject, componentContractProjectID(contract.WantSourceProject))
+			}
+			if created.OrgID != "o1" {
+				t.Fatalf("org id = %q, want o1", created.OrgID)
+			}
+		})
+	}
+}
+
+func seedComponentContractBindings(fs *fakeStore) {
+	fs.monitors[componentBindingID] = domain.Monitor{ID: componentBindingID, ProjectID: "p1", Name: "contract-a", Type: domain.MonitorHTTP, Target: "https://a.example.test", IntervalSeconds: 60, Enabled: true}
+	fs.monitors[componentBindingProjectBID] = domain.Monitor{ID: componentBindingProjectBID, ProjectID: "p2", Name: "contract-b", Type: domain.MonitorHTTP, Target: "https://b.example.test", IntervalSeconds: 60, Enabled: true}
+	fs.monitors[componentBindingForeignID] = domain.Monitor{ID: componentBindingForeignID, ProjectID: "p3", Name: "contract-foreign", Type: domain.MonitorHTTP, Target: "https://foreign.example.test", IntervalSeconds: 60, Enabled: true}
+	fs.serviceStore()[componentBindingID] = &fakeService{svc: domain.Service{ID: componentBindingID, ProjectID: "p1", Slug: "contract-a", Name: "Contract A"}}
+	fs.serviceStore()[componentBindingProjectBID] = &fakeService{svc: domain.Service{ID: componentBindingProjectBID, ProjectID: "p2", Slug: "contract-b", Name: "Contract B"}}
+	fs.serviceStore()[componentBindingForeignID] = &fakeService{svc: domain.Service{ID: componentBindingForeignID, ProjectID: "p3", Slug: "contract-foreign", Name: "Contract foreign"}}
+}
+
+func componentContractPageID(page contracttest.ComponentPage) string {
+	switch page {
+	case contracttest.PageOrg:
+		return "sp1"
+	case contracttest.PageProjectA:
+		return "sp-project-a"
+	default:
+		return "missing-page"
+	}
+}
+
+func componentContractRefID(ref contracttest.ComponentRef) string {
+	switch ref {
+	case contracttest.RefLocalA:
+		return componentBindingID
+	case contracttest.RefLocalB:
+		return componentBindingProjectBID
+	case contracttest.RefForeignOrg:
+		return componentBindingForeignID
+	case contracttest.RefMissing:
+		return componentBindingMissingID
+	default:
+		return ""
+	}
+}
+
+func componentContractProjectID(ref contracttest.ComponentRef) string {
+	switch ref {
+	case contracttest.RefLocalA:
+		return "p1"
+	case contracttest.RefLocalB:
+		return "p2"
+	case contracttest.RefForeignOrg:
+		return "p3"
+	default:
+		return ""
+	}
+}
+
+func componentContractError(err error) contracttest.ComponentError {
+	switch {
+	case err == nil:
+		return contracttest.ComponentOK
+	case errors.Is(err, store.ErrNotFound):
+		return contracttest.ComponentNotFound
+	case errors.Is(err, store.ErrComponentBindingNotFound):
+		return contracttest.ComponentBindingNotFound
+	case errors.Is(err, store.ErrComponentConversionTarget):
+		return contracttest.ComponentConversionTarget
+	default:
+		return contracttest.ComponentError(err.Error())
+	}
 }
 
 // ── FR-021 phase 4: the status-page projection and the composite lifecycle ────────────────

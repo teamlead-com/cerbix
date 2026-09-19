@@ -45,18 +45,20 @@ func (h *Handler) componentAccess(w http.ResponseWriter, r *http.Request) (domai
 // updateComponent edits a component's presentation fields (org admin). It cannot change the
 // source: that is the previewed conversion below, and an update path able to do it silently would
 // be the way around the gate.
+type updateComponentRequest struct {
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Group        string `json:"group"`
+	Position     int    `json:"position"`
+	ManualStatus string `json:"manual_status"`
+}
+
 func (h *Handler) updateComponent(w http.ResponseWriter, r *http.Request) {
 	c, sp, ok := h.componentAccess(w, r)
 	if !ok {
 		return
 	}
-	body := struct {
-		Name         string `json:"name"`
-		Description  string `json:"description"`
-		Group        string `json:"group"`
-		Position     int    `json:"position"`
-		ManualStatus string `json:"manual_status"`
-	}{Name: c.Name, Description: c.Description, Group: c.GroupName, Position: c.Position,
+	body := updateComponentRequest{Name: c.Name, Description: c.Description, Group: c.GroupName, Position: c.Position,
 		ManualStatus: string(c.ManualStatus)}
 	if !decodeJSON(w, r, &body) {
 		return

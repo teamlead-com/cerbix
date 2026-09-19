@@ -8269,3 +8269,55 @@ telemetry and a fail-fast migration.
 
 The decision number is intentionally `D-0250`: `D-0249` belongs to the parallel `iter-0181`
 status-page fix, which merged first.
+
+## D-0251 — a shared contract must fail at the seam where it can drift (iter-0183, 2026-09-19)
+
+**Context.** D-0249 repaired a request field present in OpenAPI, the generated client, SPA, domain
+and store but absent from the HTTP decoder; the API fake already implemented the missing behaviour.
+D-0250 repaired the inverse ownership error: HTTP handlers refused foreign routing references while
+direct store and SQL writers could persist them. Both were green before the repair because each test
+surface answered only for itself.
+
+**Decision.** The repository gains three narrow conformance mechanisms described by
+`docs/specs/cross-contract-conformance.md`:
+
+1. named status-page JSON write DTOs are registered against OpenAPI schemas and their property sets
+   are compared exactly; generated TypeScript remains checked from that same OpenAPI source;
+2. API fake and PostgreSQL store run one shared component-create case inventory, so the fake cannot
+   silently promise behaviour the real store lacks or omit a refusal the store owns;
+3. the tenant-bearing references hardened by D-0249/D-0250 form one executable owner inventory whose
+   writer, schema guard, runtime reader and behavioural regression must all resolve.
+
+This is not a code-generation decision and not a general repository framework. Historical handlers
+are not rewritten merely to satisfy the registry; the implicated status-page family is the initial
+closed set, and a changed member extends it. Behavioural tests remain the authority: source-presence
+checks keep the inventory intact but do not replace direct SQL, transaction and HTTP regressions.
+
+**Operations and security.** There is no runtime path, migration, config key or metric. PostgreSQL
+conformance remains opt-in through `CERBIX_TEST_DATABASE_DSN`. Tenant refusals stay non-oracular, and
+target ids do not become metric labels. A removed seam fails tests; deployed data is never repaired
+or rewritten by the guard.
+
+## D-0252 — the next four product changes are separate, ordered, and still design-gated (2026-09-19)
+
+**Context.** After iter-0183's engineering guard work, the owner commissioned four product directions:
+audit-log retention, project-level inherited gate policy, worst-of-all-windows gate evaluation, and
+onboarding. Combining them would blur migration, policy semantics, UI approval and rollback evidence;
+the two gate changes also have a dependency order.
+
+**Decision.** They are specified as four separate future iterations:
+
+1. iter-0184 — FR-033/NFR-027 audit-log retention;
+2. iter-0185 — FR-034/NFR-028 project-level inherited gate policy;
+3. iter-0186 — FR-035/NFR-029 worst-of-all-windows evaluation, after inheritance exists;
+4. iter-0187 — FR-036/NFR-030 onboarding DESIGN ONLY.
+
+Revision-1 specs are drafts and do not open those iterations. The inherited-policy and all-window SPA
+surfaces require owner-approved artifact mocks before frontend work. Onboarding is stricter: iter-0187
+produces the design, state machine and mock only; no production implementation is authorized until the
+owner approves the exact mock revision and separately opens a later implementation iteration.
+
+This decision records sequence and authorization boundaries, not approval of every proposed technical
+choice inside the drafts. In particular, FR-024 D2 (one window) remains the live product contract until
+the owner approves `func-reliability-gate-all-windows.md` and the later implementation closes its
+compatibility gates.

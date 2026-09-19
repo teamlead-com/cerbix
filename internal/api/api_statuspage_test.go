@@ -200,6 +200,7 @@ func TestCreateStatusPageAuthz(t *testing.T) {
 
 func TestComponentAuthzAndMonitorOrgCheck(t *testing.T) {
 	fs := seededStore()
+	seedComponentContractBindings(fs)
 	h := newHandler(fs)
 	// Viewer cannot add a component.
 	if rec := do(h, o1Viewer, http.MethodPost, "/api/v1/status-pages/sp1/components", `{"name":"Web"}`); rec.Code != http.StatusForbidden {

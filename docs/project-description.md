@@ -237,6 +237,29 @@ the release gate, with the timeline and the before/after view behind it. Full co
 [`docs/specs/func-change-intelligence.md`](specs/func-change-intelligence.md) (FR-025, NFR-020,
 D-0209/D-0211/D-0213) — **DONE**.
 
+## Commissioned product iterations
+
+Four product changes are commissioned as separate iterations after the contract-conformance work; none
+is implemented or opened merely by appearing in the PRD:
+
+- **FR-033 / NFR-027 — audit-log retention (planned iter-0184).** Instance configuration declares a
+  bounded audit-history horizon. One fenced maintenance owner removes expired organization and global
+  rows in deterministic batches, with backlog metrics and an operator recovery contract. Full draft:
+  [`ops-audit-log-retention.md`](specs/ops-audit-log-retention.md).
+- **FR-034 / NFR-028 — project-level inherited gate policy (planned iter-0185).** A service policy
+  remains the explicit override; otherwise the service inherits one project policy, and every decision
+  records the effective source tuple. Full draft:
+  [`func-project-gate-policy.md`](specs/func-project-gate-policy.md).
+- **FR-035 / NFR-029 — worst-of-all-windows gate evaluation (planned iter-0186).** A policy may evaluate
+  every configured service SLO target in one snapshot. Known BLOCK evidence wins, unavailable
+  constraining evidence remains UNKNOWN, and healthy windows never average away an unhealthy one. Full
+  draft: [`func-reliability-gate-all-windows.md`](specs/func-reliability-gate-all-windows.md).
+- **FR-036 / NFR-030 — onboarding (planned iter-0187 design only).** The feature must remain native to
+  Cerbix's organization → project → monitor → evidence model, create no sample truth, and derive progress
+  from canonical resources. No implementation is authorized before a separate design iteration and the
+  owner's explicit approval of the artifact mock. Design brief:
+  [`func-onboarding.md`](specs/func-onboarding.md).
+
 ## Delivery Method
 
 Iteration-based per `AGENTS.md`. What is next and in what order is

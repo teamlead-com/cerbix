@@ -9,8 +9,6 @@ import (
 	"github.com/teamlead-com/cerbix/internal/store"
 )
 
-const componentBindingID = "00000000-0000-4000-8000-000000000001"
-
 // The reported defect, at the surface an operator meets it: adding a SERVICE-backed component to a
 // status page answered `400 invalid JSON body`.
 //
@@ -26,7 +24,9 @@ const componentBindingID = "00000000-0000-4000-8000-000000000001"
 //
 // The mutation that must kill this: remove `ServiceID` from the create body struct.
 func TestAServiceBackedComponentCanBeCreated(t *testing.T) {
-	h := newHandler(seededStore())
+	fs := seededStore()
+	seedComponentContractBindings(fs)
+	h := newHandler(fs)
 
 	rec := do(h, o1Admin, http.MethodPost, "/api/v1/status-pages/sp1/components",
 		`{"name":"Billing API","service_id":"`+componentBindingID+`","group":"Services","description":"availability","position":1}`)
@@ -97,7 +97,9 @@ func TestComponentBindingIDsAreValidatedAtTheTransport(t *testing.T) {
 }
 
 func TestTheStoreOwnsMonitorBindingScopeValidation(t *testing.T) {
-	h := newHandler(seededStore())
+	fs := seededStore()
+	seedComponentContractBindings(fs)
+	h := newHandler(fs)
 	rec := do(h, o1Admin, http.MethodPost, "/api/v1/status-pages/sp1/components",
 		`{"name":"API","monitor_id":"`+componentBindingID+`"}`)
 	if rec.Code != http.StatusCreated {

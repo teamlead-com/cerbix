@@ -17,6 +17,28 @@ import (
 	"github.com/teamlead-com/cerbix/internal/store"
 )
 
+type createStatusPageRequest struct {
+	Slug       string `json:"slug"`
+	Title      string `json:"title"`
+	Visibility string `json:"visibility"`
+	ProjectID  string `json:"project_id"`
+}
+
+type updateStatusPageRequest struct {
+	Title      *string `json:"title"`
+	Visibility *string `json:"visibility"`
+}
+
+type createComponentRequest struct {
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Group        string `json:"group"`
+	Position     int    `json:"position"`
+	MonitorID    string `json:"monitor_id"`
+	ServiceID    string `json:"service_id"`
+	ManualStatus string `json:"manual_status"`
+}
+
 // statusPageAccess loads a status page and checks the caller may see it (org
 // member) and, when requireManage is set, may manage it (org admin).
 func (h *Handler) statusPageAccess(w http.ResponseWriter, r *http.Request, requireManage bool) (domain.StatusPage, bool) {
@@ -70,12 +92,7 @@ func (h *Handler) createStatusPage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
-	var body struct {
-		Slug       string `json:"slug"`
-		Title      string `json:"title"`
-		Visibility string `json:"visibility"`
-		ProjectID  string `json:"project_id"`
-	}
+	var body createStatusPageRequest
 	if !decodeJSON(w, r, &body) {
 		return
 	}
@@ -122,10 +139,7 @@ func (h *Handler) updateStatusPage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var body struct {
-		Title      *string `json:"title"`
-		Visibility *string `json:"visibility"`
-	}
+	var body updateStatusPageRequest
 	if !decodeJSON(w, r, &body) {
 		return
 	}
@@ -187,20 +201,7 @@ func (h *Handler) createComponent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var body struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Group       string `json:"group"`
-		Position    int    `json:"position"`
-		MonitorID   string `json:"monitor_id"`
-		// ServiceID was MISSING here while `openapi.yaml` declared it, the SPA sent it, and
-		// `domain.Component` carried it — so a service-backed component could not be created at all.
-		// `decodeJSON` disallows unknown fields, which turned every such request into
-		// `400 invalid JSON body`: an answer that sends the reader after malformed JSON when the
-		// JSON was correct and the FIELD was unsupported.
-		ServiceID    string `json:"service_id"`
-		ManualStatus string `json:"manual_status"`
-	}
+	var body createComponentRequest
 	if !decodeJSON(w, r, &body) {
 		return
 	}

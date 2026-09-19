@@ -5,20 +5,53 @@ What is next, in the order it should happen, and why. Live requirement status is
 document holds only the ORDER and the reasoning for it. It is edited in place — an item leaves it by
 being done, or by being declined with its reason moved to §5.
 
-**Where the tree stands (2026-09-03).** Every requirement in `status.md` is `DONE` except FR-026 and
-NFR-021, which entered as `TODO` when their design was approved (D-0214). iter-0166 and iter-0167 are
-closed; no iteration is open. Two releases since this paragraph last said anything true: **`v0.1.7`
-(2026-09-02)** — promql in Monitoring-as-Code bundles, optional basic auth, the Go pin that closed the
-`govulncheck` findings — and **`v0.1.8` (2026-09-03)**, which is FR-028 / NFR-023 end to end: a
-credential inside a synthetic scenario is a secret at rest, on read and in the record, plus the editor
-that declares one without an operator typing a credential. Both release bodies are their CHANGELOG
-section; for `v0.1.8` the image tags `0.1.8`, `0.1` and `latest` point at one digest and the GitHub
-release is `latest`. What remains is one designed-and-unbuilt requirement, a dependency sweep, and a
-design awaiting review.
+**Where the tree stands (2026-09-19).** Product requirements through FR-032 are implemented. The two
+most recent repairs exposed one repeated engineering risk: separately maintained transport, fake,
+store and schema artifacts could answer the same contract differently. `iter-0183` is OPEN to turn
+that risk into mechanical gates under NFR-026; it adds no product feature. `iter-0182` is closed,
+while `iter-0181` remains lifecycle-OPEN despite complete implementation and DoD, pending the owner's
+explicit closure. The next release notes are prepared as `v0.2.1` in `CHANGELOG.md`; no tag or push is
+implied by that heading.
 
 ---
 
-## 1. Now — the canary, then the requirement that is already designed, then the sweep
+## 1. Now — contract and tenant seam conformance
+
+**R6 — NFR-026 / iter-0183. IMPLEMENTED 2026-09-19; lifecycle OPEN pending owner closure.** The
+status-page write DTO family is registered against OpenAPI, one component-create contract inventory
+runs against the API fake and PostgreSQL store, and the tenant-reference ownership inventory is
+executable. This is the direct follow-up to D-0249 and D-0250: no new endpoint, migration, UI or
+runtime metric, only a failure at review/test time when the surfaces drift.
+
+## 2. Next — four separate product iterations
+
+The owner commissioned four independent product iterations on 2026-09-19. Their revision-1 documents
+are drafts: they define scope and gates but do not open an iteration or authorize implementation.
+
+**R7 — iter-0184, audit-log retention (FR-033/NFR-027).** Bound the currently unbounded
+`audit_logs` table with strict instance config, a database-clock cutoff, one fenced maintenance owner,
+bounded batches, low-cardinality backlog metrics and a recovery runbook. No SPA surface or mock. Draft:
+[`ops-audit-log-retention.md`](specs/ops-audit-log-retention.md).
+
+**R8 — iter-0185, project-level inherited gate policy (FR-034/NFR-028).** Add one project policy as
+the fallback for services without an explicit service policy. Preserve one effective source tuple,
+separate CAS domains, tenant isolation, audited mutations and override revision binding. The project
+editor is a new SPA surface, so frontend work waits for an owner-approved mock. Draft:
+[`func-project-gate-policy.md`](specs/func-project-gate-policy.md).
+
+**R9 — iter-0186, worst-of-all-windows gate evaluation (FR-035/NFR-029).** Depends on R8. Add a
+strict policy-v2 `window_mode=all`, evaluate the bounded configured target set in one snapshot, and
+apply the existing BLOCK → UNKNOWN → WARN → ALLOW algebra over complete per-window evidence. This is
+the explicit reconsideration of FR-024 D2 and needs owner approval plus a gate UI mock. Draft:
+[`func-reliability-gate-all-windows.md`](specs/func-reliability-gate-all-windows.md).
+
+**R10 — iter-0187, onboarding design only (FR-036/NFR-030).** Inventory the current first-use paths,
+define the access-aware/resumable state machine, produce the multi-state artifact mock and obtain the
+owner's explicit approval. It creates no production code and does not number the implementation
+iteration. Draft: [`func-onboarding.md`](specs/func-onboarding.md).
+
+The completed canary, incident-audit and dependency-sweep history remains below as the reason the
+standing debts exist; it is no longer the current order.
 
 **R5 — the typed external canary (FR-029 / NFR-024).** *Phases A–E are BUILT (2026-09-03); phase F, the
 typed UI form, is the one item outstanding and is gated on the owner's visual approval of
@@ -109,7 +142,7 @@ implicit behaviour, and the product's half of that bargain is to say so wherever
 rather than to rewrite the path quietly. Docker is unaffected — the `json-file` driver already writes
 rotated files there.
 
-## 2. Next — the debts this arc created
+## 3. Next — the debts this arc created
 
 **N1 — decide what to do with the notification-channel edit.** It shipped on the owner's explicit
 lightweight path: no `func-*` spec, no iteration report, no decision record, no traceability row, no
@@ -172,7 +205,7 @@ make the stack always satisfy them or state in the report which skip is expected
 
 ---
 
-## 3. Later — the things the specs already point at
+## 4. Later — the things the specs already point at
 
 These are named in specs as follow-up REQUIREMENTS rather than non-goals. None is scheduled.
 
@@ -185,7 +218,7 @@ These are named in specs as follow-up REQUIREMENTS rather than non-goals. None i
 
 ---
 
-## 4. Standing work with no end state
+## 5. Standing work with no end state
 
 - **Dependencies** — a sweep roughly monthly, under iter-0159's rules.
 - **Releases** — a tag when a requirement closes or a migration lands, so the gap the v0.1.6 item
@@ -213,7 +246,7 @@ These are named in specs as follow-up REQUIREMENTS rather than non-goals. None i
 
 ---
 
-## 5. Declined, with the reason, so nobody re-derives it
+## 6. Declined, with the reason, so nobody re-derives it
 
 Not a backlog. These are POSITIONS, and a request to reopen one needs a new argument, not a reminder.
 

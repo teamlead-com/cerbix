@@ -253,14 +253,14 @@ const settingsIcon: Shape[] = [
       >
         <span>📣</span><span>{{ branding.announcement.text }}</span>
       </div>
-      <header class="sticky top-0 z-10 flex h-14 items-center gap-3 border-b border-border bg-surface px-[22px]">
-        <nav class="flex items-center gap-2 text-[13.5px] text-ink-3">
+      <header class="sticky top-0 z-10 flex h-14 items-center gap-3 border-b border-border bg-surface px-[22px] max-[760px]:h-auto max-[760px]:min-h-14 max-[760px]:flex-wrap max-[760px]:gap-2 max-[760px]:px-3 max-[760px]:py-2">
+        <nav class="flex min-w-0 items-center gap-2 overflow-hidden text-[13.5px] text-ink-3 max-[760px]:w-full">
           <template v-for="(c, i) in crumbs" :key="i">
             <span v-if="i" class="text-border-strong">/</span>
             <span :class="i === crumbs.length - 1 ? 'font-semibold text-ink' : ''">{{ c }}</span>
           </template>
         </nav>
-        <div class="ml-auto flex items-center gap-2">
+        <div class="ml-auto flex items-center gap-2 max-[760px]:ml-0 max-[760px]:w-full max-[760px]:flex-wrap">
           <span
             v-if="live.started && !live.connected"
             class="inline-flex items-center gap-[7px] rounded-full bg-degraded-weak px-[11px] py-[3px] text-[12px] font-medium text-degraded"
@@ -269,7 +269,7 @@ const settingsIcon: Shape[] = [
             <span class="h-2 w-2 animate-pulse rounded-full bg-degraded motion-reduce:animate-none"></span>
             Live updates reconnecting…
           </span>
-          <SearchBox />
+          <div class="max-[760px]:min-w-0 max-[760px]:flex-1"><SearchBox /></div>
           <slot name="actions" />
           <button class="grid h-[34px] w-[34px] place-items-center rounded-sm border border-border bg-surface text-ink-2 hover:border-border-strong hover:text-ink" type="button" aria-label="Toggle theme" @click="toggle">
             <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19" /></svg>

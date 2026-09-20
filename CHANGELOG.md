@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 This patch release combines the status-page service-component repair from `iter-0181` with the
 alert-routing tenant-boundary hardening from `iter-0182`, bounded audit retention from `iter-0184`,
 project-level inherited release-gate policy from `iter-0185`, and worst-of-all-windows gate evaluation
-from `iter-0186`.
+from `iter-0186`, plus the evidence-driven onboarding journey from `iter-0187`.
 
 ### ✨ Added
 
@@ -29,6 +29,14 @@ from `iter-0186`.
   decision keeps healthy and unhealthy windows together, applies BLOCK → unavailable → WARN
   precedence without averaging or early exit, persists complete per-window evidence, and renders
   mode switching, inventory, inherited policy, UNKNOWN and override states in the SPA.
+
+- **Evidence-driven onboarding (iter-0187, FR-036 / NFR-030).** The Dashboard now offers a
+  non-blocking organization → project → monitor → first persisted heartbeat guide. Progress is
+  recomputed from tenant-scoped server facts, monitor creation stays in the existing typed form,
+  push credentials remain on monitor detail, and UP or DOWN is accepted as the first useful result
+  without mislabeling a failed target as healthy. Existing installations keep their normal KPI,
+  availability and monitor-card Dashboard; manual re-entry opens only a compact setup summary.
+  Automatic-dismissal preference is browser-local and scoped by user and selected tenant context.
 
 ### 🩹 Fixed
 

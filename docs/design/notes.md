@@ -697,3 +697,41 @@ KPI drawn above it read 2873; an axis identity label that overlapped the termina
 three lane starts are transitions inside the window; segment and KPI figures borrowed from a
 screenshot instead of derived from the fixture, which was the mock committing its own subject
 defect; and a panel that drew 62 minutes of checks while calling them "last 60 checks".
+
+## FR-034 — project gate policy mock correction (post-iter-0185, 2026-09-20)
+
+Source: [`mock-project-gate-policy.html`](mock-project-gate-policy.html). The original approved artifact
+used the semantic token palette but still showed a standalone review page, opened directly into a
+custom `Policy editor`, and added `Effective-source contract` and `Last change` cards that are not
+Cerbix surfaces. The current artifact is instead a static transcription of the implemented owners:
+`AppShell.vue`, `SettingsView.vue`, `ProjectGatePolicy.vue`, `ServiceGate.vue` and `lib/gate.ts`.
+
+Its three review tabs now show the actual project editor under `Settings → Project → Release gate`, an
+inherited project policy inside a service's canonical `Release gate` card, and the real service-level
+no-policy empty state. The correction changes no runtime, policy algebra, authorization or owner
+approval history; it prevents the long-lived mock from teaching a parallel visual grammar. Iter-0184
+has no mock by design because audit retention has no SPA surface. Review evidence:
+[`2026-09-20-iter-0184-0185-mock-review.md`](../checks/2026-09-20-iter-0184-0185-mock-review.md).
+
+## FR-036 — onboarding design approved and implemented in iter-0187
+
+Source: [`mock-onboarding.html`](mock-onboarding.html). The artifact uses the canonical Cerbix shell,
+tokens, typography and status vocabulary. It adds no color and no mandatory wizard. Twelve review states
+cover fresh global admin, org admin without a project, invited viewer, monitor selection, waiting
+without false health, unavailable worker region, scheduler-unknown diagnosis, first UP, first DOWN,
+failed read, existing installation and the push branch. Revision 4 incorporates two owner corrections:
+the active route/navigation label is `Dashboard`, and the product viewport is a static transcription of
+the current `AppShell`, `DashboardView`, `Kpi`, `MonitorCard`, `StatusPill`, `UptimeBar` and `Sparkline`
+rules rather than an approximate Cerbix-like theme. The actual Dashboard KPI, 90-day availability and
+monitor cards stay visible and unchanged below a compact manually opened guide. A width
+toggle demonstrates the vertical narrow layout; a notes toggle exposes the state/accessibility rules.
+
+The signature product choice is evidence, not celebration: the fourth step reads **First result** and
+is complete for either UP or DOWN. DOWN finishes onboarding because the system learned something real,
+while the same panel keeps the target visibly failed and makes monitor detail the primary action.
+Service, notifications, status pages and reliability remain optional links outside the progress rail.
+
+The owner approved revision 4 and authorized its implementation inside iter-0187. The shipped guide
+preserves the artifact's additive Dashboard placement and canonical styling. The one honest technical
+gap remains visible in the product: worker-region liveness exists, scheduler-issued-run diagnostics do
+not, so a long wait cannot be called a scheduler outage from current facts.

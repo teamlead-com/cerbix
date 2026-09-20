@@ -1,18 +1,29 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import Kpi from "@/components/Kpi.vue";
 import MonitorCard from "@/components/MonitorCard.vue";
+import OnboardingGuide from "@/components/OnboardingGuide.vue";
 import { useLive } from "@/stores/live";
 import { useSession } from "@/stores/session";
 import { useUi } from "@/stores/ui";
 import { useWorkspace } from "@/stores/workspace";
 import { isoInstant, utcDayBefore, utcDayKey } from "@/lib/datekeys";
+import {
+  dismissOnboarding,
+  isOnboardingDismissed,
+  onboardingDismissalKey,
+  resolveOnboarding,
+  type MonitorEvidence,
+  type OnboardingSnapshot,
+} from "@/lib/onboarding";
 import { utcDayLabel } from "@/lib/wallclock";
 
 type Monitor = components["schemas"]["Monitor"];
+type Heartbeat = components["schemas"]["Heartbeat"];
 type WindowSLA = components["schemas"]["WindowSLA"];
 type Seg = "up" | "degraded" | "down" | "maint" | "none";
 
@@ -32,8 +43,31 @@ const ws = useWorkspace();
 const session = useSession();
 const ui = useUi();
 const live = useLive();
+const route = useRoute();
+const router = useRouter();
 const loading = ref(true);
 const cards = ref<Card[]>([]);
+const monitors = ref<Monitor[]>([]);
+const evidence = ref<MonitorEvidence[]>([]);
+const onboardingReadError = ref("");
+const onboardingRegionLive = ref<boolean | undefined>();
+const onboardingCandidateId = ref(typeof route.query.monitor === "string" ? route.query.monitor : "");
+const onboardingJourneyActive = ref(route.query.onboarding === "1");
+const guideOpen = ref(false);
+const guide = ref<{ focusHeading: () => Promise<void> } | null>(null);
+const entryButton = ref<HTMLButtonElement | null>(null);
+const onboarding = ref<OnboardingSnapshot>(resolveOnboarding({
+  loading: true,
+  orgCount: 0,
+  orgId: "",
+  projectId: "",
+  canCreateOrg: false,
+  canCreateProject: false,
+  canCreateMonitor: false,
+  evidence: [],
+}));
+let pollTimer: ReturnType<typeof setTimeout> | undefined;
+let pollAttempt = 0;
 type Trend = { dir: "pos" | "neg" | "flat"; label: string };
 const kpis = ref({
   availability: "—",
@@ -53,6 +87,8 @@ const timeline = ref<{ pct: number | null; label: string }[]>([]);
 const empty = ref("");
 const emptyKind = ref<"" | "org" | "project" | "monitor" | "error">("");
 const canManageOrg = computed(() => !!ws.orgId && session.isOrgAdmin(ws.orgId));
+const dismissalKey = computed(() => onboardingDismissalKey(session.user?.id ?? "", ws.orgId, ws.projectId));
+const onboardingIncomplete = computed(() => onboarding.value.kind !== "complete_existing" && !onboarding.value.kind.startsWith("first_result_"));
 const emptyTitle = computed(() => {
   switch (emptyKind.value) {
     case "org":
@@ -85,68 +121,133 @@ const timelineUptime = computed(() => {
   return `${(vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2)}% uptime`;
 });
 
-async function loadMonitorExtras(m: Monitor): Promise<Card> {
+function errorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === "object" && "error" in error && typeof error.error === "string") return error.error;
+  return fallback;
+}
+
+async function loadMonitorExtras(m: Monitor): Promise<{ card: Card; heartbeat: Heartbeat | null; heartbeatError: string }> {
   const [slaRes, hbRes] = await Promise.all([
     api.GET("/api/v1/monitors/{monitorID}/sla", { params: { path: { monitorID: m.id! } } }),
     api.GET("/api/v1/monitors/{monitorID}/heartbeats", { params: { path: { monitorID: m.id! }, query: { limit: 48 } } }),
   ]);
   const w30 = slaRes.data?.windows?.find((w: WindowSLA) => w.window === "30d");
+  const newestHeartbeat = hbRes.data?.[0] ?? null;
   const hbs = (hbRes.data ?? []).slice().reverse();
   const segments: Seg[] = hbs.map((h) => (h.up ? "up" : "down"));
   const spark = hbs.map((h) => h.latency_ms ?? 0).filter((v) => v > 0);
   const eb = w30?.error_budget;
   return {
-    monitor: m,
-    uptime: m.type === "push" ? "—" : pct(w30?.uptime_percent),
-    latency: w30?.avg_latency_ms ? `${Math.round(w30.avg_latency_ms)} ms` : "—",
-    segments,
-    spark,
-    budgetLeft: eb ? Math.max(0, 100 - (eb.burned_percent ?? 0)) : null,
-    budgetMet: eb?.met ?? true,
+    card: {
+      monitor: m,
+      uptime: m.type === "push" ? "—" : pct(w30?.uptime_percent),
+      latency: w30?.avg_latency_ms ? `${Math.round(w30.avg_latency_ms)} ms` : "—",
+      segments,
+      spark,
+      budgetLeft: eb ? Math.max(0, 100 - (eb.burned_percent ?? 0)) : null,
+      budgetMet: eb?.met ?? true,
+    },
+    heartbeat: newestHeartbeat,
+    heartbeatError: hbRes.error ? errorMessage(hbRes.error, "Could not load recent heartbeats.") : "",
   };
 }
 
-async function load() {
+async function readRegion(candidate: Monitor | null): Promise<void> {
+  onboardingRegionLive.value = undefined;
+  if (!candidate || candidate.type === "push" || candidate.type === "composite") return;
+  const res = await api.GET("/api/v1/regions");
+  if (res.error || !res.data?.regions) return;
+  const region = candidate.region || "core";
+  onboardingRegionLive.value = res.data.regions.find((item) => item.name === region)?.live;
+}
+
+function recomputeOnboarding(allowAutoOpen = true) {
+  onboarding.value = resolveOnboarding({
+    readError: onboardingReadError.value,
+    orgCount: ws.orgs.length,
+    orgId: ws.orgId,
+    projectId: ws.projectId,
+    canCreateOrg: session.isGlobalAdmin,
+    canCreateProject: !!ws.orgId && session.isOrgAdmin(ws.orgId),
+    canCreateMonitor: !!ws.projectId && session.canProjectWrite(ws.orgId, ws.projectId),
+    evidence: evidence.value,
+    candidateId: onboardingCandidateId.value,
+    journeyActive: onboardingJourneyActive.value,
+    regionLive: onboardingRegionLive.value,
+  });
+  const automatic = onboardingIncomplete.value && !isOnboardingDismissed(dismissalKey.value);
+  if (onboardingJourneyActive.value || (allowAutoOpen && automatic)) guideOpen.value = true;
+}
+
+async function load(forceWorkspace = false, allowAutoOpen = true) {
   loading.value = true;
   empty.value = "";
   emptyKind.value = "";
   cards.value = [];
+  monitors.value = [];
+  evidence.value = [];
+  onboardingReadError.value = "";
+  onboarding.value = resolveOnboarding({
+    loading: true,
+    orgCount: ws.orgs.length,
+    orgId: ws.orgId,
+    projectId: ws.projectId,
+    canCreateOrg: session.isGlobalAdmin,
+    canCreateProject: !!ws.orgId && session.isOrgAdmin(ws.orgId),
+    canCreateMonitor: !!ws.projectId && session.canProjectWrite(ws.orgId, ws.projectId),
+    evidence: [],
+  });
   try {
-    await ws.init();
+    await ws.init(forceWorkspace);
     if (!ws.orgs.length) {
       empty.value = "Organizations are the top-level tenant — a product or team, isolated from the others. Create your first one to start adding projects and monitors.";
       emptyKind.value = "org";
+      recomputeOnboarding(allowAutoOpen);
       return;
     }
     const projectID = ws.projectId;
     if (!projectID) {
       empty.value = "Projects are the teams and apps inside an organization — each holds its own monitors, channels and members. Add the first one.";
       emptyKind.value = "project";
+      recomputeOnboarding(allowAutoOpen);
       return;
     }
 
-    const [monitors, projectSla, avail] = await Promise.all([
+    const [monitorRes, projectSla, avail] = await Promise.all([
       api.GET("/api/v1/projects/{projectID}/monitors", { params: { path: { projectID } } }),
       api.GET("/api/v1/projects/{projectID}/sla", { params: { path: { projectID } } }),
       api.GET("/api/v1/projects/{projectID}/availability", { params: { path: { projectID }, query: { days: 90 } } }),
     ]);
+    if (monitorRes.error) throw new Error(errorMessage(monitorRes.error, "Could not load monitors."));
     timeline.value = buildTimeline(avail.data ?? []);
-    const list = monitors.data ?? [];
+    const list = monitorRes.data ?? [];
+    const monitorList = list as Monitor[];
     const w30 = projectSla.data?.windows?.find((w: WindowSLA) => w.window === "30d");
 
-    if (!list.length) {
+    if (!monitorList.length) {
       empty.value = "No monitors in this project yet. Add one to begin checking.";
       emptyKind.value = "monitor";
+      recomputeOnboarding(allowAutoOpen);
       return;
     }
-    cards.value = await Promise.all(list.map(loadMonitorExtras));
+    monitors.value = monitorList;
+    const loaded = await Promise.all(monitorList.map(loadMonitorExtras));
+    cards.value = loaded.map((item) => item.card);
+    evidence.value = loaded.map((item) => ({ monitor: item.card.monitor, heartbeat: item.heartbeat }));
+    onboardingReadError.value = loaded.find((item) => item.heartbeatError)?.heartbeatError ?? "";
+    const candidate = evidence.value.find((item) => item.monitor.id === onboardingCandidateId.value)?.monitor
+      ?? evidence.value.find((item) => !item.heartbeat)?.monitor
+      ?? evidence.value[0]?.monitor
+      ?? null;
+    await readRegion(candidate);
+    recomputeOnboarding(allowAutoOpen);
 
     // Project error budget = mean of the monitors that have an SLO target.
     const budgets = cards.value.filter((c) => c.budgetLeft !== null);
     const meanBudget = budgets.length
       ? budgets.reduce((a, c) => a + (c.budgetLeft as number), 0) / budgets.length
       : null;
-    const downCount = list.filter((m) => m.status === "down").length;
+    const downCount = monitorList.filter((m) => m.status === "down").length;
 
     // Availability trend: mean uptime of the last 30 days vs the 30 before, taken
     // from the 90-day daily strip (oldest→newest). Only shown when both periods
@@ -179,8 +280,8 @@ async function load() {
       availability: pct(w30?.uptime_percent),
       availSub,
       availTrend,
-      up: String(list.filter((m) => m.status === "up").length),
-      total: String(list.length),
+      up: String(monitorList.filter((m) => m.status === "up").length),
+      total: String(monitorList.length),
       downSub: downCount ? `${downCount} down` : "all operational",
       budget: meanBudget !== null ? `${Math.round(meanBudget)}%` : "—",
       budgetSub: budgets.length ? `across ${budgets.length} SLO${budgets.length > 1 ? "s" : ""}` : "no SLO set",
@@ -189,12 +290,81 @@ async function load() {
       p95Sub: checksSub,
       p95Trend,
     };
-  } catch {
+  } catch (error) {
+    onboardingReadError.value = error instanceof Error ? error.message : "Could not verify the selected workspace.";
+    recomputeOnboarding(allowAutoOpen);
     empty.value = "Could not load the dashboard.";
     emptyKind.value = "error";
   } finally {
     loading.value = false;
   }
+}
+
+function clearInvocation() {
+  onboardingJourneyActive.value = false;
+  onboardingCandidateId.value = "";
+  if (route.query.onboarding || route.query.monitor) {
+    const query = { ...route.query };
+    delete query.onboarding;
+    delete query.monitor;
+    router.replace({ name: "dashboard", query });
+  }
+}
+
+function closeGuide() {
+  guideOpen.value = false;
+  clearInvocation();
+  nextTick(() => entryButton.value?.focus());
+}
+
+function dismissGuide() {
+  dismissOnboarding(dismissalKey.value);
+  closeGuide();
+}
+
+async function openGuide() {
+  guideOpen.value = true;
+  await load(true, false);
+  await guide.value?.focusHeading();
+}
+
+async function chooseCandidate(id: string) {
+  onboardingCandidateId.value = id;
+  onboardingJourneyActive.value = true;
+  await readRegion(monitors.value.find((item) => item.id === id) ?? null);
+  recomputeOnboarding(false);
+}
+
+async function pollOnboarding() {
+  const candidate = onboarding.value.candidate;
+  if (!guideOpen.value || !candidate?.id) return;
+  const res = await api.GET("/api/v1/monitors/{monitorID}/heartbeats", {
+    params: { path: { monitorID: candidate.id }, query: { limit: 1 } },
+  });
+  if (res.error) {
+    onboardingReadError.value = errorMessage(res.error, "Could not load recent heartbeats.");
+    recomputeOnboarding(false);
+    return;
+  }
+  const item = evidence.value.find((entry) => entry.monitor.id === candidate.id);
+  if (item) item.heartbeat = res.data?.[0] ?? null;
+  if (item?.heartbeat) {
+    onboardingJourneyActive.value = true;
+    await load(false, false);
+    return;
+  }
+  await readRegion(candidate);
+  recomputeOnboarding(false);
+  schedulePolling();
+}
+
+function schedulePolling() {
+  if (pollTimer) clearTimeout(pollTimer);
+  if (!guideOpen.value || !["waiting_for_result", "scheduler_unknown", "worker_unavailable"].includes(onboarding.value.kind)) return;
+  const delays = [2000, 4000, 8000, 15000];
+  const delay = delays[Math.min(pollAttempt, delays.length - 1)];
+  pollAttempt++;
+  pollTimer = setTimeout(pollOnboarding, delay);
 }
 
 // Fill a 90-slot strip (oldest→newest) from the sparse per-day availability list.
@@ -219,7 +389,14 @@ onMounted(() => {
   load();
   live.connect();
 });
-watch(() => ws.projectId, load);
+onBeforeUnmount(() => {
+  if (pollTimer) clearTimeout(pollTimer);
+});
+watch(() => [ws.orgId, ws.projectId], () => load());
+watch(() => [guideOpen.value, onboarding.value.kind, onboarding.value.candidate?.id], () => {
+  pollAttempt = 0;
+  schedulePolling();
+});
 
 // Patch cards live as SSE status events arrive.
 watch(
@@ -243,6 +420,16 @@ watch(
 <template>
   <AppShell active="dashboard" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'Dashboard']">
     <template #actions>
+      <button
+        v-if="!guideOpen"
+        ref="entryButton"
+        type="button"
+        class="flex h-[34px] items-center rounded-sm border border-border bg-surface px-[13px] text-[13px] font-medium text-ink-2 hover:border-border-strong hover:text-ink"
+        data-testid="onboarding-entry"
+        @click="openGuide"
+      >
+        Get started
+      </button>
       <RouterLink
         v-if="session.canProjectWrite(ws.orgId, ws.projectId)"
         :to="{ name: 'monitor-new' }"
@@ -262,7 +449,22 @@ watch(
         </p>
       </div>
 
-      <div v-if="empty && !loading" class="grid place-items-center py-16">
+      <OnboardingGuide
+        v-if="guideOpen"
+        ref="guide"
+        :snapshot="onboarding"
+        :monitors="monitors"
+        :org-name="ws.orgName"
+        :project-name="ws.projectName"
+        @close="closeGuide"
+        @dismiss="dismissGuide"
+        @retry="load(true, false)"
+        @create-org="ui.openCreate('org')"
+        @create-project="ui.openCreate('project')"
+        @choose-monitor="chooseCandidate"
+      />
+
+      <div v-if="empty && !loading && !guideOpen" class="grid place-items-center py-16">
         <div class="max-w-[480px] text-center">
           <div class="mx-auto mb-[18px] grid h-14 w-14 place-items-center rounded-[14px] bg-accent-weak text-accent">
             <svg v-if="emptyKind === 'org'" viewBox="0 0 24 24" class="h-[26px] w-[26px]" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18" /><path d="M5 21V7l7-4 7 4v14" /><path d="M9 21v-6h6v6" /><path d="M9 9h.01M15 9h.01M9 12h.01M15 12h.01" /></svg>
@@ -292,7 +494,7 @@ watch(
             New project
           </button>
           <RouterLink
-            v-else-if="emptyKind === 'monitor'"
+            v-else-if="emptyKind === 'monitor' && session.canProjectWrite(ws.orgId, ws.projectId)"
             :to="{ name: 'monitor-new' }"
             class="inline-flex h-[34px] items-center gap-[7px] rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2"
           >
@@ -301,10 +503,11 @@ watch(
           </RouterLink>
           <p v-else-if="emptyKind === 'org'" class="text-[12.5px] text-ink-3">Ask a global admin to create an organization.</p>
           <p v-else-if="emptyKind === 'project'" class="text-[12.5px] text-ink-3">Ask an org admin to create a project in {{ ws.orgName }}.</p>
+          <p v-else-if="emptyKind === 'monitor'" class="text-[12.5px] text-ink-3">Ask an editor or admin to create the first monitor.</p>
         </div>
       </div>
 
-      <template v-else>
+      <template v-if="!empty">
         <!-- hero: KPIs as individual rounded cards + a 90-day availability card -->
         <div class="mb-6 flex flex-col gap-3">
           <div class="grid grid-cols-4 gap-3 max-[900px]:grid-cols-2">

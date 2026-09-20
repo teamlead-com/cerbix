@@ -1,10 +1,12 @@
 # func-project-gate-policy — inherited reliability-gate policy (FR-034 / NFR-028)
 
-> **Revision 1 — APPROVED for iter-0185 on 2026-09-19.** Backend/schema/API work is authorized by
-> the owner instruction opening this iteration. The dedicated SPA editor mock
-> [`mock-project-gate-policy.html`](../design/mock-project-gate-policy.html) is also approved by the
-> owner on 2026-09-19 and was explicitly re-approved after alignment to the canonical release-gate
-> CSS, shell, typography and component grammar; frontend implementation remains authorized.
+> **Revision 2 — IMPLEMENTED; artifact corrected on 2026-09-20.** Revision 1 was approved for
+> iter-0185 and implemented. A post-implementation audit found that the approved review artifact used
+> canonical tokens but still presented a parallel standalone shell and cards absent from Cerbix.
+> [`mock-project-gate-policy.html`](../design/mock-project-gate-policy.html) now statically transcribes
+> the current `AppShell`, `SettingsView`, `ProjectGatePolicy` and `ServiceGate` surfaces without
+> changing the implemented FR-034/NFR-028 contract. The corrective evidence is
+> [`2026-09-20-iter-0184-0185-mock-review.md`](../checks/2026-09-20-iter-0184-0185-mock-review.md).
 
 ## 1. Problem
 

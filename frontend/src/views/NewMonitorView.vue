@@ -32,6 +32,7 @@ import {
   type CanaryForm,
 } from "@/lib/canaryWorkflow";
 import { MAX_MONITOR_DESCRIPTION, descriptionLength } from "@/lib/monitorBounds";
+import { createdMonitorDestination } from "@/lib/onboarding";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
@@ -49,6 +50,7 @@ const router = useRouter();
 const route = useRoute();
 const editId = (route.params.id as string) || "";
 const isEdit = computed(() => !!editId);
+const onboardingCreate = computed(() => !isEdit.value && route.query.onboarding === "1");
 // While prefilling an edit, suppress the type watcher that resets conditions.
 const prefilling = ref(false);
 
@@ -71,6 +73,10 @@ const types: { key: MonitorType; label: string; hint: string }[] = [
   { key: "async_canary", label: "Async canary", hint: "One async API journey" },
   { key: "push", label: "Push", hint: "Dead-man's switch" },
 ];
+
+function finishCreate(id: string, type: MonitorType) {
+  router.push(createdMonitorDestination(id, type, onboardingCreate.value));
+}
 
 const form = reactive<{
   name: string;
@@ -481,7 +487,7 @@ async function createMultiRegionSet(): Promise<void> {
     throw new Error((comp.error as { error?: string })?.error || "Could not create the quorum composite.");
   }
   await syncChannels(comp.data.id); // alerts live on the composite
-  router.push({ name: "monitor", params: { id: comp.data.id } });
+  finishCreate(comp.data.id, "composite");
 }
 const mode = ref<"all" | "any" | "quorum">("all");
 const quorum = ref(2); // down-vote threshold for mode "quorum"
@@ -785,7 +791,7 @@ async function submit() {
       return;
     }
     if (res.data.id) await syncChannels(res.data.id);
-    router.push({ name: "monitor", params: { id: res.data.id } });
+    finishCreate(res.data.id!, form.type);
   } catch {
     error.value = isEdit.value ? "Could not update the monitor." : "Could not create the monitor.";
   } finally {
@@ -1012,7 +1018,11 @@ onMounted(async () => {
   await ws.init();
   await Promise.all([loadChannels(), loadEscalationPolicies(), loadProjectMonitors(), loadProjectSecrets(), loadRegions()]);
   if (isEdit.value) await loadForEdit();
-  else await applyInstanceDefaults();
+  else {
+    const requestedType = typeof route.query.type === "string" ? route.query.type : "";
+    if (types.some((item) => item.key === requestedType)) form.type = requestedType as MonitorType;
+    await applyInstanceDefaults();
+  }
 });
 
 const inputCls =

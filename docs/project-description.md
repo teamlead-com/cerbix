@@ -242,22 +242,29 @@ D-0209/D-0211/D-0213) — **DONE**.
 Four product changes are commissioned as separate iterations after the contract-conformance work; none
 is implemented or opened merely by appearing in the PRD:
 
-- **FR-033 / NFR-027 — audit-log retention (planned iter-0184).** Instance configuration declares a
+- **FR-033 / NFR-027 — audit-log retention (DONE in iter-0184).** Instance configuration declares a
   bounded audit-history horizon. One fenced maintenance owner removes expired organization and global
-  rows in deterministic batches, with backlog metrics and an operator recovery contract. Full draft:
+  rows in deterministic batches, with backlog metrics and an operator recovery contract. It has no SPA
+  surface and therefore no design mock. Full contract:
   [`ops-audit-log-retention.md`](specs/ops-audit-log-retention.md).
-- **FR-034 / NFR-028 — project-level inherited gate policy (planned iter-0185).** A service policy
+- **FR-034 / NFR-028 — project-level inherited gate policy (DONE in iter-0185).** A service policy
   remains the explicit override; otherwise the service inherits one project policy, and every decision
-  records the effective source tuple. Full draft:
+  records the effective source tuple. The design artifact now mirrors the implemented Settings and
+  Service gate surfaces rather than a standalone review shell. Full contract:
   [`func-project-gate-policy.md`](specs/func-project-gate-policy.md).
 - **FR-035 / NFR-029 — worst-of-all-windows gate evaluation (planned iter-0186).** A policy may evaluate
   every configured service SLO target in one snapshot. Known BLOCK evidence wins, unavailable
   constraining evidence remains UNKNOWN, and healthy windows never average away an unhealthy one. Full
   draft: [`func-reliability-gate-all-windows.md`](specs/func-reliability-gate-all-windows.md).
-- **FR-036 / NFR-030 — onboarding (planned iter-0187 design only).** The feature must remain native to
-  Cerbix's organization → project → monitor → evidence model, create no sample truth, and derive progress
-  from canonical resources. No implementation is authorized before a separate design iteration and the
-  owner's explicit approval of the artifact mock. Design brief:
+- **FR-036 / NFR-030 — onboarding (DONE in closed iter-0187).** The revision-5
+  contract keeps the minimum path at organization → project → monitor → first persisted heartbeat,
+  counts a real DOWN result as journey completion without calling it healthy, derives progress from
+  canonical tenant-scoped resources, creates no sample truth, and keeps existing Dashboard cards
+  visible and unchanged when the guide is opened manually. The mock uses the current frontend's exact
+  shell, KPI, timeline and monitor-card rules rather than an approximate theme. The owner approved
+  [`mock-onboarding.html`](design/mock-onboarding.html) and authorized production implementation in
+  iter-0187. The shipped SPA adds no onboarding schema/API/metric and keeps existing Dashboard cards
+  visible when the compact guide is opened manually. Contract:
   [`func-onboarding.md`](specs/func-onboarding.md).
 
 ## Delivery Method

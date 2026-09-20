@@ -51,6 +51,7 @@ const delegatedOwners = computed(() => {
 // address bar and nothing else. The RouterView is keyed by path too; this is the layer that does not
 // depend on the shell remembering to remount.
 const id = computed(() => route.params.id as string);
+const onboardingReturn = computed(() => route.query?.onboarding === "1");
 // Every load takes a ticket. A slower response for the PREVIOUS monitor must not overwrite the
 // current one's screen, which is the race a remount alone does not close.
 let loadTicket = 0;
@@ -823,6 +824,14 @@ watch(
 <template>
   <AppShell active="monitors" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'monitors', monitor?.name || '…']">
     <div class="mx-auto max-w-[1180px] px-[22px] pb-16 pt-6">
+      <div v-if="onboardingReturn && monitor" class="mb-4 flex flex-wrap items-center gap-3 rounded border border-accent bg-accent-weak px-4 py-3 text-[12.5px] text-ink-2" data-testid="onboarding-return">
+        <span class="flex-1">
+          {{ isPush ? "Copy the push endpoint below, send one real heartbeat, then return to the guide." : "Return to the Dashboard to continue waiting for the first persisted result." }}
+        </span>
+        <RouterLink :to="{ name: 'dashboard', query: { onboarding: '1', monitor: monitor.id } }" class="inline-flex h-[34px] items-center rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2">
+          Return to onboarding
+        </RouterLink>
+      </div>
       <!-- header -->
       <div v-if="monitor" class="mb-[22px] flex flex-wrap items-start gap-[14px]">
         <div class="min-w-0">

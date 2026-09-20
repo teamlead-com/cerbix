@@ -51,7 +51,13 @@ export const useWorkspace = defineStore("workspace", {
       if (this.loaded && !force) return;
       this.loading = true;
       try {
-        this.orgs = (await api.GET("/api/v1/organizations")).data ?? [];
+        const res = await api.GET("/api/v1/organizations");
+        const failure = (res as { error?: { error?: string }; response?: Response }).error;
+        if (failure || (res.response && !res.response.ok)) {
+          const message = failure?.error || "Could not load organizations.";
+          throw new Error(message);
+        }
+        this.orgs = res.data ?? [];
         const remembered = localStorage.getItem(LAST_ORG);
         const pick = this.orgs.find((o) => o.id === remembered) ?? this.orgs[0];
         this.orgId = pick?.id ?? "";
@@ -67,12 +73,15 @@ export const useWorkspace = defineStore("workspace", {
         this.projectId = "";
         return;
       }
-      this.projects =
-        (
-          await api.GET("/api/v1/organizations/{orgID}/projects", {
-            params: { path: { orgID: this.orgId } },
-          })
-        ).data ?? [];
+      const res = await api.GET("/api/v1/organizations/{orgID}/projects", {
+        params: { path: { orgID: this.orgId } },
+      });
+      const failure = (res as { error?: { error?: string }; response?: Response }).error;
+      if (failure || (res.response && !res.response.ok)) {
+        const message = failure?.error || "Could not load projects.";
+        throw new Error(message);
+      }
+      this.projects = res.data ?? [];
       const remembered = localStorage.getItem(LAST_PROJECT);
       const stillHere = this.projects.find((p) => p.id === this.projectId);
       const pick =

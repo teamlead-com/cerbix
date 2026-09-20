@@ -28,15 +28,17 @@ runtime metric, only a failure at review/test time when the surfaces drift.
 The owner commissioned four independent product iterations on 2026-09-19. Their revision-1 documents
 are drafts: they define scope and gates but do not open an iteration or authorize implementation.
 
-**R7 — iter-0184, audit-log retention (FR-033/NFR-027).** Bound the currently unbounded
+**R7 — iter-0184, audit-log retention (FR-033/NFR-027). DONE.** Bound the currently unbounded
 `audit_logs` table with strict instance config, a database-clock cutoff, one fenced maintenance owner,
-bounded batches, low-cardinality backlog metrics and a recovery runbook. No SPA surface or mock. Draft:
+bounded batches, low-cardinality backlog metrics and a recovery runbook. The scope has no SPA surface,
+so a mock is intentionally not applicable. Contract:
 [`ops-audit-log-retention.md`](specs/ops-audit-log-retention.md).
 
-**R8 — iter-0185, project-level inherited gate policy (FR-034/NFR-028).** Add one project policy as
+**R8 — iter-0185, project-level inherited gate policy (FR-034/NFR-028). DONE.** Add one project policy as
 the fallback for services without an explicit service policy. Preserve one effective source tuple,
-separate CAS domains, tenant isolation, audited mutations and override revision binding. The project
-editor is a new SPA surface, so frontend work waits for an owner-approved mock. Draft:
+separate CAS domains, tenant isolation, audited mutations and override revision binding. The approved
+project-editor mock was corrected after implementation to transcribe the actual AppShell, Settings and
+Service gate components rather than a parallel review shell. Contract:
 [`func-project-gate-policy.md`](specs/func-project-gate-policy.md).
 
 **R9 — iter-0186, worst-of-all-windows gate evaluation (FR-035/NFR-029).** Depends on R8. Add a
@@ -45,10 +47,14 @@ apply the existing BLOCK → UNKNOWN → WARN → ALLOW algebra over complete pe
 the explicit reconsideration of FR-024 D2 and needs owner approval plus a gate UI mock. Draft:
 [`func-reliability-gate-all-windows.md`](specs/func-reliability-gate-all-windows.md).
 
-**R10 — iter-0187, onboarding design only (FR-036/NFR-030).** Inventory the current first-use paths,
-define the access-aware/resumable state machine, produce the multi-state artifact mock and obtain the
-owner's explicit approval. It creates no production code and does not number the implementation
-iteration. Draft: [`func-onboarding.md`](specs/func-onboarding.md).
+**R10 — iter-0187, onboarding (FR-036/NFR-030). CLOSED 2026-09-20 BY THE OWNER.**
+The owner-approved [`mock-onboarding.html`](design/mock-onboarding.html) is implemented as an additive
+Dashboard guide whose progress is recomputed from canonical tenant state. Existing installations stay
+on the ordinary Dashboard and open a compact guide only through `Get started`; incomplete scopes get
+access-aware steps, scoped local dismissal, truthful wait/worker/read-failure states and first UP/DOWN
+completion. No progress schema, synthetic data, external analytics or server contract was added. Full
+SPA, Go, lint, docs and live narrow Playwright evidence is recorded in
+[`iter-0187.md`](iterations/iter-0187.md) and [`func-onboarding.md`](specs/func-onboarding.md).
 
 The completed canary, incident-audit and dependency-sweep history remains below as the reason the
 standing debts exist; it is no longer the current order.

@@ -8298,7 +8298,7 @@ conformance remains opt-in through `CERBIX_TEST_DATABASE_DSN`. Tenant refusals s
 target ids do not become metric labels. A removed seam fails tests; deployed data is never repaired
 or rewritten by the guard.
 
-## D-0252 — the next four product changes are separate, ordered, and still design-gated (2026-09-19)
+## D-0252 — the next four product changes are separate and ordered (2026-09-19; onboarding authorization updated 2026-09-19)
 
 **Context.** After iter-0183's engineering guard work, the owner commissioned four product directions:
 audit-log retention, project-level inherited gate policy, worst-of-all-windows gate evaluation, and
@@ -8310,12 +8310,12 @@ the two gate changes also have a dependency order.
 1. iter-0184 — FR-033/NFR-027 audit-log retention;
 2. iter-0185 — FR-034/NFR-028 project-level inherited gate policy;
 3. iter-0186 — FR-035/NFR-029 worst-of-all-windows evaluation, after inheritance exists;
-4. iter-0187 — FR-036/NFR-030 onboarding DESIGN ONLY.
+4. iter-0187 — FR-036/NFR-030 onboarding, with production work gated on owner approval of its mock.
 
-Revision-1 specs are drafts and do not open those iterations. The inherited-policy and all-window SPA
-surfaces require owner-approved artifact mocks before frontend work. Onboarding is stricter: iter-0187
-produces the design, state machine and mock only; no production implementation is authorized until the
-owner approves the exact mock revision and separately opens a later implementation iteration.
+Revision-1 specs do not open those iterations by themselves. The inherited-policy, all-window and
+onboarding SPA surfaces require owner-approved artifact mocks before frontend work. On 2026-09-19 the
+owner approved onboarding revision 4 and explicitly authorized its production implementation inside
+iter-0187, so no separately numbered onboarding implementation iteration is required.
 
 This decision records sequence and authorization boundaries, not approval of every proposed technical
 choice inside the drafts. In particular, FR-024 D2 (one window) remains the live product contract until
@@ -8363,3 +8363,48 @@ bounded at 16 KiB for evidence and 4 KiB for flattened reasons rather than trunc
 a distinct session advisory-lock slot, one PostgreSQL `clock_timestamp()` cutoff per pass, and ordered
 `FOR UPDATE SKIP LOCKED` batches. The pass accepts no tenant input, emits no audit row, and leaves
 the existing best-effort audit append contract independent of retention success.
+
+## D-0256 — onboarding is an inline evidence journey, not a wizard or progress database (2026-09-19)
+
+**Context.** Iter-0187 had to design the shortest truthful path from an authenticated account to a
+useful result without duplicating validation, inventing green evidence, blocking experienced users or
+persisting client progress that could disagree with tenant state.
+
+**Decision.** The review contract is organization → project → monitor → first persisted heartbeat.
+The Dashboard hosts an inline, dismissible guide; it never intercepts routes. On an existing
+installation the guide is not automatic; explicit `Get started` adds a compact collapsible panel above
+the unchanged KPI, availability and monitor cards, never replacing or mutating them. Existing create dialogs
+and the typed monitor form remain mutation owners. Completion is recomputed from tenant-isolated
+organization/project/monitor/heartbeat reads. A first DOWN heartbeat completes the journey while the
+target remains visibly failed. Service, notification, status-page and reliability setup are optional
+next actions. Dismissal is presentation-only local storage scoped by user and selected org/project;
+there is no onboarding progress schema, endpoint, audit stream or external analytics.
+
+Worker-region liveness may be shown from the existing region read. The product has no authenticated
+scheduler-issued-run fact, so the implementation says `No result yet` rather than claiming the scheduler
+is unavailable. A future iteration may separately approve a bounded scheduler/ops diagnostic read.
+The mock's product viewport statically transcribes the current
+`AppShell`, `DashboardView`, `Kpi`, `MonitorCard`, `StatusPill`, `UptimeBar` and `Sparkline` rules; it
+does not define a parallel theme. The owner approved the exact revision-4
+[`mock-onboarding.html`](design/mock-onboarding.html) on 2026-09-19 and authorized production
+implementation in iter-0187. The implementation preserves this contract in `frontend/src/lib/onboarding.ts`,
+`OnboardingGuide.vue` and the existing Dashboard/monitor owners; unit, component and live narrow E2E
+evidence passed without adding a server schema, endpoint or metric.
+
+## D-0257 — approved mocks remain historical evidence, but current long-lived artifacts teach the current product grammar (2026-09-20)
+
+**Context.** A post-implementation review of iter-0184 and iter-0185 found two different cases. Audit
+retention has no SPA surface, so manufacturing a mock would misstate its scope. The project-gate mock
+was legitimately approved before implementation, but its long-lived HTML still used a standalone
+review shell, opened directly into a custom editor, and showed explanatory cards that never became
+Cerbix UI. Keeping that artifact unchanged would make future design work copy a parallel component
+grammar even though the implementation is already the product source of truth.
+
+**Decision.** Iter-0184 remains explicitly mock-not-applicable. The closed iter-0185 report and its
+owner-approval record remain immutable historical evidence. The long-lived
+[`mock-project-gate-policy.html`](design/mock-project-gate-policy.html) is corrected in place to
+statically transcribe the current `AppShell`, `SettingsView`, `ProjectGatePolicy`, `ServiceGate` and
+shared gate styles. The correction may remove mock-only presentation but may not alter policy
+resolution, authorization, CAS, source-tuple or runtime behavior. Future post-implementation mock
+audits use this distinction: preserve dated/closed approval records, but keep mutable design artifacts
+aligned with the actual product unless the artifact is explicitly archived as a historical snapshot.

@@ -1608,6 +1608,26 @@ A row written by an API TOKEN has no `actor_user_id` — a token identity has no
 is appended to the target as `· actor=token:<name>`. A row written by a person carries the user id, and
 survives that user's deletion with a NULL actor and its text intact.
 
+## Onboarding implementation status (FR-036 / NFR-030)
+
+The owner approved revision-4 [`mock-onboarding.html`](design/mock-onboarding.html) and iter-0187 ships
+the inline Dashboard guide. Existing installations do not open it automatically; `Get started` adds a
+compact collapsible panel above the unchanged KPI, availability and monitor cards. Incomplete scopes
+open automatically unless the browser stores `cerbix.onboarding.dismissed.<user>.<scope> = 1`.
+Clearing site data resets that presentation preference; it never changes server resources or progress.
+
+There is no onboarding service, progress table, endpoint, config key, readiness rule, alert or metric.
+The SPA derives steps from tenant-scoped organization/project/monitor reads, persisted heartbeats and
+worker-region liveness. A failed read is shown as verification failure, not as an empty tenant. For a
+newly created monitor, only that selected monitor's heartbeat can complete the journey; an older
+heartbeat from another monitor cannot. A first DOWN completes onboarding but remains a target failure.
+
+Do not diagnose an absent first heartbeat as an onboarding-service failure. Worker absence is known
+only when `GET /api/v1/regions` reports the selected pull monitor's region not live. Otherwise the UI
+says `No result yet`, because Cerbix has no authenticated per-monitor fact proving that the scheduler
+issued a run. Check the role-specific `/readyz`, scheduler logs and existing scheduler metrics. Push
+tokens remain on monitor detail only; onboarding never stores or repeats them.
+
 **What is NOT here, by decision.** A MACHINE write leaves no audit row: the monitor and service
 auto-incidents and their auto-resolves, the `⚡ Context:` note, both `⏸ Suppressed:` notes, the
 `🚀 Changes:` note and the `🕸 Impact:` links. That is not a gap — their record is the incident's OWN

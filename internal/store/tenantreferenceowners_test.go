@@ -3,10 +3,22 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
+
+var tenantReferenceBehavioralOwners = map[string]func(*testing.T){
+	"status-page-component-binding":       TestACreateRefusesABindingOutsideThePagesProject,
+	"monitor-notification-channel":        TestAlertRoutingSchemaRejectsDirectForeignProjectWrites,
+	"escalation-policy-target":            TestAlertRoutingStoreRejectsForeignProjectReferences,
+	"oncall-schedule-participant":         TestAlertRoutingStoreRejectsForeignProjectReferences,
+	"oncall-override-channel":             TestAlertRoutingSchemaRejectsDirectForeignProjectWrites,
+	"incident-escalation-snapshot-target": TestEscalationSnapshotRejectsForeignProjectTargets,
+}
 
 func TestTenantReferenceOwnerInventoryResolves(t *testing.T) {
 	t.Parallel()
@@ -17,14 +29,7 @@ func TestTenantReferenceOwnerInventoryResolves(t *testing.T) {
 		t.Fatalf("read owner inventory: %v", err)
 	}
 	entries := tenantReferenceEntries(string(data))
-	wantKeys := []string{
-		"escalation-policy-target",
-		"incident-escalation-snapshot-target",
-		"monitor-notification-channel",
-		"oncall-override-channel",
-		"oncall-schedule-participant",
-		"status-page-component-binding",
-	}
+	wantKeys := tenantReferenceKeys(tenantReferenceBehavioralOwners)
 	gotKeys := make([]string, 0, len(entries))
 	for key := range entries {
 		gotKeys = append(gotKeys, key)
@@ -47,6 +52,68 @@ func TestTenantReferenceOwnerInventoryResolves(t *testing.T) {
 			if !strings.Contains(string(body), token) {
 				t.Fatalf("%s owner %q does not resolve", key, owner)
 			}
+		}
+	}
+}
+
+func TestTenantReferenceOwnerBehavioralBindings(t *testing.T) {
+	for _, key := range tenantReferenceKeys(tenantReferenceBehavioralOwners) {
+		t.Run(key, tenantReferenceBehavioralOwners[key])
+	}
+}
+
+func tenantReferenceKeys(values map[string]func(*testing.T)) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func TestTenantReferenceFieldsRequireRegisteredOwners(t *testing.T) {
+	registered := make(map[string]bool, len(tenantReferenceBehavioralOwners))
+	for key := range tenantReferenceBehavioralOwners {
+		registered[key] = true
+	}
+
+	types := []reflect.Type{
+		reflect.TypeOf(domain.Component{}),
+		reflect.TypeOf(domain.EscalationTarget{}),
+		reflect.TypeOf(domain.OnCallSchedule{}),
+		reflect.TypeOf(domain.OnCallOverride{}),
+		reflect.TypeOf(monitorChannelReference{}),
+	}
+	exemptIdentityOrScope := map[string]map[string]bool{
+		"Component":               {"ID": true, "StatusPageID": true, "OrgID": true},
+		"EscalationTarget":        {},
+		"OnCallSchedule":          {"ID": true, "ProjectID": true},
+		"OnCallOverride":          {"ID": true},
+		"monitorChannelReference": {},
+	}
+	covered := make(map[string]bool, len(registered))
+	for _, typ := range types {
+		for index := 0; index < typ.NumField(); index++ {
+			field := typ.Field(index)
+			owners := strings.Split(field.Tag.Get("tenantref"), ",")
+			if owners[0] == "" {
+				owners = nil
+			}
+			if strings.HasSuffix(field.Name, "ID") && !exemptIdentityOrScope[typ.Name()][field.Name] && len(owners) == 0 {
+				t.Errorf("%s.%s is a cross-object id field without a tenantref owner", typ.Name(), field.Name)
+			}
+			for _, owner := range owners {
+				if !registered[owner] {
+					t.Errorf("%s.%s names unregistered tenantref owner %q", typ.Name(), field.Name, owner)
+					continue
+				}
+				covered[owner] = true
+			}
+		}
+	}
+	for key := range registered {
+		if !covered[key] {
+			t.Errorf("tenant-reference owner %q has no tagged field", key)
 		}
 	}
 }

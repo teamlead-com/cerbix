@@ -18,10 +18,10 @@ import (
 )
 
 type createStatusPageRequest struct {
-	Slug       string `json:"slug"`
-	Title      string `json:"title"`
+	Slug       string `json:"slug" contract:"required"`
+	Title      string `json:"title" contract:"required"`
 	Visibility string `json:"visibility"`
-	ProjectID  string `json:"project_id"`
+	ProjectID  string `json:"project_id" contract:"format=uuid"`
 }
 
 type updateStatusPageRequest struct {
@@ -30,12 +30,12 @@ type updateStatusPageRequest struct {
 }
 
 type createComponentRequest struct {
-	Name         string `json:"name"`
+	Name         string `json:"name" contract:"required"`
 	Description  string `json:"description"`
 	Group        string `json:"group"`
 	Position     int    `json:"position"`
-	MonitorID    string `json:"monitor_id"`
-	ServiceID    string `json:"service_id"`
+	MonitorID    string `json:"monitor_id" contract:"format=uuid"`
+	ServiceID    string `json:"service_id" contract:"format=uuid"`
 	ManualStatus string `json:"manual_status"`
 }
 

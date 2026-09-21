@@ -30,6 +30,13 @@ before retrying—never reuse a project revision as a service CAS token.
 
 ## Audit-log retention
 
+**Post-close verification (iter-0188).** The reproducible PostgreSQL 16 matrix passes normally and
+under `-race`: exact cutoff/mixed scopes, continuation across bounded batches, `SKIP LOCKED` resume,
+atomic statement rollback, two-node fencing/failover, poisoned-owner connection discard, a 2500-row
+live backlog drain, and migration 107 down/up with retained-row preservation. The retention alerts
+derive stale/backlog thresholds from `cerbix_audit_retention_purge_interval_seconds` and include
+absence branches, so a missing health gauge cannot be mistaken for a healthy quiet rule.
+
 `audit.retention_days` is one instance-wide horizon for organization and global audit rows. A row
 at the PostgreSQL cutoff is retained; rows strictly before it become eligible and remain readable
 until a successful bounded purge batch deletes them. Under a healthy maintenance owner, removal
@@ -1380,10 +1387,12 @@ redirect.
 | `4` | `state: NOT_CONFIGURED` — the service has no policy. What to do with that is the integration's visible choice; it is never rendered as `ALLOW` or `WARN`. |
 | `1` | Transport, timeout (`--timeout`, default 10 s), TLS, auth, any other 4xx/5xx — including 503 `snapshot_conflict` / `ledger_unwritable`, where no decision was made — a malformed response, and **429**. The CLI does NOT retry a 429 (a pipeline that retries into a rate limit is the load the limit exists to shed): it prints the server's `Retry-After` (whole seconds, `ceil`ed, never below 1) on stderr and exits 1; back off in the pipeline. |
 
-stdout is ONE line — `state=<STATE> [action=<ACTION>] [override=<actor_label>] decision=<decision_id>`
-— or, with `--json`, the API response byte for byte (it carries `schema_version`). Every reason and
-every diagnostic goes to stderr. Store `decision_id` with the deploy: it resolves later, by id, through
-the project-scoped ledger route, after the service has been renamed or deleted, and a replayed id is
+stdout is ONE line — `state=<STATE> [action=<ACTION>] policy_source=<SOURCE> policy_owner_id=<ID> policy_revision=<REVISION> window_mode=<MODE> evaluated_windows=<WINDOWS> [override=<actor_label>] decision=<decision_id>`.
+Absent policy evidence is rendered as `none`; evaluated windows are comma-separated in canonical
+order. With `--json`, stdout remains the API response byte for byte (it carries `schema_version`).
+Every reason and every diagnostic goes to stderr. Store `decision_id` with the deploy: it resolves
+later, by id, through the project-scoped ledger route, after the service has been renamed or deleted,
+and a replayed id is
 visibly old because it carries its own `evaluated_at`.
 
 ### Metrics and suggested alerts

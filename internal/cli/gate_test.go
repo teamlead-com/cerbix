@@ -91,9 +91,9 @@ func runGateCheckWith(t *testing.T, baseURL string, extra ...string) (int, strin
 }
 
 const (
-	gateBodyAllow = `{"schema_version":1,"decision_id":"dec-allow","evaluated_at":"2026-08-29T10:00:00Z","state":"ALLOW","action":"ALLOW","unoverridden_action":"ALLOW","reasons":[],"policy_revision":3,"facts_fresh_until":"2026-08-29T10:05:00Z"}`
-	gateBodyWarn  = `{"schema_version":1,"decision_id":"dec-warn","evaluated_at":"2026-08-29T10:00:00Z","state":"WARN","action":"WARN","unoverridden_action":"WARN","reasons":[{"code":"budget_consumed_percent","clause":"budget_consumed_percent","assignment":"warn","value":91,"source":"sealed"}]}`
-	gateBodyBlock = `{"schema_version":1,"decision_id":"dec-block","evaluated_at":"2026-08-29T10:00:00Z","state":"BLOCK","action":"BLOCK","unoverridden_action":"BLOCK","reasons":[{"code":"budget_exhausted","clause":"budget_exhausted","assignment":"block","value":true}]}`
+	gateBodyAllow = `{"schema_version":1,"decision_id":"dec-allow","evaluated_at":"2026-08-29T10:00:00Z","state":"ALLOW","action":"ALLOW","unoverridden_action":"ALLOW","reasons":[],"policy_source":"service","policy_owner_id":"service-1","policy_revision":3,"window_mode":"one","evaluated_windows":[{"window":"24h"}],"facts_fresh_until":"2026-08-29T10:05:00Z"}`
+	gateBodyWarn  = `{"schema_version":1,"decision_id":"dec-warn","evaluated_at":"2026-08-29T10:00:00Z","state":"WARN","action":"WARN","unoverridden_action":"WARN","reasons":[{"code":"budget_consumed_percent","clause":"budget_consumed_percent","assignment":"warn","value":91,"source":"sealed"}],"policy_source":"project","policy_owner_id":"project-1","policy_revision":4,"window_mode":"one","evaluated_windows":[{"window":"7d"}]}`
+	gateBodyBlock = `{"schema_version":1,"decision_id":"dec-block","evaluated_at":"2026-08-29T10:00:00Z","state":"BLOCK","action":"BLOCK","unoverridden_action":"BLOCK","reasons":[{"code":"budget_exhausted","clause":"budget_exhausted","assignment":"block","value":true}],"policy_source":"project","policy_owner_id":"project-1","policy_revision":5,"window_mode":"all","evaluated_windows":[{"window":"24h"},{"window":"7d"},{"window":"30d"},{"window":"90d"}]}`
 )
 
 func TestGateCheckAllowExitsZeroWithOneLine(t *testing.T) {
@@ -102,7 +102,7 @@ func TestGateCheckAllowExitsZeroWithOneLine(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, stderr)
 	}
-	if stdout != "state=ALLOW action=ALLOW decision=dec-allow\n" {
+	if stdout != "state=ALLOW action=ALLOW policy_source=service policy_owner_id=service-1 policy_revision=3 window_mode=one evaluated_windows=24h decision=dec-allow\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "" {
@@ -137,7 +137,7 @@ func TestGateCheckWarnExitsZeroAndPrintsReasonsToStderr(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if stdout != "state=WARN action=WARN decision=dec-warn\n" {
+	if stdout != "state=WARN action=WARN policy_source=project policy_owner_id=project-1 policy_revision=4 window_mode=one evaluated_windows=7d decision=dec-warn\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if stderr != "budget_consumed_percent (warn): 91\n" {
@@ -151,7 +151,7 @@ func TestGateCheckBlockExitsTwo(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
 	}
-	if stdout != "state=BLOCK action=BLOCK decision=dec-block\n" {
+	if stdout != "state=BLOCK action=BLOCK policy_source=project policy_owner_id=project-1 policy_revision=5 window_mode=all evaluated_windows=24h,7d,30d,90d decision=dec-block\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 	if !strings.Contains(stderr, "budget_exhausted (block): true") {
@@ -163,7 +163,7 @@ func TestGateCheckBlockExitsTwo(t *testing.T) {
 // in the output regardless.
 func TestGateCheckUnknownFollowsAction(t *testing.T) {
 	unknown := func(action string) string {
-		return `{"schema_version":1,"decision_id":"dec-unk","evaluated_at":"2026-08-29T10:00:00Z","state":"UNKNOWN","action":"` + action + `","reasons":[{"code":"seal_stale","clause":"budget_consumed_percent","assignment":"block","value":null,"details":"seal_lag 420s > max_seal_lag_seconds 300"}]}`
+		return `{"schema_version":1,"decision_id":"dec-unk","evaluated_at":"2026-08-29T10:00:00Z","state":"UNKNOWN","action":"` + action + `","reasons":[{"code":"seal_stale","clause":"budget_consumed_percent","assignment":"block","value":null,"details":"seal_lag 420s > max_seal_lag_seconds 300"}],"policy_source":"service","policy_owner_id":"service-1","policy_revision":3,"window_mode":"one","evaluated_windows":[{"window":"24h"}]}`
 	}
 	srv, _ := newGateServer(t, http.StatusOK, unknown("WARN"), nil)
 	code, stdout, stderr := runGateCheckWith(t, srv.URL)
@@ -189,13 +189,13 @@ func TestGateCheckUnknownFollowsAction(t *testing.T) {
 
 func TestGateCheckNotConfiguredExitsFourWithDocsLink(t *testing.T) {
 	const docs = "https://cerbix.example.com/docs/reliability-gate#not-configured"
-	body := `{"schema_version":1,"decision_id":"dec-nc","evaluated_at":"2026-08-29T10:00:00Z","state":"NOT_CONFIGURED","reasons":[{"code":"not_configured","docs":"` + docs + `"}]}`
+	body := `{"schema_version":1,"decision_id":"dec-nc","evaluated_at":"2026-08-29T10:00:00Z","state":"NOT_CONFIGURED","reasons":[{"code":"not_configured","docs":"` + docs + `"}],"policy_source":"none"}`
 	srv, _ := newGateServer(t, http.StatusOK, body, nil)
 	code, stdout, stderr := runGateCheckWith(t, srv.URL)
 	if code != 4 {
 		t.Fatalf("exit = %d, want 4", code)
 	}
-	if stdout != "state=NOT_CONFIGURED decision=dec-nc\n" {
+	if stdout != "state=NOT_CONFIGURED policy_source=none policy_owner_id=none policy_revision=none window_mode=none evaluated_windows=none decision=dec-nc\n" {
 		t.Fatalf("stdout = %q (no action= for NOT_CONFIGURED)", stdout)
 	}
 	if !strings.Contains(stderr, "not_configured") || !strings.Contains(stderr, docs) {
@@ -204,13 +204,13 @@ func TestGateCheckNotConfiguredExitsFourWithDocsLink(t *testing.T) {
 }
 
 func TestGateCheckOverrideAppearsInSummary(t *testing.T) {
-	body := `{"schema_version":1,"decision_id":"dec-ov","evaluated_at":"2026-08-29T10:00:00Z","state":"BLOCK","action":"ALLOW","unoverridden_action":"BLOCK","override":{"id":"ov-9","actor_label":"token:deploy-bot","reason":"hotfix","expires_at":"2026-08-30T10:00:00Z"},"reasons":[{"code":"budget_exhausted","assignment":"block","value":true}]}`
+	body := `{"schema_version":1,"decision_id":"dec-ov","evaluated_at":"2026-08-29T10:00:00Z","state":"BLOCK","action":"ALLOW","unoverridden_action":"BLOCK","override":{"id":"ov-9","actor_label":"token:deploy-bot","reason":"hotfix","expires_at":"2026-08-30T10:00:00Z"},"reasons":[{"code":"budget_exhausted","assignment":"block","value":true}],"policy_source":"service","policy_owner_id":"service-1","policy_revision":3,"window_mode":"one","evaluated_windows":[{"window":"24h"}]}`
 	srv, _ := newGateServer(t, http.StatusOK, body, nil)
 	code, stdout, _ := runGateCheckWith(t, srv.URL)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (action ALLOW under override)", code)
 	}
-	if stdout != "state=BLOCK action=ALLOW override=token:deploy-bot decision=dec-ov\n" {
+	if stdout != "state=BLOCK action=ALLOW policy_source=service policy_owner_id=service-1 policy_revision=3 window_mode=one evaluated_windows=24h override=token:deploy-bot decision=dec-ov\n" {
 		t.Fatalf("stdout = %q", stdout)
 	}
 }
@@ -516,7 +516,7 @@ func TestGateCheckTLSVerifiesAndHonoursCAFile(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("with CA file: exit = %d, want 0 (stderr=%q)", code, errb.String())
 	}
-	if out.String() != "state=ALLOW action=ALLOW decision=dec-allow\n" {
+	if out.String() != "state=ALLOW action=ALLOW policy_source=service policy_owner_id=service-1 policy_revision=3 window_mode=one evaluated_windows=24h decision=dec-allow\n" {
 		t.Fatalf("with CA file: stdout = %q", out.String())
 	}
 	if n := fake.hits.Load(); n != 1 {

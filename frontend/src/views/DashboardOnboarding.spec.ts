@@ -1,5 +1,5 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import DashboardView from "@/views/DashboardView.vue";
 
@@ -18,12 +18,16 @@ const workspaceMock = vi.hoisted(() => ({
 
 vi.mock("@/api/client", () => ({ api: apiMock }));
 vi.mock("vue-router", async () => {
-  const actual = await vi.importActual<typeof import("vue-router")>("vue-router");
+  const actual =
+    await vi.importActual<typeof import("vue-router")>("vue-router");
   return {
     ...actual,
     useRoute: () => routeMock,
     useRouter: () => routerMock,
-    RouterLink: { props: ["to"], template: '<a data-testid="router-link"><slot /></a>' },
+    RouterLink: {
+      props: ["to"],
+      template: '<a data-testid="router-link"><slot /></a>',
+    },
   };
 });
 vi.mock("@/stores/workspace", () => ({ useWorkspace: () => workspaceMock }));
@@ -36,41 +40,168 @@ vi.mock("@/stores/session", () => ({
   }),
 }));
 vi.mock("@/stores/ui", () => ({ useUi: () => ({ openCreate: vi.fn() }) }));
-vi.mock("@/stores/live", () => ({ useLive: () => ({ connect: vi.fn(), statuses: {} }) }));
-vi.mock("@/components/AppShell.vue", () => ({
-  default: { template: '<main><div data-testid="shell-actions"><slot name="actions" /></div><slot /></main>' },
+vi.mock("@/stores/live", () => ({
+  useLive: () => ({ connect: vi.fn(), statuses: {} }),
 }));
-vi.mock("@/components/Kpi.vue", () => ({ default: { template: '<div data-testid="kpi" />' } }));
-vi.mock("@/components/MonitorCard.vue", () => ({ default: { template: '<div data-testid="monitor-card" />' } }));
+vi.mock("@/components/AppShell.vue", () => ({
+  default: {
+    template:
+      '<main><div data-testid="shell-actions"><slot name="actions" /></div><slot /></main>',
+  },
+}));
+vi.mock("@/components/Kpi.vue", () => ({
+  default: { template: '<div data-testid="kpi" />' },
+}));
+vi.mock("@/components/MonitorCard.vue", () => ({
+  default: { template: '<div data-testid="monitor-card" />' },
+}));
 
 function response(path: string) {
   if (path.includes("/projects/{projectID}/monitors")) {
-    return { data: [{ id: "m1", project_id: "p1", name: "Checkout API", type: "http", region: "core", status: "up", enabled: true, created_at: "2026-09-19T09:00:00Z" }] };
+    return {
+      data: [
+        {
+          id: "m1",
+          project_id: "p1",
+          name: "Checkout API",
+          type: "http",
+          region: "core",
+          status: "up",
+          enabled: true,
+          created_at: "2026-09-19T09:00:00Z",
+        },
+      ],
+    };
   }
   if (path.includes("/projects/{projectID}/availability")) return { data: [] };
-  if (path.includes("/projects/{projectID}/sla")) return { data: { windows: [] } };
-  if (path.includes("/monitors/{monitorID}/heartbeats")) return { data: [{ monitor_id: "m1", ts: "2026-09-19T09:01:00Z", up: true, latency_ms: 184 }] };
-  if (path.includes("/monitors/{monitorID}/sla")) return { data: { windows: [] } };
-  if (path === "/api/v1/regions") return { data: { regions: [{ name: "core", live: true }] } };
+  if (path.includes("/projects/{projectID}/sla"))
+    return { data: { windows: [] } };
+  if (path.includes("/monitors/{monitorID}/heartbeats"))
+    return {
+      data: [
+        {
+          monitor_id: "m1",
+          ts: "2026-09-19T09:01:00Z",
+          up: true,
+          latency_ms: 184,
+        },
+      ],
+    };
+  if (path.includes("/monitors/{monitorID}/sla"))
+    return { data: { windows: [] } };
+  if (path === "/api/v1/regions")
+    return { data: { regions: [{ name: "core", live: true }] } };
   return { data: [] };
 }
 
 describe("Dashboard onboarding", () => {
-  it("keeps an existing Dashboard unchanged when Get started opens the compact guide", async () => {
+  beforeEach(() => {
     localStorage.clear();
-    apiMock.GET.mockImplementation((path: string) => Promise.resolve(response(path)));
-    const wrapper = mount(DashboardView, { global: { stubs: { RouterLink: { props: ["to"], template: "<a><slot /></a>" } } } });
+    apiMock.GET.mockReset();
+    workspaceMock.orgId = "o1";
+    workspaceMock.projectId = "p1";
+    workspaceMock.orgName = "Acme";
+    workspaceMock.projectName = "Payments";
+    workspaceMock.init.mockClear();
+  });
+
+  it("keeps an existing Dashboard unchanged when Get started opens the compact guide", async () => {
+    apiMock.GET.mockImplementation((path: string) =>
+      Promise.resolve(response(path)),
+    );
+    const wrapper = mount(DashboardView, {
+      global: {
+        stubs: { RouterLink: { props: ["to"], template: "<a><slot /></a>" } },
+      },
+    });
     await flushPromises();
 
-    expect(wrapper.find('[data-testid="onboarding-guide"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="onboarding-guide"]').exists()).toBe(
+      false,
+    );
     expect(wrapper.findAll('[data-testid="kpi"]')).toHaveLength(4);
     expect(wrapper.findAll('[data-testid="monitor-card"]')).toHaveLength(1);
 
     await wrapper.find('[data-testid="onboarding-entry"]').trigger("click");
     await flushPromises();
 
-    expect(wrapper.find('[data-testid="onboarding-guide"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="onboarding-guide"]').exists()).toBe(
+      true,
+    );
     expect(wrapper.findAll('[data-testid="kpi"]')).toHaveLength(4);
     expect(wrapper.findAll('[data-testid="monitor-card"]')).toHaveLength(1);
+  });
+
+  it("discards a delayed project A load after project B becomes current", async () => {
+    let resolveProjectA!: (value: ReturnType<typeof response>) => void;
+    const projectAMonitors = new Promise<ReturnType<typeof response>>(
+      (resolve) => {
+        resolveProjectA = resolve;
+      },
+    );
+    apiMock.GET.mockImplementation(
+      (
+        path: string,
+        options?: { params?: { path?: { projectID?: string } } },
+      ) => {
+        if (path.includes("/projects/{projectID}/monitors")) {
+          return options?.params?.path?.projectID === "p1"
+            ? projectAMonitors
+            : Promise.resolve({ data: [] });
+        }
+        return Promise.resolve(response(path));
+      },
+    );
+
+    const wrapper = mount(DashboardView, {
+      global: {
+        stubs: { RouterLink: { props: ["to"], template: "<a><slot /></a>" } },
+      },
+    });
+    await Promise.resolve();
+
+    workspaceMock.projectId = "p2";
+    workspaceMock.projectName = "Ledger";
+    await wrapper.find('[data-testid="onboarding-entry"]').trigger("click");
+    await flushPromises();
+
+    resolveProjectA(response("/api/v1/projects/{projectID}/monitors"));
+    await flushPromises();
+
+    expect(wrapper.findAll('[data-testid="monitor-card"]')).toHaveLength(0);
+    expect(wrapper.text()).toContain("Ledger");
+    expect(wrapper.text()).toContain("0 monitors");
+    expect(wrapper.text()).not.toContain("Checkout API");
+  });
+
+  it("does not continue monitor or region reads after unmount", async () => {
+    let resolveMonitors!: (value: ReturnType<typeof response>) => void;
+    const delayedMonitors = new Promise<ReturnType<typeof response>>(
+      (resolve) => {
+        resolveMonitors = resolve;
+      },
+    );
+    apiMock.GET.mockImplementation((path: string) => {
+      if (path.includes("/projects/{projectID}/monitors"))
+        return delayedMonitors;
+      return Promise.resolve(response(path));
+    });
+
+    const wrapper = mount(DashboardView, {
+      global: {
+        stubs: { RouterLink: { props: ["to"], template: "<a><slot /></a>" } },
+      },
+    });
+    await Promise.resolve();
+    wrapper.unmount();
+    resolveMonitors(response("/api/v1/projects/{projectID}/monitors"));
+    await flushPromises();
+
+    const postProjectReads = apiMock.GET.mock.calls.filter(
+      ([path]) =>
+        String(path).includes("/monitors/{monitorID}/") ||
+        path === "/api/v1/regions",
+    );
+    expect(postProjectReads).toHaveLength(0);
   });
 });

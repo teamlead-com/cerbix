@@ -111,8 +111,8 @@ source scope, and revoked state. It does not walk services in application code.
 - A dedicated project policy editor is a new SPA surface and requires an owner-approved artifact mock
   before frontend implementation. Backend/schema work may proceed only after the spec itself is
   approved; SPA work waits for the mock.
-- CLI gate-check output includes the policy source. Project policy CRUD in CLI is optional and not part
-  of iter-0185.
+- CLI gate-check human output includes the policy source, owner id and revision; JSON remains the raw
+  API response. Project policy CRUD in CLI is optional and not part of iter-0185.
 
 ## 8. Security and tenant isolation
 

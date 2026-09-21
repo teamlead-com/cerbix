@@ -5,25 +5,35 @@ What is next, in the order it should happen, and why. Live requirement status is
 document holds only the ORDER and the reasoning for it. It is edited in place — an item leaves it by
 being done, or by being declined with its reason moved to §5.
 
-**Where the tree stands (2026-09-19).** Product requirements through FR-032 are implemented. The two
-most recent repairs exposed one repeated engineering risk: separately maintained transport, fake,
-store and schema artifacts could answer the same contract differently. `iter-0183` is OPEN to turn
-that risk into mechanical gates under NFR-026; it adds no product feature. `iter-0182` is closed,
-while `iter-0181` remains lifecycle-OPEN despite complete implementation and DoD, pending the owner's
-explicit closure. The next release notes are prepared as `v0.2.1` in `CHANGELOG.md`; no tag or push is
-implied by that heading.
+**Where the tree stands (2026-09-21).** Iter-0188 closed every P0/P1/P2 finding from the post-close
+audit of iter-0183…0187. FR-033/034/035/036 and the strengthened NFR-026 guards are `DONE` again under
+D-0259. The immutable opening finding set remains
+[`2026-09-20-iter-0183-0187-implementation-audit.md`](checks/2026-09-20-iter-0183-0187-implementation-audit.md).
+No tag or push is implied by the prepared release headings.
 
 ---
 
-## 1. Now — contract and tenant seam conformance
+## 1. Now — choose the next product iteration
 
-**R6 — NFR-026 / iter-0183. IMPLEMENTED 2026-09-19; lifecycle OPEN pending owner closure.** The
+**R11 — iter-0188, audit remediation. DONE 2026-09-21.** PostgreSQL retention proof now covers cutoff,
+batching, lock resume, rollback, fencing, poisoned owner connection, live drain and migration round trip;
+alerts follow configured cadence and fail closed on absent gauges. Effective gate policy reads use one
+snapshot, human CLI output carries source/window evidence, migration 00109 refuses lossy downgrade,
+Dashboard onboarding has request-generation/unmount fencing, and iter-0183's request/tenant guards are
+type-aware and behaviour-bound. Full Go/race, PostgreSQL, frontend, lint, docs and live onboarding gates
+are recorded in [`iter-0188.md`](iterations/iter-0188.md).
+
+## 2. Historical sequence — contract and tenant seam conformance
+
+**R6 — NFR-026 / iter-0183. CLOSED 2026-09-21 BY THE OWNER; strengthened by iter-0188.** The
 status-page write DTO family is registered against OpenAPI, one component-create contract inventory
 runs against the API fake and PostgreSQL store, and the tenant-reference ownership inventory is
-executable. This is the direct follow-up to D-0249 and D-0250: no new endpoint, migration, UI or
-runtime metric, only a failure at review/test time when the surfaces drift.
+executable. Required sets, bounded types and formats are compared, fixture mutations prove the guard,
+and every tenant-reference key invokes its PostgreSQL corruption regression. This is the direct
+follow-up to D-0249 and D-0250: no new endpoint, migration, UI or runtime metric, only a failure at
+review/test time when the surfaces drift.
 
-## 2. Next — four separate product iterations
+## 3. Historical sequence — four separate product iterations
 
 The owner commissioned four independent product iterations on 2026-09-19. Their revision-1 documents
 are drafts: they define scope and gates but do not open an iteration or authorize implementation.

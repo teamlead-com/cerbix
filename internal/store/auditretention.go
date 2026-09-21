@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // AuditRetentionMaintenanceLockKey is a maintenance-only advisory-lock slot, separate from
@@ -46,13 +48,22 @@ func (s *Store) RunAuditRetentionPass(ctx context.Context, cfg AuditRetentionCon
 		`SELECT clock_timestamp() - make_interval(days => $1)`, cfg.RetentionDays).Scan(&cutoff); err != nil {
 		return AuditRetentionReport{}, true, "error", fmt.Errorf("store: audit retention cutoff: %w", err)
 	}
+	return runAuditRetentionBatches(passCtx, ls.conn, cfg, cutoff)
+}
+
+func runAuditRetentionBatches(
+	ctx context.Context,
+	conn *pgxpool.Conn,
+	cfg AuditRetentionConfig,
+	cutoff time.Time,
+) (AuditRetentionReport, bool, string, error) {
 	report := AuditRetentionReport{LastSuccessUnix: cutoff.AddDate(0, 0, cfg.RetentionDays).Unix()}
 	for {
-		if passCtx.Err() != nil {
-			return report, true, "budget", passCtx.Err()
+		if ctx.Err() != nil {
+			return report, true, "budget", ctx.Err()
 		}
 		var deleted int
-		err := ls.conn.QueryRow(passCtx, `
+		err := conn.QueryRow(ctx, `
 			WITH candidates AS (
 				SELECT id FROM audit_logs
 				 WHERE created_at < $1
@@ -70,7 +81,7 @@ func (s *Store) RunAuditRetentionPass(ctx context.Context, cfg AuditRetentionCon
 			break
 		}
 	}
-	if err := ls.conn.QueryRow(passCtx,
+	if err := conn.QueryRow(ctx,
 		`SELECT COALESCE(EXTRACT(EPOCH FROM ($1::timestamptz - MIN(created_at))), 0)
 		   FROM audit_logs WHERE created_at < $1`, cutoff).Scan(&report.OldestExpiredSecond); err != nil {
 		return report, true, "error", fmt.Errorf("store: audit retention backlog: %w", err)

@@ -25,7 +25,7 @@ func (t EscalationTargetType) Valid() bool {
 // on-call schedule (resolved to the currently-on-call channel at fire time).
 type EscalationTarget struct {
 	Type EscalationTargetType `json:"type"`
-	ID   string               `json:"id"`
+	ID   string               `json:"id" tenantref:"escalation-policy-target,incident-escalation-snapshot-target"`
 }
 
 // EscalationStep is one rung of the ladder: after AfterSeconds from the incident's base instant,
@@ -93,8 +93,8 @@ func (p EscalationPolicy) Validate() error {
 // of the rotation.
 type OnCallOverride struct {
 	ID         string    `json:"id"`
-	ScheduleID string    `json:"schedule_id"`
-	ChannelID  string    `json:"channel_id"`
+	ScheduleID string    `json:"schedule_id" tenantref:"oncall-override-channel"`
+	ChannelID  string    `json:"channel_id" tenantref:"oncall-override-channel"`
 	StartsAt   time.Time `json:"starts_at"`
 	EndsAt     time.Time `json:"ends_at"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -121,7 +121,7 @@ type OnCallSchedule struct {
 	Name         string           `json:"name"`
 	ShiftSeconds int              `json:"shift_seconds"`
 	AnchorAt     time.Time        `json:"anchor_at"`
-	Participants []string         `json:"participants"` // ordered channel ids
+	Participants []string         `json:"participants" tenantref:"oncall-schedule-participant"` // ordered channel ids
 	Overrides    []OnCallOverride `json:"overrides,omitempty"`
 	CreatedAt    time.Time        `json:"created_at"`
 	UpdatedAt    time.Time        `json:"updated_at"`

@@ -197,7 +197,13 @@ func (s *Store) DeleteNotificationChannel(ctx context.Context, id string) error 
 }
 
 // LinkMonitorChannel links a monitor to a channel (idempotent).
+type monitorChannelReference struct {
+	MonitorID string `tenantref:"monitor-notification-channel"`
+	ChannelID string `tenantref:"monitor-notification-channel"`
+}
+
 func (s *Store) LinkMonitorChannel(ctx context.Context, monitorID, channelID string) error {
+	reference := monitorChannelReference{MonitorID: monitorID, ChannelID: channelID}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin link monitor channel: %w", err)
@@ -210,7 +216,7 @@ func (s *Store) LinkMonitorChannel(ctx context.Context, monitorID, channelID str
 		   FROM monitors m
 		   JOIN notification_channels c ON c.id = $2 AND c.project_id = m.project_id
 		  WHERE m.id = $1
-		  FOR KEY SHARE OF m, c`, monitorID, channelID).Scan(&projectID)
+		  FOR KEY SHARE OF m, c`, reference.MonitorID, reference.ChannelID).Scan(&projectID)
 	if noRows(err) {
 		return ErrRoutingReferenceNotInProject
 	}
@@ -219,7 +225,7 @@ func (s *Store) LinkMonitorChannel(ctx context.Context, monitorID, channelID str
 	}
 	_, err = tx.Exec(ctx,
 		`INSERT INTO monitor_notifications (monitor_id, channel_id, project_id) VALUES ($1,$2,$3)
-		 ON CONFLICT DO NOTHING`, monitorID, channelID, projectID)
+		 ON CONFLICT DO NOTHING`, reference.MonitorID, reference.ChannelID, projectID)
 	if err != nil {
 		return fmt.Errorf("store: link monitor channel: %w", err)
 	}

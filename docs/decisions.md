@@ -8408,3 +8408,63 @@ shared gate styles. The correction may remove mock-only presentation but may not
 resolution, authorization, CAS, source-tuple or runtime behavior. Future post-implementation mock
 audits use this distinction: preserve dated/closed approval records, but keep mutable design artifacts
 aligned with the actual product unless the artifact is explicitly archived as a historical snapshot.
+
+## D-0258 — a closed iteration report is historical evidence, not immunity from a post-close regression audit (2026-09-20)
+
+**Context.** The owner requested a full audit of iter-0183 through iter-0187. The review found that the
+current tree does not sustain several unqualified `DONE` claims: at audit opening iter-0184 retained
+neither the reported PostgreSQL run's command/output nor a reproducible database test of the
+destructive path (the core matrix was subsequently added in iter-0188); retention alerts disagree with the supported cadence and fail open on
+metric absence; the public inherited-policy GET is not one snapshot; CLI source/window evidence was
+not implemented; migration 00109 cannot downgrade all-window rows; and Dashboard onboarding loads can
+cross after a project switch. Two iter-0183 guards are useful but narrower than their “contract” and
+“ownership” labels imply.
+
+**Decision.** Closed iteration reports remain immutable records of what was claimed and run at closure.
+The living `status.md`, `traceability.md` and roadmap may reopen a requirement when later evidence
+invalidates its acceptance or Definition of Done. Owner closure does not waive a canonical spec gate,
+turn a comment into an executable test, or transfer a product invariant to an operator.
+
+`iter-0188` owns remediation. FR-033/NFR-027, FR-034/NFR-028, FR-035/NFR-029 and FR-036/NFR-030 are
+`IN_PROGRESS` until the audit's P0/P1 closure gates pass. NFR-026 remains implemented at its originally
+approved narrow scope, but its property-name and source-token mechanisms must not be described as full
+type parity or behavioural ownership; strengthening them is tracked as P2.
+
+**Evidence rule.** A destructive database path requires database execution evidence. A one-snapshot
+claim requires one transaction/snapshot at every exposed read that makes the claim. “CLI output” means
+the stable human output as well as raw `--json`. A supported down migration must be exercised with data
+introduced by the up migration. Async tenant/project views require a request epoch or cancellation and
+a deferred-response regression. Operational alerts must cover metric absence and the whole accepted
+configuration range.
+
+## D-0259 — iter-0188 closes the post-close audit only with executable cross-layer evidence (2026-09-21)
+
+**Context.** D-0258 reopened FR-033 through FR-036 and narrowed NFR-026 after the implementation audit
+found that several iteration claims stopped one layer before the requirement: destructive retention
+had no preserved PostgreSQL matrix, alerts assumed a fixed cadence and present gauges, an effective
+policy response could cross snapshots, the human CLI hid source/window evidence, migration 00109 had
+no usable down contract, Dashboard requests could cross project generations, and two conformance
+checks proved names/tokens rather than the contract and owner they named.
+
+**Decision.** Iter-0188 closes every finding in the immutable audit snapshot. Audit retention is proven
+by one isolated PostgreSQL matrix for cutoff equality, batching, row-lock continuation, statement
+rollback, two-node fencing, poisoned-owner connection discard, bounded live drain and migration 107
+down/up row preservation, both normally and under the race detector. Alert thresholds derive from the
+validated purge interval and include explicit metric-absence branches. Effective policy resolution is
+one repeatable-read transaction. Human `cerbix gate check` output includes policy source, owner,
+revision, window mode and evaluated windows. Migration 00109 refuses downgrade while an all-window
+policy or decision exists and succeeds after those rows are removed. Dashboard onboarding discards
+stale async continuations by generation and invalidates the generation on unmount.
+
+The iter-0183 request guard now compares exact properties, required sets, bounded JSON types and
+formats, with mutation tests for every added dimension. Tenant-reference fields carry registered owner
+tags, and every inventory key invokes the PostgreSQL behavioural/direct-SQL regression named by the
+registry. These tags are a review/discovery fence, not a replacement for composite foreign keys,
+triggers or store validation.
+
+**Closure evidence.** Full `go test ./...`, `make race`, build, vet, Dockerized
+`golangci-lint:v2.12.2`, docs-check and diff-check pass. PostgreSQL retention, snapshot, downgrade and
+tenant-reference matrices pass; the retention matrix also passes under `-race`. The SPA passes 61
+files / 708 tests, `vue-tsc`, Vite build, and the rebuilt single-topology onboarding Playwright smoke.
+FR-033/NFR-027, FR-034/NFR-028, FR-035/NFR-029, FR-036/NFR-030 and the strengthened NFR-026 guard
+return to `DONE`.

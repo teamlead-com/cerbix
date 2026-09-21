@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
@@ -51,23 +58,28 @@ const monitors = ref<Monitor[]>([]);
 const evidence = ref<MonitorEvidence[]>([]);
 const onboardingReadError = ref("");
 const onboardingRegionLive = ref<boolean | undefined>();
-const onboardingCandidateId = ref(typeof route.query.monitor === "string" ? route.query.monitor : "");
+const onboardingCandidateId = ref(
+  typeof route.query.monitor === "string" ? route.query.monitor : "",
+);
 const onboardingJourneyActive = ref(route.query.onboarding === "1");
 const guideOpen = ref(false);
 const guide = ref<{ focusHeading: () => Promise<void> } | null>(null);
 const entryButton = ref<HTMLButtonElement | null>(null);
-const onboarding = ref<OnboardingSnapshot>(resolveOnboarding({
-  loading: true,
-  orgCount: 0,
-  orgId: "",
-  projectId: "",
-  canCreateOrg: false,
-  canCreateProject: false,
-  canCreateMonitor: false,
-  evidence: [],
-}));
+const onboarding = ref<OnboardingSnapshot>(
+  resolveOnboarding({
+    loading: true,
+    orgCount: 0,
+    orgId: "",
+    projectId: "",
+    canCreateOrg: false,
+    canCreateProject: false,
+    canCreateMonitor: false,
+    evidence: [],
+  }),
+);
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
 let pollAttempt = 0;
+let loadGeneration = 0;
 type Trend = { dir: "pos" | "neg" | "flat"; label: string };
 const kpis = ref({
   availability: "—",
@@ -87,8 +99,14 @@ const timeline = ref<{ pct: number | null; label: string }[]>([]);
 const empty = ref("");
 const emptyKind = ref<"" | "org" | "project" | "monitor" | "error">("");
 const canManageOrg = computed(() => !!ws.orgId && session.isOrgAdmin(ws.orgId));
-const dismissalKey = computed(() => onboardingDismissalKey(session.user?.id ?? "", ws.orgId, ws.projectId));
-const onboardingIncomplete = computed(() => onboarding.value.kind !== "complete_existing" && !onboarding.value.kind.startsWith("first_result_"));
+const dismissalKey = computed(() =>
+  onboardingDismissalKey(session.user?.id ?? "", ws.orgId, ws.projectId),
+);
+const onboardingIncomplete = computed(
+  () =>
+    onboarding.value.kind !== "complete_existing" &&
+    !onboarding.value.kind.startsWith("first_result_"),
+);
 const emptyTitle = computed(() => {
   switch (emptyKind.value) {
     case "org":
@@ -116,20 +134,36 @@ function pct(n?: number) {
 
 // Aggregate 90-day uptime shown in the timeline header (mean of days with data).
 const timelineUptime = computed(() => {
-  const vals = timeline.value.filter((d) => d.pct !== null).map((d) => d.pct as number);
+  const vals = timeline.value
+    .filter((d) => d.pct !== null)
+    .map((d) => d.pct as number);
   if (!vals.length) return "—";
   return `${(vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2)}% uptime`;
 });
 
 function errorMessage(error: unknown, fallback: string): string {
-  if (error && typeof error === "object" && "error" in error && typeof error.error === "string") return error.error;
+  if (
+    error &&
+    typeof error === "object" &&
+    "error" in error &&
+    typeof error.error === "string"
+  )
+    return error.error;
   return fallback;
 }
 
-async function loadMonitorExtras(m: Monitor): Promise<{ card: Card; heartbeat: Heartbeat | null; heartbeatError: string }> {
+async function loadMonitorExtras(m: Monitor): Promise<{
+  card: Card;
+  heartbeat: Heartbeat | null;
+  heartbeatError: string;
+}> {
   const [slaRes, hbRes] = await Promise.all([
-    api.GET("/api/v1/monitors/{monitorID}/sla", { params: { path: { monitorID: m.id! } } }),
-    api.GET("/api/v1/monitors/{monitorID}/heartbeats", { params: { path: { monitorID: m.id! }, query: { limit: 48 } } }),
+    api.GET("/api/v1/monitors/{monitorID}/sla", {
+      params: { path: { monitorID: m.id! } },
+    }),
+    api.GET("/api/v1/monitors/{monitorID}/heartbeats", {
+      params: { path: { monitorID: m.id! }, query: { limit: 48 } },
+    }),
   ]);
   const w30 = slaRes.data?.windows?.find((w: WindowSLA) => w.window === "30d");
   const newestHeartbeat = hbRes.data?.[0] ?? null;
@@ -141,24 +175,30 @@ async function loadMonitorExtras(m: Monitor): Promise<{ card: Card; heartbeat: H
     card: {
       monitor: m,
       uptime: m.type === "push" ? "—" : pct(w30?.uptime_percent),
-      latency: w30?.avg_latency_ms ? `${Math.round(w30.avg_latency_ms)} ms` : "—",
+      latency: w30?.avg_latency_ms
+        ? `${Math.round(w30.avg_latency_ms)} ms`
+        : "—",
       segments,
       spark,
       budgetLeft: eb ? Math.max(0, 100 - (eb.burned_percent ?? 0)) : null,
       budgetMet: eb?.met ?? true,
     },
     heartbeat: newestHeartbeat,
-    heartbeatError: hbRes.error ? errorMessage(hbRes.error, "Could not load recent heartbeats.") : "",
+    heartbeatError: hbRes.error
+      ? errorMessage(hbRes.error, "Could not load recent heartbeats.")
+      : "",
   };
 }
 
-async function readRegion(candidate: Monitor | null): Promise<void> {
-  onboardingRegionLive.value = undefined;
-  if (!candidate || candidate.type === "push" || candidate.type === "composite") return;
+async function readRegion(
+  candidate: Monitor | null,
+): Promise<boolean | undefined> {
+  if (!candidate || candidate.type === "push" || candidate.type === "composite")
+    return undefined;
   const res = await api.GET("/api/v1/regions");
-  if (res.error || !res.data?.regions) return;
+  if (res.error || !res.data?.regions) return undefined;
   const region = candidate.region || "core";
-  onboardingRegionLive.value = res.data.regions.find((item) => item.name === region)?.live;
+  return res.data.regions.find((item) => item.name === region)?.live;
 }
 
 function recomputeOnboarding(allowAutoOpen = true) {
@@ -169,17 +209,22 @@ function recomputeOnboarding(allowAutoOpen = true) {
     projectId: ws.projectId,
     canCreateOrg: session.isGlobalAdmin,
     canCreateProject: !!ws.orgId && session.isOrgAdmin(ws.orgId),
-    canCreateMonitor: !!ws.projectId && session.canProjectWrite(ws.orgId, ws.projectId),
+    canCreateMonitor:
+      !!ws.projectId && session.canProjectWrite(ws.orgId, ws.projectId),
     evidence: evidence.value,
     candidateId: onboardingCandidateId.value,
     journeyActive: onboardingJourneyActive.value,
     regionLive: onboardingRegionLive.value,
   });
-  const automatic = onboardingIncomplete.value && !isOnboardingDismissed(dismissalKey.value);
-  if (onboardingJourneyActive.value || (allowAutoOpen && automatic)) guideOpen.value = true;
+  const automatic =
+    onboardingIncomplete.value && !isOnboardingDismissed(dismissalKey.value);
+  if (onboardingJourneyActive.value || (allowAutoOpen && automatic))
+    guideOpen.value = true;
 }
 
 async function load(forceWorkspace = false, allowAutoOpen = true) {
+  const generation = ++loadGeneration;
+  const current = () => generation === loadGeneration;
   loading.value = true;
   empty.value = "";
   emptyKind.value = "";
@@ -194,58 +239,86 @@ async function load(forceWorkspace = false, allowAutoOpen = true) {
     projectId: ws.projectId,
     canCreateOrg: session.isGlobalAdmin,
     canCreateProject: !!ws.orgId && session.isOrgAdmin(ws.orgId),
-    canCreateMonitor: !!ws.projectId && session.canProjectWrite(ws.orgId, ws.projectId),
+    canCreateMonitor:
+      !!ws.projectId && session.canProjectWrite(ws.orgId, ws.projectId),
     evidence: [],
   });
   try {
     await ws.init(forceWorkspace);
+    if (!current()) return;
     if (!ws.orgs.length) {
-      empty.value = "Organizations are the top-level tenant — a product or team, isolated from the others. Create your first one to start adding projects and monitors.";
+      empty.value =
+        "Organizations are the top-level tenant — a product or team, isolated from the others. Create your first one to start adding projects and monitors.";
       emptyKind.value = "org";
       recomputeOnboarding(allowAutoOpen);
       return;
     }
     const projectID = ws.projectId;
     if (!projectID) {
-      empty.value = "Projects are the teams and apps inside an organization — each holds its own monitors, channels and members. Add the first one.";
+      empty.value =
+        "Projects are the teams and apps inside an organization — each holds its own monitors, channels and members. Add the first one.";
       emptyKind.value = "project";
       recomputeOnboarding(allowAutoOpen);
       return;
     }
 
     const [monitorRes, projectSla, avail] = await Promise.all([
-      api.GET("/api/v1/projects/{projectID}/monitors", { params: { path: { projectID } } }),
-      api.GET("/api/v1/projects/{projectID}/sla", { params: { path: { projectID } } }),
-      api.GET("/api/v1/projects/{projectID}/availability", { params: { path: { projectID }, query: { days: 90 } } }),
+      api.GET("/api/v1/projects/{projectID}/monitors", {
+        params: { path: { projectID } },
+      }),
+      api.GET("/api/v1/projects/{projectID}/sla", {
+        params: { path: { projectID } },
+      }),
+      api.GET("/api/v1/projects/{projectID}/availability", {
+        params: { path: { projectID }, query: { days: 90 } },
+      }),
     ]);
-    if (monitorRes.error) throw new Error(errorMessage(monitorRes.error, "Could not load monitors."));
+    if (!current()) return;
+    if (monitorRes.error)
+      throw new Error(
+        errorMessage(monitorRes.error, "Could not load monitors."),
+      );
     timeline.value = buildTimeline(avail.data ?? []);
     const list = monitorRes.data ?? [];
     const monitorList = list as Monitor[];
-    const w30 = projectSla.data?.windows?.find((w: WindowSLA) => w.window === "30d");
+    const w30 = projectSla.data?.windows?.find(
+      (w: WindowSLA) => w.window === "30d",
+    );
 
     if (!monitorList.length) {
-      empty.value = "No monitors in this project yet. Add one to begin checking.";
+      empty.value =
+        "No monitors in this project yet. Add one to begin checking.";
       emptyKind.value = "monitor";
       recomputeOnboarding(allowAutoOpen);
       return;
     }
     monitors.value = monitorList;
     const loaded = await Promise.all(monitorList.map(loadMonitorExtras));
+    if (!current()) return;
     cards.value = loaded.map((item) => item.card);
-    evidence.value = loaded.map((item) => ({ monitor: item.card.monitor, heartbeat: item.heartbeat }));
-    onboardingReadError.value = loaded.find((item) => item.heartbeatError)?.heartbeatError ?? "";
-    const candidate = evidence.value.find((item) => item.monitor.id === onboardingCandidateId.value)?.monitor
-      ?? evidence.value.find((item) => !item.heartbeat)?.monitor
-      ?? evidence.value[0]?.monitor
-      ?? null;
-    await readRegion(candidate);
+    evidence.value = loaded.map((item) => ({
+      monitor: item.card.monitor,
+      heartbeat: item.heartbeat,
+    }));
+    onboardingReadError.value =
+      loaded.find((item) => item.heartbeatError)?.heartbeatError ?? "";
+    const candidate =
+      evidence.value.find(
+        (item) => item.monitor.id === onboardingCandidateId.value,
+      )?.monitor ??
+      evidence.value.find((item) => !item.heartbeat)?.monitor ??
+      evidence.value[0]?.monitor ??
+      null;
+    const regionLive = await readRegion(candidate);
+    if (!current()) return;
+    onboardingRegionLive.value = regionLive;
     recomputeOnboarding(allowAutoOpen);
 
     // Project error budget = mean of the monitors that have an SLO target.
     const budgets = cards.value.filter((c) => c.budgetLeft !== null);
     const meanBudget = budgets.length
-      ? budgets.reduce((a, c) => a + (c.budgetLeft as number), 0) / budgets.length
+      ? budgets.reduce((a, c) => a + (c.budgetLeft as number), 0) /
+        budgets.length
       : null;
     const downCount = monitorList.filter((m) => m.status === "down").length;
 
@@ -262,18 +335,26 @@ async function load(forceWorkspace = false, allowAutoOpen = true) {
     let availSub = "rolling 30-day window";
     if (cur30 !== null && prev30 !== null) {
       const d = cur30 - prev30;
-      availTrend = { dir: d >= 0.005 ? "pos" : d <= -0.005 ? "neg" : "flat", label: `${d >= 0 ? "+" : ""}${d.toFixed(2)}%` };
+      availTrend = {
+        dir: d >= 0.005 ? "pos" : d <= -0.005 ? "neg" : "flat",
+        label: `${d >= 0 ? "+" : ""}${d.toFixed(2)}%`,
+      };
       availSub = "vs prev 30d";
     }
 
     // p95 latency trend: "stable" when p95 is close to the average (tight spread),
     // else "variable"; sub reports how many checks the window covers.
     const checks = w30?.total ?? 0;
-    const checksSub = checks ? `across ${checks} check${checks === 1 ? "" : "s"}` : "";
+    const checksSub = checks
+      ? `across ${checks} check${checks === 1 ? "" : "s"}`
+      : "";
     let p95Trend: Trend | undefined;
     if (w30?.p95_latency_ms && w30?.avg_latency_ms) {
       const stable = w30.p95_latency_ms <= w30.avg_latency_ms * 1.6;
-      p95Trend = { dir: stable ? "pos" : "flat", label: stable ? "stable" : "variable" };
+      p95Trend = {
+        dir: stable ? "pos" : "flat",
+        label: stable ? "stable" : "variable",
+      };
     }
 
     kpis.value = {
@@ -284,19 +365,25 @@ async function load(forceWorkspace = false, allowAutoOpen = true) {
       total: String(monitorList.length),
       downSub: downCount ? `${downCount} down` : "all operational",
       budget: meanBudget !== null ? `${Math.round(meanBudget)}%` : "—",
-      budgetSub: budgets.length ? `across ${budgets.length} SLO${budgets.length > 1 ? "s" : ""}` : "no SLO set",
+      budgetSub: budgets.length
+        ? `across ${budgets.length} SLO${budgets.length > 1 ? "s" : ""}`
+        : "no SLO set",
       budgetMet: budgets.every((c) => c.budgetMet),
       p95: w30?.p95_latency_ms ? `${Math.round(w30.p95_latency_ms)} ms` : "—",
       p95Sub: checksSub,
       p95Trend,
     };
   } catch (error) {
-    onboardingReadError.value = error instanceof Error ? error.message : "Could not verify the selected workspace.";
+    if (!current()) return;
+    onboardingReadError.value =
+      error instanceof Error
+        ? error.message
+        : "Could not verify the selected workspace.";
     recomputeOnboarding(allowAutoOpen);
     empty.value = "Could not load the dashboard.";
     emptyKind.value = "error";
   } finally {
-    loading.value = false;
+    if (current()) loading.value = false;
   }
 }
 
@@ -329,38 +416,58 @@ async function openGuide() {
 }
 
 async function chooseCandidate(id: string) {
+  const generation = loadGeneration;
   onboardingCandidateId.value = id;
   onboardingJourneyActive.value = true;
-  await readRegion(monitors.value.find((item) => item.id === id) ?? null);
+  const regionLive = await readRegion(
+    monitors.value.find((item) => item.id === id) ?? null,
+  );
+  if (generation !== loadGeneration) return;
+  onboardingRegionLive.value = regionLive;
   recomputeOnboarding(false);
 }
 
 async function pollOnboarding() {
+  const generation = loadGeneration;
   const candidate = onboarding.value.candidate;
   if (!guideOpen.value || !candidate?.id) return;
   const res = await api.GET("/api/v1/monitors/{monitorID}/heartbeats", {
     params: { path: { monitorID: candidate.id }, query: { limit: 1 } },
   });
+  if (generation !== loadGeneration) return;
   if (res.error) {
-    onboardingReadError.value = errorMessage(res.error, "Could not load recent heartbeats.");
+    onboardingReadError.value = errorMessage(
+      res.error,
+      "Could not load recent heartbeats.",
+    );
     recomputeOnboarding(false);
     return;
   }
-  const item = evidence.value.find((entry) => entry.monitor.id === candidate.id);
+  const item = evidence.value.find(
+    (entry) => entry.monitor.id === candidate.id,
+  );
   if (item) item.heartbeat = res.data?.[0] ?? null;
   if (item?.heartbeat) {
     onboardingJourneyActive.value = true;
     await load(false, false);
     return;
   }
-  await readRegion(candidate);
+  const regionLive = await readRegion(candidate);
+  if (generation !== loadGeneration) return;
+  onboardingRegionLive.value = regionLive;
   recomputeOnboarding(false);
   schedulePolling();
 }
 
 function schedulePolling() {
   if (pollTimer) clearTimeout(pollTimer);
-  if (!guideOpen.value || !["waiting_for_result", "scheduler_unknown", "worker_unavailable"].includes(onboarding.value.kind)) return;
+  if (
+    !guideOpen.value ||
+    !["waiting_for_result", "scheduler_unknown", "worker_unavailable"].includes(
+      onboarding.value.kind,
+    )
+  )
+    return;
   const delays = [2000, 4000, 8000, 15000];
   const delay = delays[Math.min(pollAttempt, delays.length - 1)];
   pollAttempt++;
@@ -368,7 +475,9 @@ function schedulePolling() {
 }
 
 // Fill a 90-slot strip (oldest→newest) from the sparse per-day availability list.
-function buildTimeline(days: DailyAvailability[]): { pct: number | null; label: string }[] {
+function buildTimeline(
+  days: DailyAvailability[],
+): { pct: number | null; label: string }[] {
   const byDay = new Map<string, DailyAvailability>();
   for (const d of days) {
     if (d.day) byDay.set(d.day.slice(0, 10), d);
@@ -380,7 +489,10 @@ function buildTimeline(days: DailyAvailability[]): { pct: number | null; label: 
     const key = utcDayKey(dt);
     const d = byDay.get(key);
     // The key is a lookup; the label is read by a human in a tooltip, so it names its zone.
-    out.push({ pct: d && d.total ? (d.uptime_percent ?? 0) : null, label: utcDayLabel(isoInstant(dt)) });
+    out.push({
+      pct: d && d.total ? (d.uptime_percent ?? 0) : null,
+      label: utcDayLabel(isoInstant(dt)),
+    });
   }
   return out;
 }
@@ -390,13 +502,24 @@ onMounted(() => {
   live.connect();
 });
 onBeforeUnmount(() => {
+  loadGeneration++;
   if (pollTimer) clearTimeout(pollTimer);
 });
-watch(() => [ws.orgId, ws.projectId], () => load());
-watch(() => [guideOpen.value, onboarding.value.kind, onboarding.value.candidate?.id], () => {
-  pollAttempt = 0;
-  schedulePolling();
-});
+watch(
+  () => [ws.orgId, ws.projectId],
+  () => load(),
+);
+watch(
+  () => [
+    guideOpen.value,
+    onboarding.value.kind,
+    onboarding.value.candidate?.id,
+  ],
+  () => {
+    pollAttempt = 0;
+    schedulePolling();
+  },
+);
 
 // Patch cards live as SSE status events arrive.
 watch(
@@ -407,7 +530,8 @@ watch(
       const s = map[c.monitor.id ?? ""];
       if (s) {
         c.monitor = { ...c.monitor, status: s.status as Monitor["status"] };
-        if (s.latency_ms && c.monitor.type !== "push") c.latency = `${Math.round(s.latency_ms)} ms`;
+        if (s.latency_ms && c.monitor.type !== "push")
+          c.latency = `${Math.round(s.latency_ms)} ms`;
       }
       if (c.monitor.status === "up") up++;
     }
@@ -418,7 +542,10 @@ watch(
 </script>
 
 <template>
-  <AppShell active="dashboard" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'Dashboard']">
+  <AppShell
+    active="dashboard"
+    :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'Dashboard']"
+  >
     <template #actions>
       <button
         v-if="!guideOpen"
@@ -435,14 +562,24 @@ watch(
         :to="{ name: 'monitor-new' }"
         class="flex h-[34px] items-center gap-[7px] rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2"
       >
-        <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14" /></svg>
+        <svg
+          viewBox="0 0 24 24"
+          class="h-[15px] w-[15px]"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.2"
+        >
+          <path d="M12 5v14M5 12h14" />
+        </svg>
         New monitor
       </RouterLink>
     </template>
 
     <div class="mx-auto max-w-[1180px] px-[22px] pb-16 pt-[26px]">
       <div class="mb-[22px]">
-        <h1 class="text-[21px] font-semibold tracking-tight">{{ ws.projectName || "Dashboard" }}</h1>
+        <h1 class="text-[21px] font-semibold tracking-tight">
+          {{ ws.projectName || "Dashboard" }}
+        </h1>
         <p class="mt-[3px] text-[13px] text-ink-3">
           <span v-if="loading">Loading…</span>
           <span v-else>{{ cards.length }} monitors · {{ ws.orgName }}</span>
@@ -464,15 +601,72 @@ watch(
         @choose-monitor="chooseCandidate"
       />
 
-      <div v-if="empty && !loading && !guideOpen" class="grid place-items-center py-16">
+      <div
+        v-if="empty && !loading && !guideOpen"
+        class="grid place-items-center py-16"
+      >
         <div class="max-w-[480px] text-center">
-          <div class="mx-auto mb-[18px] grid h-14 w-14 place-items-center rounded-[14px] bg-accent-weak text-accent">
-            <svg v-if="emptyKind === 'org'" viewBox="0 0 24 24" class="h-[26px] w-[26px]" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18" /><path d="M5 21V7l7-4 7 4v14" /><path d="M9 21v-6h6v6" /><path d="M9 9h.01M15 9h.01M9 12h.01M15 12h.01" /></svg>
-            <svg v-else-if="emptyKind === 'project'" viewBox="0 0 24 24" class="h-[26px] w-[26px]" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
-            <svg v-else-if="emptyKind === 'monitor'" viewBox="0 0 24 24" class="h-[26px] w-[26px]" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-14 2 8h6" /></svg>
-            <svg v-else viewBox="0 0 24 24" class="h-[26px] w-[26px]" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" /></svg>
+          <div
+            class="mx-auto mb-[18px] grid h-14 w-14 place-items-center rounded-[14px] bg-accent-weak text-accent"
+          >
+            <svg
+              v-if="emptyKind === 'org'"
+              viewBox="0 0 24 24"
+              class="h-[26px] w-[26px]"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M3 21h18" />
+              <path d="M5 21V7l7-4 7 4v14" />
+              <path d="M9 21v-6h6v6" />
+              <path d="M9 9h.01M15 9h.01M9 12h.01M15 12h.01" />
+            </svg>
+            <svg
+              v-else-if="emptyKind === 'project'"
+              viewBox="0 0 24 24"
+              class="h-[26px] w-[26px]"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path
+                d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"
+              />
+            </svg>
+            <svg
+              v-else-if="emptyKind === 'monitor'"
+              viewBox="0 0 24 24"
+              class="h-[26px] w-[26px]"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M3 12h4l2 6 4-14 2 8h6" />
+            </svg>
+            <svg
+              v-else
+              viewBox="0 0 24 24"
+              class="h-[26px] w-[26px]"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 8v4M12 16h.01" />
+            </svg>
           </div>
-          <h2 class="mb-[6px] text-[19px] font-semibold tracking-tight">{{ emptyTitle }}</h2>
+          <h2 class="mb-[6px] text-[19px] font-semibold tracking-tight">
+            {{ emptyTitle }}
+          </h2>
           <p class="mb-5 text-[13.5px] text-ink-3">{{ empty }}</p>
 
           <button
@@ -481,7 +675,15 @@ watch(
             class="inline-flex h-[34px] items-center gap-[7px] rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2"
             @click="ui.openCreate('org')"
           >
-            <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14" /></svg>
+            <svg
+              viewBox="0 0 24 24"
+              class="h-[15px] w-[15px]"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+            >
+              <path d="M12 5v14M5 12h14" />
+            </svg>
             New organization
           </button>
           <button
@@ -490,20 +692,51 @@ watch(
             class="inline-flex h-[34px] items-center gap-[7px] rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2"
             @click="ui.openCreate('project')"
           >
-            <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14" /></svg>
+            <svg
+              viewBox="0 0 24 24"
+              class="h-[15px] w-[15px]"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+            >
+              <path d="M12 5v14M5 12h14" />
+            </svg>
             New project
           </button>
           <RouterLink
-            v-else-if="emptyKind === 'monitor' && session.canProjectWrite(ws.orgId, ws.projectId)"
+            v-else-if="
+              emptyKind === 'monitor' &&
+              session.canProjectWrite(ws.orgId, ws.projectId)
+            "
             :to="{ name: 'monitor-new' }"
             class="inline-flex h-[34px] items-center gap-[7px] rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2"
           >
-            <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14" /></svg>
+            <svg
+              viewBox="0 0 24 24"
+              class="h-[15px] w-[15px]"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+            >
+              <path d="M12 5v14M5 12h14" />
+            </svg>
             New monitor
           </RouterLink>
-          <p v-else-if="emptyKind === 'org'" class="text-[12.5px] text-ink-3">Ask a global admin to create an organization.</p>
-          <p v-else-if="emptyKind === 'project'" class="text-[12.5px] text-ink-3">Ask an org admin to create a project in {{ ws.orgName }}.</p>
-          <p v-else-if="emptyKind === 'monitor'" class="text-[12.5px] text-ink-3">Ask an editor or admin to create the first monitor.</p>
+          <p v-else-if="emptyKind === 'org'" class="text-[12.5px] text-ink-3">
+            Ask a global admin to create an organization.
+          </p>
+          <p
+            v-else-if="emptyKind === 'project'"
+            class="text-[12.5px] text-ink-3"
+          >
+            Ask an org admin to create a project in {{ ws.orgName }}.
+          </p>
+          <p
+            v-else-if="emptyKind === 'monitor'"
+            class="text-[12.5px] text-ink-3"
+          >
+            Ask an editor or admin to create the first monitor.
+          </p>
         </div>
       </div>
 
@@ -511,15 +744,41 @@ watch(
         <!-- hero: KPIs as individual rounded cards + a 90-day availability card -->
         <div class="mb-6 flex flex-col gap-3">
           <div class="grid grid-cols-4 gap-3 max-[900px]:grid-cols-2">
-            <Kpi label="Availability · 30d" :value="kpis.availability" :sub="kpis.availSub" :trend="kpis.availTrend" />
-            <Kpi label="Monitors up" :value="kpis.up" :unit="' / ' + kpis.total" :sub="kpis.downSub" />
-            <Kpi label="Error budget · 30d" :value="kpis.budget" :sub="kpis.budgetSub" />
-            <Kpi label="P95 latency · 30d" :value="kpis.p95" :sub="kpis.p95Sub" :trend="kpis.p95Trend" />
+            <Kpi
+              label="Availability · 30d"
+              :value="kpis.availability"
+              :sub="kpis.availSub"
+              :trend="kpis.availTrend"
+            />
+            <Kpi
+              label="Monitors up"
+              :value="kpis.up"
+              :unit="' / ' + kpis.total"
+              :sub="kpis.downSub"
+            />
+            <Kpi
+              label="Error budget · 30d"
+              :value="kpis.budget"
+              :sub="kpis.budgetSub"
+            />
+            <Kpi
+              label="P95 latency · 30d"
+              :value="kpis.p95"
+              :sub="kpis.p95Sub"
+              :trend="kpis.p95Trend"
+            />
           </div>
-          <div class="rounded border border-border bg-surface px-[18px] pb-[17px] pt-[15px] shadow-card">
+          <div
+            class="rounded border border-border bg-surface px-[18px] pb-[17px] pt-[15px] shadow-card"
+          >
             <div class="mb-[10px] flex items-baseline gap-[10px]">
-              <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Project availability · 90 days</span>
-              <span class="ml-auto font-mono text-[12px] text-ink-2">{{ timelineUptime }}</span>
+              <span
+                class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3"
+                >Project availability · 90 days</span
+              >
+              <span class="ml-auto font-mono text-[12px] text-ink-2">{{
+                timelineUptime
+              }}</span>
             </div>
             <svg
               :viewBox="`0 0 ${timeline.length} 10`"
@@ -539,14 +798,31 @@ watch(
                 ry="0.7"
                 :style="{ fill: dayFill(d.pct) }"
               >
-                <title>{{ d.pct === null ? d.label + " · no data" : d.label + " · " + d.pct.toFixed(2) + "%" }}</title>
+                <title>
+                  {{
+                    d.pct === null
+                      ? d.label + " · no data"
+                      : d.label + " · " + d.pct.toFixed(2) + "%"
+                  }}
+                </title>
               </rect>
             </svg>
             <div class="mt-[10px] flex gap-4 text-[12px] text-ink-3">
-              <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-2 w-2 rounded-[2px] bg-up"></i> Operational</span>
-              <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-2 w-2 rounded-[2px] bg-degraded"></i> Degraded</span>
-              <span class="inline-flex items-center gap-[6px]"><i class="inline-block h-2 w-2 rounded-[2px] bg-down"></i> Down</span>
-              <span class="ml-auto font-mono text-[11px]">90 days ago → today</span>
+              <span class="inline-flex items-center gap-[6px]"
+                ><i class="inline-block h-2 w-2 rounded-[2px] bg-up"></i>
+                Operational</span
+              >
+              <span class="inline-flex items-center gap-[6px]"
+                ><i class="inline-block h-2 w-2 rounded-[2px] bg-degraded"></i>
+                Degraded</span
+              >
+              <span class="inline-flex items-center gap-[6px]"
+                ><i class="inline-block h-2 w-2 rounded-[2px] bg-down"></i>
+                Down</span
+              >
+              <span class="ml-auto font-mono text-[11px]"
+                >90 days ago → today</span
+              >
             </div>
           </div>
         </div>

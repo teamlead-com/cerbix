@@ -2,14 +2,26 @@ groups:
   - name: cerbix-audit-retention
     rules:
       - alert: CerbixAuditRetentionStale
-        expr: time() - cerbix_audit_retention_last_success_timestamp_seconds > 7200
+        expr: |
+          (time() - cerbix_audit_retention_last_success_timestamp_seconds
+            > 2 * cerbix_audit_retention_purge_interval_seconds)
+          or
+          ((time() - cerbix_audit_retention_configured_timestamp_seconds
+            > 2 * cerbix_audit_retention_purge_interval_seconds)
+            unless cerbix_audit_retention_last_success_timestamp_seconds)
         for: 15m
         labels:
           severity: warning
         annotations:
-          summary: Audit-retention pass has not succeeded for two hours.
+          summary: Audit-retention pass has not succeeded for two configured purge cadences.
       - alert: CerbixAuditRetentionBacklog
-        expr: cerbix_audit_retention_oldest_expired_seconds > 7200
+        expr: |
+          (cerbix_audit_retention_oldest_expired_seconds
+            > 2 * cerbix_audit_retention_purge_interval_seconds)
+          or
+          ((time() - cerbix_audit_retention_configured_timestamp_seconds
+            > 2 * cerbix_audit_retention_purge_interval_seconds)
+            unless cerbix_audit_retention_oldest_expired_seconds)
         for: 15m
         labels:
           severity: warning

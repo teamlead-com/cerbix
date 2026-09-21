@@ -226,8 +226,10 @@ the completion denominator.
 ## 14. State machine
 
 The machine is recomputed whenever the guide opens, after a linked mutation returns, on project/org
-selection change, and while waiting for a result. `failed_read` has precedence over every apparent
-empty state.
+selection change, and while waiting for a result. Each async load/poll continuation is fenced by the
+current workspace generation and unmount invalidates the generation, so a delayed response from a
+previous project cannot write evidence into the selected project. `failed_read` has precedence over
+every apparent empty state.
 
 | State | Canonical predicate | Primary copy/action | Exit |
 | --- | --- | --- | --- |

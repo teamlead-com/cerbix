@@ -51,6 +51,17 @@ ALTER TABLE service_gate_decisions
     );
 
 -- +goose Down
+-- +goose StatementBegin
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM service_gate_policies WHERE window_mode = 'all')
+       OR EXISTS (SELECT 1 FROM project_gate_policies WHERE window_mode = 'all')
+       OR EXISTS (SELECT 1 FROM service_gate_decisions WHERE window_mode = 'all') THEN
+        RAISE EXCEPTION 'cannot downgrade migration 00109 while all-window gate policies or decisions exist';
+    END IF;
+END $$;
+-- +goose StatementEnd
+
 ALTER TABLE service_gate_decisions DROP CONSTRAINT IF EXISTS service_gate_decisions_window_mode_chk;
 ALTER TABLE service_gate_decisions DROP CONSTRAINT IF EXISTS service_gate_decisions_policy_presence_chk;
 ALTER TABLE service_gate_decisions DROP CONSTRAINT IF EXISTS service_gate_decisions_payload_chk;

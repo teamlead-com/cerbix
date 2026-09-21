@@ -8,10 +8,19 @@ import (
 var auditRetentionResults = map[string]bool{"deleted": true, "empty": true, "lock_busy": true, "error": true, "budget": true}
 
 type auditRetentionMetrics struct {
-	passes      map[string]uint64
-	rowsDeleted uint64
-	oldest      *float64
-	lastSuccess *int64
+	passes           map[string]uint64
+	rowsDeleted      uint64
+	oldest           *float64
+	lastSuccess      *int64
+	purgeInterval    *float64
+	configuredAtUnix *int64
+}
+
+func (r *Registry) SetAuditRetentionConfigured(purgeIntervalSeconds float64, configuredAtUnix int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.auditRetention.purgeInterval = &purgeIntervalSeconds
+	r.auditRetention.configuredAtUnix = &configuredAtUnix
 }
 
 func (r *Registry) RecordAuditRetentionPass(result string, deleted int) error {
@@ -42,10 +51,28 @@ func (a auditRetentionMetrics) snapshot() auditRetentionMetrics {
 		value := *a.lastSuccess
 		a.lastSuccess = &value
 	}
+	if a.purgeInterval != nil {
+		value := *a.purgeInterval
+		a.purgeInterval = &value
+	}
+	if a.configuredAtUnix != nil {
+		value := *a.configuredAtUnix
+		a.configuredAtUnix = &value
+	}
 	return a
 }
 
 func (a auditRetentionMetrics) write(w *prometheusWriter) {
+	if a.purgeInterval != nil {
+		w.println("# HELP cerbix_audit_retention_purge_interval_seconds Configured interval between audit-retention passes.")
+		w.println("# TYPE cerbix_audit_retention_purge_interval_seconds gauge")
+		w.printf("cerbix_audit_retention_purge_interval_seconds %.3f\n", *a.purgeInterval)
+	}
+	if a.configuredAtUnix != nil {
+		w.println("# HELP cerbix_audit_retention_configured_timestamp_seconds Process timestamp when audit retention was configured.")
+		w.println("# TYPE cerbix_audit_retention_configured_timestamp_seconds gauge")
+		w.printf("cerbix_audit_retention_configured_timestamp_seconds %d\n", *a.configuredAtUnix)
+	}
 	if len(a.passes) > 0 {
 		w.println("# HELP cerbix_audit_retention_passes_total Audit-retention passes by bounded result.")
 		w.println("# TYPE cerbix_audit_retention_passes_total counter")

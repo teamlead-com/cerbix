@@ -160,16 +160,21 @@ The decision adds:
 6. Result and reason ordering are deterministic under randomized SQL row order.
 7. Inheritance, CAS, overrides, ledger retention, and CLI exit semantics remain intact.
 8. Evaluation stays within the existing transaction budget without per-window query loops.
+9. Migration downgrade is explicit and non-lossy: 109→108 is refused while any service policy,
+   project policy or decision ledger row uses `window_mode=all`, and succeeds once those rows are
+   removed or converted by an operator-controlled migration plan.
 
 ## 11. Required tests and gates
 
 - Pure table tests for every D4 precedence combination across two to four windows, including ignored
   unavailable clauses and randomized input order.
-- Migration compatibility tests proving v1→v2 no revision/result drift.
+- Migration compatibility tests proving v1→v2 no revision/result drift and a data-bearing 109→108
+  preflight test for service policies, project policies and decision rows.
 - PostgreSQL snapshot tests for concurrent target add/delete, per-window burn evidence, earliest
   freshness, no-target UNKNOWN, and inherited all-window policy.
 - API/OpenAPI/generated-client parity and singular-field absence in all mode.
-- CLI golden/exit-code tests and ledger replay/history tests after target deletion.
+- CLI human-summary/JSON/exit-code goldens, including source/revision/mode/ordered inventory, and ledger
+  replay/history tests after target deletion.
 - SPA component tests plus live Playwright for mode switching, inventory preview, mixed outcomes,
   UNKNOWN, override, and inherited project policy — after mock approval.
 - Performance assertion: bounded statement count and transaction-budget integration test.

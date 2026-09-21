@@ -64,17 +64,26 @@ type gateOverride struct {
 	ActorLabel string `json:"actor_label"`
 }
 
+type gateEvaluatedWindow struct {
+	Window string `json:"window"`
+}
+
 // gateDecision is the subset of the D7 response the CLI needs for its stdout line and exit
 // code. Unknown fields are ignored on purpose (the --json path prints the raw bytes anyway).
 type gateDecision struct {
-	SchemaVersion      int           `json:"schema_version"`
-	DecisionID         string        `json:"decision_id"`
-	EvaluatedAt        string        `json:"evaluated_at"`
-	State              string        `json:"state"`
-	Action             string        `json:"action,omitempty"`
-	Reasons            []gateReason  `json:"reasons"`
-	Override           *gateOverride `json:"override,omitempty"`
-	UnoverriddenAction string        `json:"unoverridden_action,omitempty"`
+	SchemaVersion      int                   `json:"schema_version"`
+	DecisionID         string                `json:"decision_id"`
+	EvaluatedAt        string                `json:"evaluated_at"`
+	State              string                `json:"state"`
+	Action             string                `json:"action,omitempty"`
+	Reasons            []gateReason          `json:"reasons"`
+	Override           *gateOverride         `json:"override,omitempty"`
+	UnoverriddenAction string                `json:"unoverridden_action,omitempty"`
+	PolicySource       string                `json:"policy_source,omitempty"`
+	PolicyOwnerID      string                `json:"policy_owner_id,omitempty"`
+	PolicyRevision     *int64                `json:"policy_revision,omitempty"`
+	WindowMode         string                `json:"window_mode,omitempty"`
+	EvaluatedWindows   []gateEvaluatedWindow `json:"evaluated_windows,omitempty"`
 }
 
 // gateHTTPResult is what the wire returned, before any interpretation.
@@ -334,7 +343,9 @@ func gateRenderDecision(body []byte, asJSON bool, stdout, stderr io.Writer) int 
 
 // summaryLine is the stdout grammar:
 //
-//	state=<STATE> [action=<ACTION>] [override=<actor_label>] decision=<decision_id>
+//	state=<STATE> [action=<ACTION>] policy_source=<SOURCE> policy_owner_id=<ID>
+//	policy_revision=<REVISION> window_mode=<MODE> evaluated_windows=<WINDOWS>
+//	[override=<actor_label>] decision=<decision_id>
 //
 // `action=` only when the response carries one (never for NOT_CONFIGURED), `override=` only
 // when an override was applied. UNKNOWN stays visible as the state whatever the action.
@@ -345,6 +356,30 @@ func (d gateDecision) summaryLine() string {
 	if d.Action != "" {
 		b.WriteString(" action=")
 		b.WriteString(d.Action)
+	}
+	b.WriteString(" policy_source=")
+	b.WriteString(gateSummaryValue(d.PolicySource))
+	b.WriteString(" policy_owner_id=")
+	b.WriteString(gateSummaryValue(d.PolicyOwnerID))
+	b.WriteString(" policy_revision=")
+	if d.PolicyRevision == nil {
+		b.WriteString("none")
+	} else {
+		_, _ = fmt.Fprintf(&b, "%d", *d.PolicyRevision)
+	}
+	b.WriteString(" window_mode=")
+	b.WriteString(gateSummaryValue(d.WindowMode))
+	b.WriteString(" evaluated_windows=")
+	windowNames := make([]string, 0, len(d.EvaluatedWindows))
+	for _, window := range d.EvaluatedWindows {
+		if window.Window != "" {
+			windowNames = append(windowNames, window.Window)
+		}
+	}
+	if len(windowNames) == 0 {
+		b.WriteString("none")
+	} else {
+		b.WriteString(strings.Join(windowNames, ","))
 	}
 	if d.Override != nil {
 		label := d.Override.ActorLabel
@@ -357,6 +392,13 @@ func (d gateDecision) summaryLine() string {
 	b.WriteString(" decision=")
 	b.WriteString(d.DecisionID)
 	return b.String()
+}
+
+func gateSummaryValue(value string) string {
+	if value == "" {
+		return "none"
+	}
+	return value
 }
 
 // line renders one reason for stderr:

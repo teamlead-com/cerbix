@@ -214,8 +214,13 @@ func closeInheritedProjectGateOverridesTx(ctx context.Context, tx pgx.Tx, projec
 // EffectiveGatePolicy resolves a policy from one database snapshot without materializing a
 // service copy.  Service wins; otherwise the project's live policy is inherited.
 func (s *Store) EffectiveGatePolicy(ctx context.Context, projectID, serviceID string) (domain.EffectiveGatePolicy, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return domain.EffectiveGatePolicy{}, fmt.Errorf("store: begin effective gate policy snapshot: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
 	var exists bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM services WHERE id=$1 AND project_id=$2)`, serviceID, projectID).Scan(&exists); isInvalidTextRepresentation(err) {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM services WHERE id=$1 AND project_id=$2)`, serviceID, projectID).Scan(&exists); isInvalidTextRepresentation(err) {
 		return domain.EffectiveGatePolicy{}, ErrNotFound
 	} else if err != nil {
 		return domain.EffectiveGatePolicy{}, fmt.Errorf("store: effective gate policy service scope: %w", err)
@@ -223,22 +228,14 @@ func (s *Store) EffectiveGatePolicy(ctx context.Context, projectID, serviceID st
 	if !exists {
 		return domain.EffectiveGatePolicy{}, ErrNotFound
 	}
-	service, found, err := readGatePolicyRowOn(ctx, s.pool, serviceID, false)
+	effective, err := effectiveGatePolicyTx(ctx, tx, projectID, serviceID)
 	if err != nil {
 		return domain.EffectiveGatePolicy{}, err
 	}
-	if found && service.Live() {
-		rev := service.Revision
-		return domain.EffectiveGatePolicy{Policy: service, Source: domain.GatePolicySourceService, OwnerID: serviceID, ServiceOverrideRevision: &rev}, nil
+	if err := tx.Commit(ctx); err != nil {
+		return domain.EffectiveGatePolicy{}, fmt.Errorf("store: commit effective gate policy snapshot: %w", err)
 	}
-	project, found, err := readProjectGatePolicyRowOn(ctx, s.pool, projectID, false)
-	if err != nil {
-		return domain.EffectiveGatePolicy{}, err
-	}
-	if !found || !project.Live() {
-		return domain.EffectiveGatePolicy{}, ErrGatePolicyNotConfigured
-	}
-	return domain.EffectiveGatePolicy{Policy: project, Source: domain.GatePolicySourceProject, OwnerID: projectID}, nil
+	return effective, nil
 }
 
 func effectiveGatePolicyTx(ctx context.Context, tx pgx.Tx, projectID, serviceID string) (domain.EffectiveGatePolicy, error) {

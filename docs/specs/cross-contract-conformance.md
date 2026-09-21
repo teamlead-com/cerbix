@@ -32,8 +32,12 @@ failures self-healing.
 ## 3. Contract-surface rule
 
 A registered JSON write contract has one named Go DTO and one OpenAPI component schema. A Go test
-compares their JSON property sets exactly. Removing `service_id` from `createComponentRequest`, or
-adding a new OpenAPI property without adding it to the DTO, must fail by field name.
+compares their JSON property sets and required sets exactly, then compares a bounded type model
+(`string`, `boolean`, `integer`, `number`, `array`, `object`) plus declared formats such as `uuid` and
+`int64`. Removing `service_id` from `createComponentRequest`, changing a required field to optional,
+or changing a UUID/string/integer shape on only one side must fail by field name. Fixture mutations
+prove requiredness, type and format mismatches are detected rather than merely implementing the
+comparison code and assuming it works.
 
 The TypeScript side remains generated from `openapi.yaml`; the existing CI schema-drift gate runs
 `npm run gen:api` and refuses a changed `frontend/src/api/schema.d.ts`. The Go parity test plus that
@@ -69,9 +73,11 @@ handler regression because it tests HTTP classification rather than store confor
 
 ## 5. Tenant-reference owner inventory
 
-The behavioural tests remain the authority. The inventory below is a mechanical presence gate over
-their ownership seams: removing a writer, schema guard, scoped runtime read or regression file makes
-the registry test fail rather than silently shortening the protection.
+The behavioural tests remain the authority. The inventory below is an index over their ownership
+seams, and every key is bound to an executable PostgreSQL behavioural/direct-SQL regression. The
+named domain/store reference fields carry `tenantref` owner tags; adding another cross-object `*ID`
+field to the guarded family without registering an owner fails review tests. Tags do not enforce
+tenancy by themselves: composite foreign keys, triggers and store validation remain the product guard.
 
 | Key | Reference | Store owner | Schema owner | Runtime owner | Behavioural regression |
 | --- | --- | --- | --- | --- | --- |
@@ -88,10 +94,12 @@ cause and follow the existing logged 5xx path.
 
 ## 6. Acceptance invariants
 
-1. The registered Go/OpenAPI property sets are equal in both directions.
+1. The registered Go/OpenAPI property sets, required sets, bounded types and declared formats are
+   equal in both directions, and mutation fixtures fail each added dimension.
 2. The generated TypeScript schema is still checked against OpenAPI by CI.
 3. Fake and PostgreSQL component-create tests iterate one shared case inventory.
 4. The fake refuses every tenant/project/pair violation the store refuses.
-5. The tenant-owner registry resolves every named file, symbol/constraint and regression test.
+5. The tenant-owner registry resolves every named file, symbol/constraint and regression test; every
+   key invokes its PostgreSQL regression, and guarded cross-object ID fields name a registered owner.
 6. No new public endpoint, response field, configuration key or metric is introduced.
 7. Default tests remain hermetic; PostgreSQL conformance stays behind `CERBIX_TEST_DATABASE_DSN`.

@@ -46,7 +46,7 @@ func (h *Handler) componentAccess(w http.ResponseWriter, r *http.Request) (domai
 // source: that is the previewed conversion below, and an update path able to do it silently would
 // be the way around the gate.
 type updateComponentRequest struct {
-	Name         string `json:"name"`
+	Name         string `json:"name" contract:"required"`
 	Description  string `json:"description"`
 	Group        string `json:"group"`
 	Position     int    `json:"position"`
@@ -86,9 +86,9 @@ func (h *Handler) updateComponent(w http.ResponseWriter, r *http.Request) {
 
 // conversionTargetBody is the shared request shape of preview and confirm.
 type conversionTargetBody struct {
-	Source       string `json:"source"`
-	ServiceID    string `json:"service_id"`
-	MonitorID    string `json:"monitor_id"`
+	Source       string `json:"source" contract:"required"`
+	ServiceID    string `json:"service_id" contract:"format=uuid"`
+	MonitorID    string `json:"monitor_id" contract:"format=uuid"`
 	ManualStatus string `json:"manual_status"`
 	// Revision and PageGeneration are required on CONFIRM only: they are the consent tokens the
 	// preview handed out.

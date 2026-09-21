@@ -220,8 +220,8 @@ type Component struct {
 	// SourceProject is the project of the BINDINGS — deliberately not the page's scope, since
 	// an org-level page legitimately holds components from several projects.
 	SourceProject string          `json:"source_project,omitempty"`
-	MonitorID     string          `json:"monitor_id,omitempty"`
-	ServiceID     string          `json:"service_id,omitempty"`
+	MonitorID     string          `json:"monitor_id,omitempty" tenantref:"status-page-component-binding"`
+	ServiceID     string          `json:"service_id,omitempty" tenantref:"status-page-component-binding"`
 	ManualStatus  ComponentStatus `json:"manual_status,omitempty"`
 	// Revision is the structural CAS half of the conversion preview: it is compared inside
 	// the confirming transaction so an operator cannot apply consent to a changed component.

@@ -9,6 +9,7 @@ import (
 
 type AuditRetentionSink interface {
 	RecordAuditRetentionPass(result string, deleted int) error
+	SetAuditRetentionConfigured(purgeIntervalSeconds float64, configuredAtUnix int64)
 	SetAuditRetentionGauges(oldestSeconds float64, lastSuccessUnix int64)
 }
 
@@ -19,6 +20,9 @@ type auditRetentionRunner interface {
 func (s *Scheduler) WithAuditRetention(cfg store.AuditRetentionConfig, sink AuditRetentionSink) *Scheduler {
 	s.auditRetentionCfg = cfg
 	s.auditRetentionMetrics = sink
+	if sink != nil && cfg.PurgeEvery > 0 {
+		sink.SetAuditRetentionConfigured(cfg.PurgeEvery.Seconds(), time.Now().Unix())
+	}
 	return s
 }
 

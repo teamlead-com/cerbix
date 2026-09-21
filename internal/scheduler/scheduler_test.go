@@ -1550,8 +1550,19 @@ func leadUntilMetrics(t *testing.T, fs *fakeStore, reg *metrics.Registry, ready 
 	s.statsEvery = 10 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go s.Run(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Run(ctx)
+	}()
+	// The caller asserts leadership-scoped gauges and readiness after this helper returns. A defer
+	// here used to cancel before those assertions, allowing setLeaderState(false) to clear the
+	// component verdict between the matching scrape and Ready(). Test cleanup runs afterward and
+	// joins the goroutine, preserving both the assertion window and leak-free shutdown.
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 
 	deadline := time.After(5 * time.Second)
 	for {
@@ -1729,12 +1740,14 @@ func TestServiceAlertStallMarksSchedulerNotReadyOnly(t *testing.T) {
 	}}
 	sched := metrics.New(buildinfo.Info{}, "scheduler")
 	sched.SetReady(true, "")
-	// The predicate reads the RENDER, not the live registry: the helper hands back the snapshot
-	// that satisfied it, so a condition phrased against `sched.Ready()` could return a buffer
-	// captured a moment BEFORE the flip and then assert on it. That race only ever loses under
-	// load, which is the worst way to find out.
+	// The predicate reads the RENDER and the specific component reason. The leader starts
+	// fail-closed with service reliability "unknown", which also renders cerbix_ready 0 before the
+	// alert evaluator has run. Waiting on the generic gauge alone can therefore accept the startup
+	// transient and race the stats loop clearing it. Once the lagging reason is present, every
+	// subsequent health pass in this fixture preserves the stall until the assertions complete.
 	got := leadUntilMetrics(t, fs, sched, func(got string) bool {
-		return strings.Contains(got, "cerbix_ready 0")
+		return strings.Contains(got, "cerbix_ready 0") &&
+			strings.Contains(sched.LastError(), "lagging")
 	})
 
 	if sched.Ready() {

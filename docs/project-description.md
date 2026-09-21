@@ -95,6 +95,17 @@ publish via GUI and API. Subscribers + outbound webhooks + RSS/Atom/JSON feeds a
 integration points. API auth: cerbix service-account tokens **and** OIDC
 client-credentials JWTs (any issuer, D-0043), both routed through `authz.Can`.
 
+**FR-037 / NFR-031 (DONE in iter-0189; hardened in iter-0190).** Public pages are service-first: overall status is
+followed immediately by `Current status by service`, then compact collapsed active incidents,
+scheduled maintenance and past incidents. Active incident rows show one lifecycle status, one impact,
+opened/updated/update-count metadata and a two-line latest update; the full row opens the timeline.
+Public incident source is hidden. Component-to-incident navigation uses only page-local component IDs
+derived by the render path; internal monitor/service/project anchors remain redacted. Full contract and
+delivery evidence: [`func-status-pages-incidents.md`](specs/func-status-pages-incidents.md) and
+[`iter-0189.md`](iterations/iter-0189.md). Post-close review hardening makes `Scheduled maintenance`
+a semantic heading and replaces repeated incident/component scans with one page-order backend index
+and one frontend component map; evidence is in [`iter-0190.md`](iterations/iter-0190.md).
+
 ## Console & API Surface (cross-cutting)
 
 - **Global search** — `GET /api/v1/search` returns tenant-scoped hits across monitors,

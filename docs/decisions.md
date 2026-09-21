@@ -8468,3 +8468,61 @@ tenant-reference matrices pass; the retention matrix also passes under `-race`. 
 files / 708 tests, `vue-tsc`, Vite build, and the rebuilt single-topology onboarding Playwright smoke.
 FR-033/NFR-027, FR-034/NFR-028, FR-035/NFR-029, FR-036/NFR-030 and the strengthened NFR-026 guard
 return to `DONE`.
+
+## D-0260 — public status pages are service-first and incident-dense without exposing topology (2026-09-21)
+
+**Context.** With several active incidents, the shipped public page places multiple large incident
+cards before the component state. Each card repeats lifecycle status, exposes the low-value source
+label, and leaves the useful service summary below the fold. The existing public redaction correctly
+removes incident monitor/service anchors, so a frontend-only service-to-incident link would require an
+unsafe internal ID or an unreliable title/error-text heuristic.
+
+**Decision.** Revision 1 of [`func-status-pages-incidents.md`](specs/func-status-pages-incidents.md) is
+approved for implementation in iter-0189. The canonical order is overall state, current status by
+service, active incidents, scheduled maintenance, past incidents, then subscription/feed controls.
+Active incidents become collapsed full-row accordions with one lifecycle badge, one impact badge,
+opened/updated/update-count metadata and a two-line latest update. Public source is not displayed.
+Eight or fewer incidents stay in one deterministic list; larger sets group only by explicit impact.
+Cerbix does not infer shared causes from text, type, or region.
+
+The status-page render application layer adds `affected_component_ids` to each rendered incident
+detail. It contains only ordered, deduplicated IDs from `components[]` in that same page response,
+derived from the canonical incident anchor and current page bindings. It is not persisted and does
+not replace incident ownership truth. Public redaction continues to remove project, monitor, service,
+external-correlation and actor identifiers. Component actions use the page-local relation to focus and
+open a matching incident without placing internal IDs in the URL.
+
+**Consequences.** The change requires backend projection and redaction regressions, OpenAPI/generated
+client updates, frontend accessibility/responsive tests, and live desktop/430 px evidence. It does not
+change incident lifecycle, status summary algebra, feeds, webhooks, subscriptions, maintenance,
+postmortems, persistence, or metrics. A visual-only frontend patch does not satisfy the contract.
+
+**Implementation evidence.** Iter-0189 implements the render projection in
+[`handlers_statuspage.go`](../internal/api/handlers_statuspage.go), the required transport field in
+[`openapi.yaml`](../openapi.yaml), and the service-first presentation in
+[`PublicStatusView.vue`](../frontend/src/views/PublicStatusView.vue). Projection/redaction, frontend
+unit and live desktop/430 px regressions pass; the full verification matrix is recorded in
+[`iter-0189.md`](iterations/iter-0189.md).
+
+## D-0261 — post-close corrections use iter-0190 and scheduler metric waits own cleanup (2026-09-21)
+
+**Context.** Independent review after iter-0189 closure found a missing maintenance heading role and
+quadratic status-page relation lookups. Those corrections were initially written back into the closed
+iteration report, violating the repository rule that `docs/iterations/iter-XXXX.md` is immutable after
+closure. The same review observed a nondeterministic `make race` failure in
+`TestServiceAlertStallMarksSchedulerNotReadyOnly`. Two independent transients existed: the helper's
+deferred cancellation stepped the scheduler down and cleared component readiness before caller
+assertions, while the predicate accepted the startup fail-closed `cerbix_ready 0` emitted for
+"service reliability state unknown" before the alert evaluator had installed its lagging verdict.
+
+**Decision.** Iter-0189's report is restored to the exact closure narrative and remains immutable.
+Owner-authorized iter-0190 owns all post-close status-page corrections and the scheduler test-harness
+repair. `leadUntilMetrics` registers cancellation and goroutine join with `t.Cleanup`, so assertions
+execute while leadership-scoped readiness remains live. The stalled-evaluator regression additionally
+requires both the rendered `cerbix_ready 0` and the specific `lagging` component reason, so startup
+unknown cannot satisfy it. Production scheduler readiness logic is unchanged.
+
+**Consequences.** Living status, traceability and roadmap documents identify iter-0190 as current work.
+The previously flaky test passes 1000 ordinary repetitions, 200 repetitions under `-race`, and two
+consecutive complete repository race gates before iter-0190 closes. No product endpoint, persistence,
+metric, alert or scheduler runtime contract changes.

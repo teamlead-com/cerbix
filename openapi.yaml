@@ -6004,11 +6004,20 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     IncidentDetail:
-      description: A resolved incident with its timeline and (optional) postmortem, for the status page's past-incidents accordion.
+      description: An active or resolved incident enriched for a status-page render with its timeline, page-local affected components, and optional postmortem.
       allOf:
         - $ref: '#/components/schemas/Incident'
         - type: object
+          required: [affected_component_ids]
           properties:
+            affected_component_ids:
+              type: array
+              items: { type: string, format: uuid }
+              description: >-
+                IDs of components on this rendered status page that are bound to the incident's
+                canonical monitor or service anchor. Values are ordered, deduplicated, page-local
+                public component identifiers; monitor, service, and project IDs are never exposed
+                through this relation.
             updates: { type: array, items: { $ref: '#/components/schemas/IncidentUpdate' } }
             postmortem: { $ref: '#/components/schemas/Postmortem' }
     Subscribe:

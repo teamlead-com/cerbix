@@ -99,4 +99,101 @@ test.describe("status pages", () => {
       await apiSend(page, "delete", `/api/v1/projects/${projectID}/services/${svc.id}`);
     }
   });
+
+  test("service-first incident density stays navigable on desktop and 430px", async ({ page }) => {
+    const { orgID } = await firstProject(page);
+    const slug = "e2e-status-density";
+    const monitorName = "e2e-status-density-monitor";
+    const incidentPrefix = "e2e-status-density-";
+
+    const projectResponse = await apiSend(page, "post", `/api/v1/organizations/${orgID}/projects`, {
+      slug: `e2e-status-density-${Date.now()}`,
+      name: "E2E Status Density",
+    });
+    expect(projectResponse.status()).toBe(201);
+    const project = await projectResponse.json();
+    const projectID = project.id as string;
+
+    for (const statusPage of await apiGet(page, `/api/v1/organizations/${orgID}/status-pages`)) {
+      if (statusPage.slug === slug) await apiSend(page, "delete", `/api/v1/status-pages/${statusPage.id}`);
+    }
+
+    const monitorResponse = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors`, {
+      name: monitorName, type: "http", target: "https://example.com/status-density",
+      interval_seconds: 300, timeout_seconds: 5, region: "core", enabled: false,
+    });
+    expect(monitorResponse.status()).toBe(201);
+    const monitor = await monitorResponse.json();
+    const statusPageResponse = await apiSend(page, "post", `/api/v1/organizations/${orgID}/status-pages`, {
+      slug, title: "E2E Incident Density", visibility: "public",
+    });
+    expect(statusPageResponse.status()).toBe(201);
+    const statusPage = await statusPageResponse.json();
+    const createdIncidents: any[] = [];
+
+    try {
+      const componentResponse = await apiSend(page, "post", `/api/v1/status-pages/${statusPage.id}/components`, {
+        name: "Checkout API", group: "Customer services", description: "Public checkout traffic",
+        position: 1, monitor_id: monitor.id,
+      });
+      expect(componentResponse.status()).toBe(201);
+
+      for (const [index, impact] of ["minor", "critical", "none", "major"].entries()) {
+        const incidentResponse = await apiSend(page, "post", `/api/v1/projects/${projectID}/incidents`, {
+          title: `${incidentPrefix}${impact}`, impact, monitor_id: monitor.id,
+          body: index === 1
+            ? "Checkout requests are timing out for a subset of customers while the recovery proceeds. This text proves the compact preview and expanded timeline remain readable."
+            : `Public update for ${impact} impact`,
+        });
+        expect(incidentResponse.status()).toBe(201);
+        createdIncidents.push(await incidentResponse.json());
+      }
+
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto(`/status/${slug}`);
+      await expect(page.getByRole("heading", { name: "Current status by service" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Active incidents (4)" })).toBeVisible();
+      await expect(page.getByTestId("active-incident-header")).toHaveCount(4);
+      await expect(page.getByText("auto", { exact: true })).toHaveCount(0);
+      expect(await page.locator("[data-section]").evaluateAll((sections) => sections.map((section) => section.getAttribute("data-section")))).toEqual([
+        "overall", "components", "active-incidents", "subscribe",
+      ]);
+
+      const componentLink = page.getByTestId("component-incident-link").first();
+      await expect(componentLink).toHaveText("4 active incidents");
+      const firstIncident = page.getByTestId("active-incident-header").first();
+      await expect(firstIncident).toHaveAttribute("aria-expanded", "false");
+      await firstIncident.focus();
+      await page.keyboard.press("Enter");
+      await expect(firstIncident).toHaveAttribute("aria-expanded", "true");
+      await page.keyboard.press("Space");
+      await expect(firstIncident).toHaveAttribute("aria-expanded", "false");
+      await componentLink.click();
+      await expect(firstIncident).toHaveAttribute("aria-expanded", "true");
+      await expect(firstIncident).toBeFocused();
+      await expect(page.getByTestId("active-incident-panel").first()).toContainText("Latest");
+      expect(page.url()).toBe(`${process.env.CERBIX_URL || "http://localhost:8080"}/status/${slug}`);
+      expect(page.url()).not.toContain(monitor.id);
+      for (const incident of createdIncidents) expect(page.url()).not.toContain(incident.id);
+
+      await page.setViewportSize({ width: 430, height: 932 });
+      await page.reload();
+      await expect(page.getByRole("heading", { name: "Active incidents (4)" })).toBeVisible();
+      await expect(page.getByTestId("latest-update-preview").first()).toBeVisible();
+      const overflow = await page.evaluate(() => ({
+        viewport: window.innerWidth,
+        document: document.documentElement.scrollWidth,
+        body: document.body.scrollWidth,
+      }));
+      expect(overflow.document).toBeLessThanOrEqual(overflow.viewport);
+      expect(overflow.body).toBeLessThanOrEqual(overflow.viewport);
+    } finally {
+      for (const incident of createdIncidents) {
+        await apiSend(page, "post", `/api/v1/incidents/${incident.id}/updates`, { status: "resolved", body: "e2e cleanup" });
+      }
+      await apiSend(page, "delete", `/api/v1/status-pages/${statusPage.id}`);
+      await apiSend(page, "delete", `/api/v1/monitors/${monitor.id}`);
+      await apiSend(page, "delete", `/api/v1/projects/${projectID}`);
+    }
+  });
 });

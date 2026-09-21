@@ -394,14 +394,71 @@ type statusPageRender struct {
 // incidents only). Used for both active and past incidents so each can expand.
 type incidentDetailView struct {
 	domain.Incident
-	Updates    []domain.IncidentUpdate `json:"updates"`
-	Postmortem *domain.Postmortem      `json:"postmortem,omitempty"`
+	AffectedComponentIDs []string                `json:"affected_component_ids"`
+	Updates              []domain.IncidentUpdate `json:"updates"`
+	Postmortem           *domain.Postmortem      `json:"postmortem,omitempty"`
+}
+
+type affectedComponentIndex struct {
+	byMonitor map[string][]string
+	byService map[string][]string
+}
+
+// newAffectedComponentIndex scans the page's rendered components once. Component.Source is the
+// discriminator: dormant monitor/service columns must not create a second relation after a
+// component conversion. Input order owns display order; the per-anchor seen sets guard duplicate
+// component rows without changing that order.
+func newAffectedComponentIndex(comps []domain.Component) affectedComponentIndex {
+	index := affectedComponentIndex{
+		byMonitor: make(map[string][]string),
+		byService: make(map[string][]string),
+	}
+	seenMonitor := make(map[string]map[string]struct{})
+	seenService := make(map[string]map[string]struct{})
+	appendUnique := func(values map[string][]string, seen map[string]map[string]struct{}, anchor, componentID string) {
+		if anchor == "" || componentID == "" {
+			return
+		}
+		if seen[anchor] == nil {
+			seen[anchor] = make(map[string]struct{})
+		}
+		if _, ok := seen[anchor][componentID]; ok {
+			return
+		}
+		seen[anchor][componentID] = struct{}{}
+		values[anchor] = append(values[anchor], componentID)
+	}
+	for _, component := range comps {
+		switch component.Source {
+		case domain.ComponentSourceMonitor:
+			appendUnique(index.byMonitor, seenMonitor, component.MonitorID, component.ID)
+		case domain.ComponentSourceService:
+			appendUnique(index.byService, seenService, component.ServiceID, component.ID)
+		}
+	}
+	return index
+}
+
+// affectedComponentIDs returns page-local public component identifiers for the incident's one
+// canonical anchor. Service wins if malformed stored data carries both anchors.
+func (index affectedComponentIndex) affectedComponentIDs(in domain.Incident) []string {
+	var ids []string
+	switch {
+	case in.ServiceID != "":
+		ids = index.byService[in.ServiceID]
+	case in.MonitorID != "":
+		ids = index.byMonitor[in.MonitorID]
+	}
+	if ids == nil {
+		return []string{}
+	}
+	return ids
 }
 
 // enrichIncidents attaches each incident's update timeline, and (when
 // withPostmortem) its published postmortem. N+1 is fine: the status page shows
 // few incidents (active now, resolved over 90 days).
-func (h *Handler) enrichIncidents(w http.ResponseWriter, r *http.Request, incs []domain.Incident, withPostmortem, public bool) ([]incidentDetailView, bool) {
+func (h *Handler) enrichIncidents(w http.ResponseWriter, r *http.Request, incs []domain.Incident, componentIndex affectedComponentIndex, withPostmortem, public bool) ([]incidentDetailView, bool) {
 	ctx := r.Context()
 	out := make([]incidentDetailView, 0, len(incs))
 	if len(incs) == 0 {
@@ -426,6 +483,7 @@ func (h *Handler) enrichIncidents(w http.ResponseWriter, r *http.Request, incs [
 		}
 	}
 	for _, in := range incs {
+		affected := componentIndex.affectedComponentIDs(in)
 		updates := timelines[in.ID]
 		var pm *domain.Postmortem
 		if got, ok := postmortems[in.ID]; ok {
@@ -447,7 +505,12 @@ func (h *Handler) enrichIncidents(w http.ResponseWriter, r *http.Request, incs [
 				pm = &redPM
 			}
 		}
-		out = append(out, incidentDetailView{Incident: in, Updates: updates, Postmortem: pm})
+		out = append(out, incidentDetailView{
+			Incident:             in,
+			AffectedComponentIDs: affected,
+			Updates:              updates,
+			Postmortem:           pm,
+		})
 	}
 	return out, true
 }
@@ -575,11 +638,12 @@ func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, 
 
 	// Enrich incidents so each can expand: active ones show their timeline
 	// (latest update inline), past ones their timeline + postmortem.
-	activeViews, ok := h.enrichIncidents(w, r, active, false, public)
+	componentIndex := newAffectedComponentIndex(comps)
+	activeViews, ok := h.enrichIncidents(w, r, active, componentIndex, false, public)
 	if !ok {
 		return
 	}
-	recentViews, ok := h.enrichIncidents(w, r, recent, true, public)
+	recentViews, ok := h.enrichIncidents(w, r, recent, componentIndex, true, public)
 	if !ok {
 		return
 	}

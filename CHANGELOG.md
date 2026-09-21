@@ -9,7 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 This patch release combines the status-page service-component repair from `iter-0181` with the
 alert-routing tenant-boundary hardening from `iter-0182`, bounded audit retention from `iter-0184`,
 project-level inherited release-gate policy from `iter-0185`, and worst-of-all-windows gate evaluation
-from `iter-0186`, plus the evidence-driven onboarding journey from `iter-0187`.
+from `iter-0186`, the evidence-driven onboarding journey from `iter-0187`, and the service-first public
+status-page incident experience from `iter-0189`, hardened in `iter-0190`.
 
 ### ✨ Added
 
@@ -38,7 +39,25 @@ from `iter-0186`, plus the evidence-driven onboarding journey from `iter-0187`.
   availability and monitor-card Dashboard; manual re-entry opens only a compact setup summary.
   Automatic-dismissal preference is browser-local and scoped by user and selected tenant context.
 
+- **Service-first public status pages (iter-0189, FR-037 / NFR-031).** Current service/component
+  state now precedes incident detail. Active incidents render as compact, keyboard-operable
+  full-row accordions with deterministic impact grouping only above eight rows, one lifecycle badge,
+  one impact badge, truthful opened/updated metadata, a two-line latest-update preview, and the real
+  timeline on expansion. Page-local affected-component relations support direct incident focus
+  without exposing internal monitor, service, project, actor, update, or postmortem identifiers.
+
 ### 🩹 Fixed
+
+- **Status-page post-close hardening is isolated in iter-0190.** The scheduled-maintenance title is
+  restored to the logical heading hierarchy without changing its visual style. Backend incident
+  projection now reuses one ordered page-local monitor/service index, and the SPA reuses one computed
+  component-to-incident map for counts and navigation instead of repeatedly scanning both lists.
+  The closed iter-0189 report remains an immutable delivery snapshot.
+
+- **The scheduler readiness race gate is deterministic again.** Its live-leader test no longer
+  cancels the scheduler before assertions or mistakes the startup fail-closed `ready=0` state for the
+  intended evaluator-lag verdict. Cancellation and goroutine joining now happen in test cleanup, and
+  the wait requires the specific `lagging` reason. Production scheduler behaviour is unchanged.
 
 - **Status-page components can be bound to services again.** The API contract and SPA already sent
   `service_id`, and the store already persisted it, but the HTTP request decoder did not accept the

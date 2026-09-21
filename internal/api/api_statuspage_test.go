@@ -3,6 +3,8 @@ package api_test
 import (
 	"encoding/json"
 	"net/http"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -110,8 +112,23 @@ func TestPublicRenderRedactsInternalIDs(t *testing.T) {
 	inc.MonitorID = "mon1"
 	inc.ExternalKey = "am-fp-SENTINEL"
 	inc.AcknowledgedBy = "u1"
+	inc.AcknowledgedByName = "Operator Sentinel"
 	inc.Source = domain.SourceAuto
 	fs.incidents["inc1"] = inc
+	fs.incUpdates["inc1"] = []domain.IncidentUpdate{{
+		ID: "update-SENTINEL", IncidentID: "inc1", Status: domain.IncidentInvestigating,
+		Body: "public update", Author: "author-SENTINEL",
+	}}
+	resolved := time.Now().Add(-time.Hour)
+	fs.incidents["inc-resolved"] = domain.Incident{
+		ID: "inc-resolved", ProjectID: "p1", MonitorID: "mon1", Title: "resolved",
+		Status: domain.IncidentResolved, Impact: domain.ImpactMinor, Source: domain.SourceAuto,
+		ResolvedAt: &resolved,
+	}
+	fs.postmortems["inc-resolved"] = domain.Postmortem{
+		ID: "postmortem-SENTINEL", IncidentID: "inc-resolved", Body: "public analysis",
+		Author: "postmortem-author-SENTINEL", PublishedAt: resolved,
+	}
 
 	// Public render: the external key must not appear anywhere, and the incident's
 	// internal ids / ack actor must be blanked.
@@ -125,12 +142,26 @@ func TestPublicRenderRedactsInternalIDs(t *testing.T) {
 	}
 	var pubRender struct {
 		ActiveIncidents []struct {
-			ID             string `json:"id"`
-			ProjectID      string `json:"project_id"`
-			MonitorID      string `json:"monitor_id"`
-			ExternalKey    string `json:"external_key"`
-			AcknowledgedBy string `json:"acknowledged_by"`
+			ID                 string `json:"id"`
+			ProjectID          string `json:"project_id"`
+			MonitorID          string `json:"monitor_id"`
+			ServiceID          string `json:"service_id"`
+			ExternalKey        string `json:"external_key"`
+			AcknowledgedBy     string `json:"acknowledged_by"`
+			AcknowledgedByName string `json:"acknowledged_by_name"`
+			Updates            []struct {
+				ID         string `json:"id"`
+				IncidentID string `json:"incident_id"`
+				Author     string `json:"author"`
+			} `json:"updates"`
 		} `json:"active_incidents"`
+		RecentIncidents []struct {
+			Postmortem *struct {
+				ID         string `json:"id"`
+				IncidentID string `json:"incident_id"`
+				Author     string `json:"author"`
+			} `json:"postmortem"`
+		} `json:"recent_incidents"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &pubRender); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -139,8 +170,27 @@ func TestPublicRenderRedactsInternalIDs(t *testing.T) {
 		t.Fatalf("active incidents = %d, want 1", len(pubRender.ActiveIncidents))
 	}
 	got := pubRender.ActiveIncidents[0]
-	if got.ProjectID != "" || got.MonitorID != "" || got.ExternalKey != "" || got.AcknowledgedBy != "" {
+	if got.ProjectID != "" || got.MonitorID != "" || got.ServiceID != "" || got.ExternalKey != "" ||
+		got.AcknowledgedBy != "" || got.AcknowledgedByName != "" {
 		t.Fatalf("public incident leaked internal fields: %+v", got)
+	}
+	if len(got.Updates) != 1 || got.Updates[0].ID != "" || got.Updates[0].IncidentID != "" || got.Updates[0].Author != "" {
+		t.Fatalf("public update leaked internal fields: %+v", got.Updates)
+	}
+	if len(pubRender.RecentIncidents) != 1 || pubRender.RecentIncidents[0].Postmortem == nil {
+		t.Fatalf("public resolved incident lost its postmortem: %+v", pubRender.RecentIncidents)
+	}
+	pm := pubRender.RecentIncidents[0].Postmortem
+	if pm.ID != "" || pm.IncidentID != "" || pm.Author != "" {
+		t.Fatalf("public postmortem leaked internal fields: %+v", pm)
+	}
+	for _, sentinel := range []string{
+		"am-fp-SENTINEL", "Operator Sentinel", "update-SENTINEL", "author-SENTINEL",
+		"postmortem-SENTINEL", "postmortem-author-SENTINEL",
+	} {
+		if strings.Contains(rec.Body.String(), sentinel) {
+			t.Fatalf("public render leaked %q: %s", sentinel, rec.Body.String())
+		}
 	}
 
 	// Authenticated preview keeps the detail (operators may need it).
@@ -151,6 +201,125 @@ func TestPublicRenderRedactsInternalIDs(t *testing.T) {
 	}
 	if !strings.Contains(arec.Body.String(), "am-fp-SENTINEL") {
 		t.Fatalf("authed render should retain external_key, got %s", arec.Body.String())
+	}
+}
+
+func TestStatusPageRenderProjectsAffectedComponentsPageLocally(t *testing.T) {
+	fs := seededStore()
+	inc := fs.incidents["inc1"]
+	inc.MonitorID = "mon1"
+	inc.Source = domain.SourceAuto
+	fs.incidents["inc1"] = inc
+	fs.incidents["inc-project"] = domain.Incident{
+		ID: "inc-project", ProjectID: "p1", Title: "project incident",
+		Status: domain.IncidentInvestigating, Impact: domain.ImpactNone, Source: domain.SourceManual,
+	}
+	fs.incidents["inc-service"] = domain.Incident{
+		ID: "inc-service", ProjectID: "p1", ServiceID: "svc1", Title: "service incident",
+		Status: domain.IncidentIdentified, Impact: domain.ImpactCritical, Source: domain.SourceManual,
+	}
+	resolved := time.Now().Add(-time.Hour)
+	fs.incidents["inc-recent"] = domain.Incident{
+		ID: "inc-recent", ProjectID: "p1", MonitorID: "mon1", Title: "recent monitor incident",
+		Status: domain.IncidentResolved, Impact: domain.ImpactMinor, Source: domain.SourceAuto,
+		ResolvedAt: &resolved,
+	}
+	fs.components["c1"] = domain.Component{
+		ID: "c1", StatusPageID: "sp1", OrgID: "o1", Name: "API secondary", Position: 30,
+		Source: domain.ComponentSourceMonitor, SourceProject: "p1", MonitorID: "mon1",
+	}
+	fs.components["c-monitor-first"] = domain.Component{
+		ID: "c-monitor-first", StatusPageID: "sp1", OrgID: "o1", Name: "API primary", Position: 10,
+		Source: domain.ComponentSourceMonitor, SourceProject: "p1", MonitorID: "mon1",
+	}
+	fs.components["c-service"] = domain.Component{
+		ID: "c-service", StatusPageID: "sp1", OrgID: "o1", Name: "Checkout", Position: 20,
+		Source: domain.ComponentSourceService, SourceProject: "p1", ServiceID: "svc1",
+	}
+	fs.components["c-dormant-monitor"] = domain.Component{
+		ID: "c-dormant-monitor", StatusPageID: "sp1", OrgID: "o1", Name: "Converted", Position: 25,
+		Source: domain.ComponentSourceService, SourceProject: "p1", MonitorID: "mon1", ServiceID: "svc2",
+	}
+	fs.components["c-foreign"] = domain.Component{
+		ID: "c-foreign", StatusPageID: "sp2", OrgID: "o1", Name: "Foreign page", Position: 1,
+		Source: domain.ComponentSourceMonitor, SourceProject: "p1", MonitorID: "mon1",
+	}
+
+	type detail struct {
+		ID                   string   `json:"id"`
+		ProjectID            string   `json:"project_id"`
+		MonitorID            string   `json:"monitor_id"`
+		ServiceID            string   `json:"service_id"`
+		AffectedComponentIDs []string `json:"affected_component_ids"`
+	}
+	type render struct {
+		Components []struct {
+			ID string `json:"id"`
+		} `json:"components"`
+		ActiveIncidents []detail `json:"active_incidents"`
+		RecentIncidents []detail `json:"recent_incidents"`
+	}
+	decode := func(t *testing.T, recBody []byte) render {
+		t.Helper()
+		var got render
+		if err := json.Unmarshal(recBody, &got); err != nil {
+			t.Fatalf("decode render: %v", err)
+		}
+		return got
+	}
+	byID := func(items []detail) map[string]detail {
+		out := make(map[string]detail, len(items))
+		for _, item := range items {
+			out[item.ID] = item
+		}
+		return out
+	}
+
+	pubRec := do(newPublicHandler(fs), outsider, http.MethodGet, "/api/v1/public/status-pages/acme-status", "")
+	if pubRec.Code != http.StatusOK {
+		t.Fatalf("public render = %d, want 200 (%s)", pubRec.Code, pubRec.Body.String())
+	}
+	authRec := do(newHandler(fs), o1Admin, http.MethodGet, "/api/v1/status-pages/sp1/render", "")
+	if authRec.Code != http.StatusOK {
+		t.Fatalf("authed render = %d, want 200 (%s)", authRec.Code, authRec.Body.String())
+	}
+	pub, authed := decode(t, pubRec.Body.Bytes()), decode(t, authRec.Body.Bytes())
+	pubActive, authedActive := byID(pub.ActiveIncidents), byID(authed.ActiveIncidents)
+	pubRecent, authedRecent := byID(pub.RecentIncidents), byID(authed.RecentIncidents)
+
+	wantMonitor := []string{"c-monitor-first", "c1"}
+	if got := pubActive["inc1"].AffectedComponentIDs; !reflect.DeepEqual(got, wantMonitor) {
+		t.Fatalf("monitor relation = %#v, want %#v", got, wantMonitor)
+	}
+	if got := pubActive["inc-service"].AffectedComponentIDs; !reflect.DeepEqual(got, []string{"c-service"}) {
+		t.Fatalf("service relation = %#v, want [c-service]", got)
+	}
+	if got := pubActive["inc-project"].AffectedComponentIDs; got == nil || len(got) != 0 {
+		t.Fatalf("project relation = %#v, want present empty array", got)
+	}
+	if got := pubRecent["inc-recent"].AffectedComponentIDs; !reflect.DeepEqual(got, wantMonitor) {
+		t.Fatalf("recent relation = %#v, want %#v", got, wantMonitor)
+	}
+	for _, item := range append(pub.ActiveIncidents, pub.RecentIncidents...) {
+		if slices.Contains(item.AffectedComponentIDs, "c-foreign") || slices.Contains(item.AffectedComponentIDs, "c-dormant-monitor") {
+			t.Fatalf("relation crossed page or dormant binding: %+v", item)
+		}
+	}
+	for id, publicItem := range pubActive {
+		if got := authedActive[id].AffectedComponentIDs; !reflect.DeepEqual(got, publicItem.AffectedComponentIDs) {
+			t.Fatalf("active relation parity for %s: public %#v, authed %#v", id, publicItem.AffectedComponentIDs, got)
+		}
+	}
+	for id, publicItem := range pubRecent {
+		if got := authedRecent[id].AffectedComponentIDs; !reflect.DeepEqual(got, publicItem.AffectedComponentIDs) {
+			t.Fatalf("recent relation parity for %s: public %#v, authed %#v", id, publicItem.AffectedComponentIDs, got)
+		}
+	}
+	if pubActive["inc1"].ProjectID != "" || pubActive["inc1"].MonitorID != "" || pubActive["inc-service"].ServiceID != "" {
+		t.Fatalf("public relation reintroduced anchors: monitor=%+v service=%+v", pubActive["inc1"], pubActive["inc-service"])
+	}
+	if authedActive["inc1"].MonitorID != "mon1" || authedActive["inc-service"].ServiceID != "svc1" {
+		t.Fatalf("authenticated preview lost operator anchors: monitor=%+v service=%+v", authedActive["inc1"], authedActive["inc-service"])
 	}
 }
 

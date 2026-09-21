@@ -9499,8 +9499,10 @@ export interface components {
             /** Format: date-time */
             updated_at?: string;
         };
-        /** @description A resolved incident with its timeline and (optional) postmortem, for the status page's past-incidents accordion. */
+        /** @description An active or resolved incident enriched for a status-page render with its timeline, page-local affected components, and optional postmortem. */
         IncidentDetail: components["schemas"]["Incident"] & {
+            /** @description IDs of components on this rendered status page that are bound to the incident's canonical monitor or service anchor. Values are ordered, deduplicated, page-local public component identifiers; monitor, service, and project IDs are never exposed through this relation. */
+            affected_component_ids: string[];
             updates?: components["schemas"]["IncidentUpdate"][];
             postmortem?: components["schemas"]["Postmortem"];
         };

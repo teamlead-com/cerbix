@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
@@ -14,6 +14,7 @@ import { isoInstant, utcDayBefore, utcDayKey } from "@/lib/datekeys";
 type Render = components["schemas"]["StatusPageRender"];
 type ComponentView = components["schemas"]["ComponentView"];
 type ComponentDay = components["schemas"]["ComponentDay"];
+type IncidentDetail = components["schemas"]["IncidentDetail"];
 
 const route = useRoute();
 const { toggle } = useTheme();
@@ -76,14 +77,17 @@ const summarySub = computed(() => {
         ? "The one component on this page has no measurement yet."
         : "None of the components on this page have a measurement yet.";
   }
-  const tail = unmeasured > 0
-    ? ` ${unmeasured} component${unmeasured === 1 ? "" : "s"} on this page ${unmeasured === 1 ? "has" : "have"} no measurement.`
-    : "";
+  const tail =
+    unmeasured > 0
+      ? ` ${unmeasured} component${unmeasured === 1 ? "" : "s"} on this page ${unmeasured === 1 ? "has" : "have"} no measurement.`
+      : "";
   switch (page.value?.summary) {
     case "operational":
       return "All measured services are running normally." + tail;
     case "degraded":
-      return "Some services are experiencing elevated latency. We’re on it." + tail;
+      return (
+        "Some services are experiencing elevated latency. We’re on it." + tail
+      );
     case "partial_outage":
       return "Some services are partially unavailable." + tail;
     case "major_outage":
@@ -99,14 +103,17 @@ const updatedUTC = computed(() => {
   return utcClockLabel(page.value.updated_at);
 });
 
-// Past-incidents accordion: which incident is expanded.
+// Accordion state is keyed by page-local row identities rather than incident ids. The keys are
+// stable for one render, safe for DOM ids, and never written into the browser URL.
 const expanded = ref<Set<string>>(new Set());
-function toggleInc(id?: string) {
-  if (!id) return;
+function toggleInc(key: string) {
   const s = new Set(expanded.value);
-  if (s.has(id)) s.delete(id);
-  else s.add(id);
+  if (s.has(key)) s.delete(key);
+  else s.add(key);
   expanded.value = s;
+}
+function isExpanded(key: string): boolean {
+  return expanded.value.has(key);
 }
 // Latest (most recent) update of an incident — its current communicated state.
 type Upd = { id?: string; status?: string; body?: string; created_at?: string };
@@ -143,17 +150,115 @@ const groups = computed(() => {
   return order.map((name) => ({ name, comps: map.get(name)! }));
 });
 
+const impactOrder = ["critical", "major", "minor", "none"] as const;
+const impactRank = new Map<string, number>(
+  impactOrder.map((impact, index) => [impact, index]),
+);
+type ActiveIncidentRow = {
+  incident: IncidentDetail;
+  originalIndex: number;
+  key: string;
+  headerID: string;
+  panelID: string;
+};
+
+const activeIncidentRows = computed<ActiveIncidentRow[]>(() =>
+  (page.value?.active_incidents ?? [])
+    .map((incident, originalIndex) => ({
+      incident,
+      originalIndex,
+      key: `active-${originalIndex + 1}`,
+      headerID: `active-incident-header-${originalIndex + 1}`,
+      panelID: `active-incident-panel-${originalIndex + 1}`,
+    }))
+    .sort((left, right) => {
+      const impact =
+        (impactRank.get(left.incident.impact ?? "none") ?? impactOrder.length) -
+        (impactRank.get(right.incident.impact ?? "none") ?? impactOrder.length);
+      if (impact !== 0) return impact;
+      const activity =
+        Date.parse(right.incident.updated_at ?? "") -
+        Date.parse(left.incident.updated_at ?? "");
+      if (Number.isFinite(activity) && activity !== 0) return activity;
+      return left.originalIndex - right.originalIndex;
+    }),
+);
+
+const activeIncidentGroups = computed(() => {
+  if (activeIncidentRows.value.length <= 8) {
+    return [{ impact: "", rows: activeIncidentRows.value }];
+  }
+  return impactOrder
+    .map((impact) => ({
+      impact,
+      rows: activeIncidentRows.value.filter(
+        (row) => (row.incident.impact ?? "none") === impact,
+      ),
+    }))
+    .filter((group) => group.rows.length > 0);
+});
+
+const activeImpactCounts = computed(() => {
+  const counts = new Map<string, number>();
+  for (const row of activeIncidentRows.value) {
+    const impact = row.incident.impact ?? "none";
+    counts.set(impact, (counts.get(impact) ?? 0) + 1);
+  }
+  return impactOrder
+    .map((impact) => ({ impact, count: counts.get(impact) ?? 0 }))
+    .filter(({ count }) => count > 0);
+});
+
+const activeIncidentsByComponentID = computed(() => {
+  const rowsByComponentID = new Map<string, ActiveIncidentRow[]>();
+  for (const row of activeIncidentRows.value) {
+    for (const componentID of row.incident.affected_component_ids) {
+      const rows = rowsByComponentID.get(componentID);
+      if (rows) rows.push(row);
+      else rowsByComponentID.set(componentID, [row]);
+    }
+  }
+  return rowsByComponentID;
+});
+
+function activeIncidentCount(componentID?: string): number {
+  if (!componentID) return 0;
+  return activeIncidentsByComponentID.value.get(componentID)?.length ?? 0;
+}
+
+async function openIncidentForComponent(componentID?: string) {
+  if (!componentID) return;
+  const row = activeIncidentsByComponentID.value.get(componentID)?.[0];
+  if (!row) return;
+  if (!isExpanded(row.key)) toggleInc(row.key);
+  await nextTick();
+  const header = document.getElementById(
+    row.headerID,
+  ) as HTMLButtonElement | null;
+  header?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+  header?.focus({ preventScroll: true });
+}
+
+function pastKey(index: number): string {
+  return `past-${index + 1}`;
+}
+function pastHeaderID(index: number): string {
+  return `past-incident-header-${index + 1}`;
+}
+function pastPanelID(index: number): string {
+  return `past-incident-panel-${index + 1}`;
+}
+
 // Solid strip / meter color by status (a status color, not a *-weak token).
 function meterColor(s?: string) {
   const m = componentMeta(s);
   return m.dot; // bg-up / bg-degraded / bg-down / bg-maint
 }
-function incidentStrip(s?: string) {
-  return { investigating: "bg-degraded", identified: "bg-degraded", monitoring: "bg-maint", resolved: "bg-up" }[s ?? ""] || "bg-degraded";
-}
 
 // Build a 90-slot strip (oldest→newest) from a component's sparse daily rows.
-function strip(daily?: ComponentDay[]): { pct: number | null; label: string }[] {
+function strip(
+  daily?: ComponentDay[],
+): { pct: number | null; label: string }[] {
   const byDay = new Map<string, ComponentDay>();
   for (const d of daily ?? []) if (d.day) byDay.set(d.day.slice(0, 10), d);
   const out: { pct: number | null; label: string }[] = [];
@@ -163,7 +268,10 @@ function strip(daily?: ComponentDay[]): { pct: number | null; label: string }[] 
     const key = utcDayKey(dt);
     const d = byDay.get(key);
     // The key is a lookup; the label is read by a human in a tooltip, so it names its zone.
-    out.push({ pct: d && d.total ? (d.uptime_percent ?? 0) : null, label: utcDayLabel(isoInstant(dt)) });
+    out.push({
+      pct: d && d.total ? (d.uptime_percent ?? 0) : null,
+      label: utcDayLabel(isoInstant(dt)),
+    });
   }
   return out;
 }
@@ -174,7 +282,9 @@ function daySegClass(p: number | null): string {
   return "bg-down";
 }
 function dayTitle(d: { pct: number | null; label: string }): string {
-  return d.pct === null ? `${d.label} · no data` : `${d.label} · ${d.pct.toFixed(2)}%`;
+  return d.pct === null
+    ? `${d.label} · no data`
+    : `${d.label} · ${d.pct.toFixed(2)}%`;
 }
 function fmtDay(ts?: string): string {
   return ts ? utcDayLabel(ts) : "";
@@ -199,12 +309,16 @@ async function subscribe() {
   subErr.value = "";
   subMsg.value = "";
   try {
-    const res = await api.POST("/api/v1/public/status-pages/{slug}/subscribers", {
-      params: { path: { slug }, query: token ? { token } : {} },
-      body: { email },
-    });
+    const res = await api.POST(
+      "/api/v1/public/status-pages/{slug}/subscribers",
+      {
+        params: { path: { slug }, query: token ? { token } : {} },
+        body: { email },
+      },
+    );
     if (res.error) {
-      subErr.value = (res.error as { error?: string })?.error || "Could not subscribe.";
+      subErr.value =
+        (res.error as { error?: string })?.error || "Could not subscribe.";
       return;
     }
     subMsg.value = "Check your inbox to confirm your subscription.";
@@ -219,11 +333,19 @@ async function handleLinkActions() {
   const confirm = route.query.confirm as string | undefined;
   const unsub = route.query.unsubscribe as string | undefined;
   if (confirm) {
-    const res = await api.POST("/api/v1/public/subscriptions/{token}/confirm", { params: { path: { token: confirm } } });
-    banner.value = res.error ? "This confirmation link is invalid or expired." : "Subscription confirmed — you’ll get status updates by email.";
+    const res = await api.POST("/api/v1/public/subscriptions/{token}/confirm", {
+      params: { path: { token: confirm } },
+    });
+    banner.value = res.error
+      ? "This confirmation link is invalid or expired."
+      : "Subscription confirmed — you’ll get status updates by email.";
   } else if (unsub) {
-    const res = await api.DELETE("/api/v1/public/subscriptions/{token}", { params: { path: { token: unsub } } });
-    banner.value = res.error ? "This unsubscribe link is invalid." : "You’ve been unsubscribed.";
+    const res = await api.DELETE("/api/v1/public/subscriptions/{token}", {
+      params: { path: { token: unsub } },
+    });
+    banner.value = res.error
+      ? "This unsubscribe link is invalid."
+      : "You’ve been unsubscribed.";
   }
 }
 
@@ -236,19 +358,70 @@ onMounted(async () => {
 <template>
   <div class="min-h-screen bg-bg text-ink">
     <!-- sticky public header -->
-    <header class="sticky top-0 z-10 border-b border-border bg-surface/80 backdrop-blur">
+    <header
+      class="sticky top-0 z-10 border-b border-border bg-surface/80 backdrop-blur"
+    >
       <div class="mx-auto flex h-[60px] max-w-[820px] items-center gap-3 px-5">
-        <img v-if="branding.logoUrl" :src="branding.logoUrl" alt="" class="h-[28px] w-[28px] rounded-md object-contain" />
-        <span v-else class="grid h-[28px] w-[28px] place-items-center rounded-md bg-accent text-accent-ink">
-          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" /><path d="M8.5 12l2 2 4.5-4.5" /></svg>
+        <img
+          v-if="branding.logoUrl"
+          :src="branding.logoUrl"
+          alt=""
+          class="h-[28px] w-[28px] rounded-md object-contain"
+        />
+        <span
+          v-else
+          class="grid h-[28px] w-[28px] place-items-center rounded-md bg-accent text-accent-ink"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            class="h-4 w-4"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" />
+            <path d="M8.5 12l2 2 4.5-4.5" />
+          </svg>
         </span>
-        <b class="text-[15px] font-semibold tracking-tight">{{ page?.title || "Status" }}</b>
+        <b class="text-[15px] font-semibold tracking-tight">{{
+          page?.title || "Status"
+        }}</b>
         <div class="ml-auto flex items-center gap-2">
-          <button class="grid h-[34px] w-[34px] place-items-center rounded-sm border border-border bg-surface text-ink-2 hover:border-border-strong hover:text-ink" type="button" aria-label="Toggle theme" @click="toggle">
-            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19" /></svg>
+          <button
+            class="grid h-[34px] w-[34px] place-items-center rounded-sm border border-border bg-surface text-ink-2 hover:border-border-strong hover:text-ink"
+            type="button"
+            aria-label="Toggle theme"
+            @click="toggle"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              class="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <circle cx="12" cy="12" r="4" />
+              <path
+                d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"
+              />
+            </svg>
           </button>
-          <a :href="feed('rss')" class="inline-flex h-[34px] items-center gap-[7px] rounded-sm border border-border bg-surface px-[13px] text-[13px] font-medium text-ink hover:border-border-strong">
-            <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16" /><circle cx="5" cy="19" r="1.4" fill="currentColor" /></svg>
+          <a
+            :href="feed('rss')"
+            class="inline-flex h-[34px] items-center gap-[7px] rounded-sm border border-border bg-surface px-[13px] text-[13px] font-medium text-ink hover:border-border-strong"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              class="h-[15px] w-[15px]"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16" />
+              <circle cx="5" cy="19" r="1.4" fill="currentColor" />
+            </svg>
             RSS
           </a>
         </div>
@@ -256,196 +429,646 @@ onMounted(async () => {
     </header>
 
     <main class="mx-auto max-w-[820px] px-5 pb-16 pt-[26px]">
-      <div v-if="internalPreview" class="mb-4 flex items-center gap-2 rounded border border-degraded/40 bg-degraded-weak px-4 py-2 text-[12.5px] font-medium text-degraded">
-        🔒 Internal page — visible to signed-in members only; anonymous visitors get 404.
+      <div
+        v-if="internalPreview"
+        class="mb-4 flex items-center gap-2 rounded border border-degraded/40 bg-degraded-weak px-4 py-2 text-[12.5px] font-medium text-degraded"
+      >
+        🔒 Internal page — visible to signed-in members only; anonymous visitors
+        get 404.
       </div>
       <div v-if="loading" class="text-[13px] text-ink-3">Loading…</div>
 
-      <div v-else-if="notFound" class="rounded-lg border border-border bg-surface p-10 text-center shadow-card">
-        <p class="text-[15px] font-medium">This status page is not available.</p>
-        <p class="mt-1 text-[13px] text-ink-3">It may be private, or the link may be incorrect.</p>
+      <div
+        v-else-if="notFound"
+        class="rounded-lg border border-border bg-surface p-10 text-center shadow-card"
+      >
+        <p class="text-[15px] font-medium">
+          This status page is not available.
+        </p>
+        <p class="mt-1 text-[13px] text-ink-3">
+          It may be private, or the link may be incorrect.
+        </p>
       </div>
 
       <template v-else-if="page">
-        <div v-if="banner" class="mb-[14px] rounded-lg border border-accent bg-accent-weak px-[18px] py-[13px] text-[13.5px] text-accent">{{ banner }}</div>
+        <div
+          v-if="banner"
+          class="mb-[14px] rounded-lg border border-accent bg-accent-weak px-[18px] py-[13px] text-[13.5px] text-accent"
+        >
+          {{ banner }}
+        </div>
 
         <!-- overall summary banner -->
-        <div class="mb-[14px] flex flex-wrap items-center gap-4 rounded-lg border p-[22px] shadow-card" :class="[componentMeta(page.summary).band, 'border-border']">
-          <span class="grid h-[42px] w-[42px] flex-none place-items-center rounded-[11px] text-white" :class="meterColor(page.summary)">
-            <svg v-if="page.summary === 'operational' && !(page.unmeasured_count ?? 0)" viewBox="0 0 24 24" class="h-[22px] w-[22px]" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6L9 17l-5-5" /></svg>
-            <svg v-else viewBox="0 0 24 24" class="h-[22px] w-[22px]" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v5M12 16h.01" /><circle cx="12" cy="12" r="9" /></svg>
+        <div
+          data-section="overall"
+          class="mb-[14px] flex flex-wrap items-center gap-4 rounded-lg border p-[22px] shadow-card"
+          :class="[componentMeta(page.summary).band, 'border-border']"
+        >
+          <span
+            class="grid h-[42px] w-[42px] flex-none place-items-center rounded-[11px] text-white"
+            :class="meterColor(page.summary)"
+          >
+            <svg
+              v-if="
+                page.summary === 'operational' && !(page.unmeasured_count ?? 0)
+              "
+              viewBox="0 0 24 24"
+              class="h-[22px] w-[22px]"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.4"
+            >
+              <path d="M20 6L9 17l-5-5" />
+            </svg>
+            <svg
+              v-else
+              viewBox="0 0 24 24"
+              class="h-[22px] w-[22px]"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+            >
+              <path d="M12 8v5M12 16h.01" />
+              <circle cx="12" cy="12" r="9" />
+            </svg>
           </span>
           <div class="min-w-0">
-            <h1 class="m-0 text-[20px] font-semibold tracking-tight" :class="componentMeta(page.summary).text">{{ summaryHeadline(page.summary, page.summary_state, page.unmeasured_count) }}</h1>
-            <div class="mt-[2px] text-[13.5px] text-ink-2">{{ summarySub }}</div>
-          </div>
-          <div class="ml-auto text-right font-mono text-[12px] text-ink-3">updated {{ relTime(page.updated_at) }}<br />{{ updatedUTC }}</div>
-        </div>
-
-        <!-- active incidents -->
-        <div v-for="inc in page.active_incidents || []" :key="inc.id" class="mb-[14px] overflow-hidden rounded-lg border border-border bg-surface shadow-card">
-          <div class="h-[3px]" :class="incidentStrip(inc.status)"></div>
-          <div class="px-[18px] py-[15px]">
-            <div class="mb-[6px] flex flex-wrap items-center gap-[9px]">
-              <h3 class="m-0 text-[15px] font-semibold">{{ inc.title }}</h3>
-              <span class="inline-flex items-center gap-[6px] rounded-full px-[9px] py-[2px] text-[11.5px] font-semibold" :class="statusBadge(inc.status).cls"><span class="h-[7px] w-[7px] rounded-full" :class="meterColor(inc.status)"></span>{{ statusBadge(inc.status).label }}</span>
-              <span class="rounded-full px-[9px] py-[2px] text-[11.5px] font-semibold" :class="impactBadge(inc.impact).cls">{{ impactBadge(inc.impact).label }}</span>
-            </div>
-            <div class="font-mono text-[12px] text-ink-3">opened {{ relTime(inc.started_at) }} · {{ inc.source }}</div>
-
-            <!-- latest update (current communicated state) -->
-            <div v-if="lastUpdate(inc.updates)" class="mt-3 rounded-md border border-border bg-surface-2 px-3 py-[10px]">
-              <div class="flex items-center gap-2">
-                <span class="rounded-full px-[8px] py-[1px] text-[11px] font-semibold" :class="statusBadge(lastUpdate(inc.updates)!.status).cls">{{ statusBadge(lastUpdate(inc.updates)!.status).label }}</span>
-                <span class="font-mono text-[11px] text-ink-3">{{ relTime(lastUpdate(inc.updates)!.created_at) }}</span>
-              </div>
-              <p v-if="lastUpdate(inc.updates)!.body" class="mt-[4px] whitespace-pre-wrap text-[13px] text-ink-2">{{ lastUpdate(inc.updates)!.body }}</p>
-            </div>
-
-            <!-- expand full timeline -->
-            <button v-if="inc.updates && inc.updates.length > 1" type="button" class="mt-2 text-[12px] font-medium text-accent hover:underline" @click="toggleInc(inc.id)">
-              {{ inc.id && expanded.has(inc.id) ? "Hide timeline" : `Show full timeline (${inc.updates.length})` }}
-            </button>
-            <div v-if="inc.id && expanded.has(inc.id)" class="mt-3 border-t border-border pt-3">
-              <div v-for="u in inc.updates" :key="u.id" class="border-l-2 border-border pb-[11px] pl-3 last:pb-0">
-                <div class="flex items-center gap-2">
-                  <span class="rounded-full px-[8px] py-[1px] text-[11px] font-semibold" :class="statusBadge(u.status).cls">{{ statusBadge(u.status).label }}</span>
-                  <span class="font-mono text-[11px] text-ink-3">{{ relTime(u.created_at) }}</span>
-                </div>
-                <p v-if="u.body" class="mt-[3px] whitespace-pre-wrap text-[13px] text-ink-2">{{ u.body }}</p>
-              </div>
+            <h1
+              class="m-0 text-[20px] font-semibold tracking-tight"
+              :class="componentMeta(page.summary).text"
+            >
+              {{
+                summaryHeadline(
+                  page.summary,
+                  page.summary_state,
+                  page.unmeasured_count,
+                )
+              }}
+            </h1>
+            <div class="mt-[2px] text-[13.5px] text-ink-2">
+              {{ summarySub }}
             </div>
           </div>
-        </div>
-
-        <!-- scheduled / active maintenance -->
-        <div v-if="page.maintenance && page.maintenance.length" class="mb-[14px] overflow-hidden rounded-lg border border-border bg-surface shadow-card">
-          <div class="border-b border-border px-[18px] py-[11px] text-[12px] font-semibold text-ink-2">Maintenance</div>
-          <div v-for="m in page.maintenance" :key="m.id" class="flex items-center gap-3 border-b border-border px-[18px] py-[13px] last:border-b-0">
-            <span class="grid h-[30px] w-[30px] flex-none place-items-center rounded-full bg-maint-weak text-maint">
-              <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2 2.3-2.3z" /></svg>
-            </span>
-            <div class="min-w-0">
-              <div class="text-[13.5px] font-medium">{{ m.reason || "Scheduled maintenance" }}</div>
-              <div class="font-mono text-[11.5px] text-ink-3">{{ fmtDay(m.starts_at) }} → {{ fmtDay(m.ends_at) }}</div>
-            </div>
-            <span class="ml-auto rounded-full bg-maint-weak px-[9px] py-[2px] text-[11.5px] font-medium text-maint">{{ maintState(m) }}</span>
+          <div class="ml-auto text-right font-mono text-[12px] text-ink-3">
+            updated {{ relTime(page.updated_at) }}<br />{{ updatedUTC }}
           </div>
         </div>
 
         <!-- components by group -->
-        <div class="mb-[10px] mt-[26px] flex items-center gap-[10px]">
-          <h2 class="m-0 text-[13px] font-semibold">Current status by service</h2>
-          <span class="ml-auto text-[12px] text-ink-3">90-day uptime</span>
-        </div>
+        <section data-section="components">
+          <div class="mb-[10px] mt-[26px] flex items-center gap-[10px]">
+            <h2 class="m-0 text-[13px] font-semibold">
+              Current status by service
+            </h2>
+            <span class="ml-auto text-[12px] text-ink-3">90-day uptime</span>
+          </div>
 
-        <div v-for="g in groups" :key="g.name" class="mb-3 overflow-hidden rounded-lg border border-border bg-surface shadow-card">
-          <div class="border-b border-border px-[18px] py-[11px] text-[12px] font-semibold text-ink-2">{{ g.name }}</div>
-          <div v-for="c in g.comps" :key="c.id" class="border-b border-border px-[18px] py-[14px] last:border-b-0">
-            <div class="mb-[9px] flex items-center gap-[10px]">
-              <span class="text-[14px] font-medium">{{ c.name }}</span>
-              <span v-if="c.description" class="min-w-0 truncate text-[12px] text-ink-3">{{ c.description }}</span>
-              <span v-if="c.unavailable" class="ml-auto inline-flex items-center gap-[7px] text-[12.5px] font-semibold text-degraded" data-testid="component-unavailable">
-                <svg viewBox="0 0 24 24" class="h-[13px] w-[13px]" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v5M12 16h.01" /><circle cx="12" cy="12" r="9" /></svg>
-                Status unavailable
-              </span>
-              <span v-else class="ml-auto inline-flex items-center gap-[7px] text-[12.5px] font-semibold" :class="componentMeta(c.status).text"><span class="h-[8px] w-[8px] rounded-full" :class="componentMeta(c.status).dot"></span>{{ componentMeta(c.status).label }}</span>
+          <div
+            v-for="g in groups"
+            :key="g.name"
+            class="mb-3 overflow-hidden rounded-lg border border-border bg-surface shadow-card"
+          >
+            <div
+              class="border-b border-border px-[18px] py-[11px] text-[12px] font-semibold text-ink-2"
+            >
+              {{ g.name }}
             </div>
-            <!-- per-day 90-day availability strip (aggregate meter fallback for manual components) -->
-            <div v-if="c.daily && c.daily.length" class="flex h-[26px] items-stretch gap-[2px]">
-              <span v-for="(d, i) in strip(c.daily)" :key="i" class="min-w-0 flex-1 rounded-[2px]" :class="daySegClass(d.pct)" :title="dayTitle(d)"></span>
-            </div>
-            <div v-else-if="c.uptime_90d != null" class="h-[8px] overflow-hidden rounded-[3px] bg-inset">
-              <i class="block h-full rounded-[3px]" :class="meterColor(c.status)" :style="{ width: Math.max(0, Math.min(100, c.uptime_90d ?? 0)) + '%' }"></i>
-            </div>
-            <!-- No history at all: an empty rail under "90 days ago … today" would claim a
-                 90-day record that reads as flawless. The absence is stated, WITH its reason when
-                 the server gave one — a missing number without a reason is indistinguishable from
-                 one nobody computed. -->
-            <p v-else class="m-0 font-mono text-[11.5px] text-ink-3" data-testid="no-history">{{ withheldText(c.withheld_reason) }}</p>
-            <div v-if="(c.daily && c.daily.length) || c.uptime_90d != null" class="mt-[7px] flex justify-between font-mono text-[11.5px] text-ink-3">
-              <span>90 days ago</span>
-              <span v-if="pct(c.uptime_90d)"><b class="font-semibold text-ink-2">{{ pct(c.uptime_90d) }}</b> uptime</span>
-              <span>today</span>
+            <div
+              v-for="c in g.comps"
+              :key="c.id"
+              class="border-b border-border px-[18px] py-[14px] last:border-b-0"
+              data-testid="status-component"
+            >
+              <div
+                class="mb-[9px] flex min-w-0 flex-wrap items-center gap-x-[10px] gap-y-1"
+              >
+                <span class="min-w-0 text-[14px] font-medium">{{
+                  c.name
+                }}</span>
+                <span
+                  v-if="c.description"
+                  class="min-w-0 flex-1 truncate text-[12px] text-ink-3"
+                  >{{ c.description }}</span
+                >
+                <span
+                  v-if="c.unavailable"
+                  class="inline-flex items-center gap-[7px] text-[12.5px] font-semibold text-degraded sm:ml-auto"
+                  data-testid="component-unavailable"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    class="h-[13px] w-[13px]"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2.2"
+                  >
+                    <path d="M12 8v5M12 16h.01" />
+                    <circle cx="12" cy="12" r="9" />
+                  </svg>
+                  Status unavailable
+                </span>
+                <span
+                  v-else
+                  class="inline-flex items-center gap-[7px] text-[12.5px] font-semibold sm:ml-auto"
+                  :class="componentMeta(c.status).text"
+                  ><span
+                    class="h-[8px] w-[8px] rounded-full"
+                    :class="componentMeta(c.status).dot"
+                  ></span
+                  >{{ componentMeta(c.status).label }}</span
+                >
+                <button
+                  v-if="activeIncidentCount(c.id)"
+                  type="button"
+                  class="basis-full justify-self-start text-left text-[12px] font-semibold text-accent hover:underline sm:basis-auto"
+                  data-testid="component-incident-link"
+                  @click="openIncidentForComponent(c.id)"
+                >
+                  {{
+                    activeIncidentCount(c.id) === 1
+                      ? "Active incident"
+                      : `${activeIncidentCount(c.id)} active incidents`
+                  }}
+                </button>
+              </div>
+              <div
+                v-if="c.daily && c.daily.length"
+                class="flex h-[26px] items-stretch gap-[2px]"
+              >
+                <span
+                  v-for="(d, i) in strip(c.daily)"
+                  :key="i"
+                  class="min-w-0 flex-1 rounded-[2px]"
+                  :class="daySegClass(d.pct)"
+                  :title="dayTitle(d)"
+                ></span>
+              </div>
+              <div
+                v-else-if="c.uptime_90d != null"
+                class="h-[8px] overflow-hidden rounded-[3px] bg-inset"
+              >
+                <i
+                  class="block h-full rounded-[3px]"
+                  :class="meterColor(c.status)"
+                  :style="{
+                    width: Math.max(0, Math.min(100, c.uptime_90d ?? 0)) + '%',
+                  }"
+                ></i>
+              </div>
+              <p
+                v-else
+                class="m-0 font-mono text-[11.5px] text-ink-3"
+                data-testid="no-history"
+              >
+                {{ withheldText(c.withheld_reason) }}
+              </p>
+              <div
+                v-if="(c.daily && c.daily.length) || c.uptime_90d != null"
+                class="mt-[7px] flex justify-between gap-2 font-mono text-[11.5px] text-ink-3"
+              >
+                <span>90 days ago</span>
+                <span v-if="pct(c.uptime_90d)" class="text-center"
+                  ><b class="font-semibold text-ink-2">{{
+                    pct(c.uptime_90d)
+                  }}</b>
+                  uptime</span
+                >
+                <span>today</span>
+              </div>
             </div>
           </div>
-        </div>
-        <p v-if="!groups.length" class="rounded-lg border border-border bg-surface px-4 py-6 text-center text-[13px] text-ink-3 shadow-card">No components on this page.</p>
+          <p
+            v-if="!groups.length"
+            class="rounded-lg border border-border bg-surface px-4 py-6 text-center text-[13px] text-ink-3 shadow-card"
+          >
+            No components on this page.
+          </p>
+        </section>
+
+        <!-- active incidents -->
+        <section
+          v-if="activeIncidentRows.length"
+          data-section="active-incidents"
+          class="mt-[26px]"
+        >
+          <div class="mb-[10px] flex flex-wrap items-center gap-x-3 gap-y-2">
+            <h2 class="m-0 text-[13px] font-semibold">
+              Active incidents ({{ activeIncidentRows.length }})
+            </h2>
+            <div
+              class="flex flex-wrap gap-2"
+              aria-label="Active incident impact counts"
+            >
+              <span
+                v-for="item in activeImpactCounts"
+                :key="item.impact"
+                class="rounded-full px-[8px] py-[2px] text-[11px] font-semibold"
+                :class="impactBadge(item.impact).cls"
+                data-testid="impact-count"
+                >{{ impactBadge(item.impact).label }} {{ item.count }}</span
+              >
+            </div>
+          </div>
+
+          <div
+            v-for="group in activeIncidentGroups"
+            :key="group.impact || 'flat'"
+            class="mb-3"
+            data-testid="active-incident-group"
+          >
+            <h3
+              v-if="group.impact"
+              class="mb-2 mt-4 text-[12px] font-semibold text-ink-2"
+              data-testid="impact-group-heading"
+            >
+              {{ impactBadge(group.impact).label }} impact
+            </h3>
+            <div
+              class="overflow-hidden rounded-lg border border-border bg-surface shadow-card"
+            >
+              <article
+                v-for="row in group.rows"
+                :key="row.key"
+                class="border-b border-border last:border-b-0"
+                data-testid="active-incident"
+              >
+                <button
+                  :id="row.headerID"
+                  type="button"
+                  class="block w-full px-[18px] py-[14px] text-left hover:bg-surface-2"
+                  :aria-expanded="isExpanded(row.key)"
+                  :aria-controls="row.panelID"
+                  data-testid="active-incident-header"
+                  @click="toggleInc(row.key)"
+                  @keydown.enter.prevent="toggleInc(row.key)"
+                  @keydown.space.prevent="toggleInc(row.key)"
+                >
+                  <span
+                    class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2"
+                  >
+                    <span
+                      class="min-w-0 flex-1 basis-[220px] text-[14px] font-semibold leading-snug"
+                      >{{ row.incident.title }}</span
+                    >
+                    <span
+                      class="rounded-full px-[9px] py-[2px] text-[11.5px] font-semibold"
+                      :class="statusBadge(row.incident.status).cls"
+                      data-testid="lifecycle-badge"
+                      >{{ statusBadge(row.incident.status).label }}</span
+                    >
+                    <span
+                      class="rounded-full px-[9px] py-[2px] text-[11.5px] font-semibold"
+                      :class="impactBadge(row.incident.impact).cls"
+                      data-testid="impact-badge"
+                      >{{ impactBadge(row.incident.impact).label }}</span
+                    >
+                    <svg
+                      viewBox="0 0 24 24"
+                      class="h-[17px] w-[17px] flex-none text-ink-3 transition-transform"
+                      :class="isExpanded(row.key) ? 'rotate-180' : ''"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      aria-hidden="true"
+                    >
+                      <path d="M6 9l6 6 6-6" />
+                    </svg>
+                  </span>
+                  <span
+                    class="mt-2 block font-mono text-[11.5px] leading-relaxed text-ink-3"
+                    data-testid="incident-metadata"
+                  >
+                    Opened {{ relTime(row.incident.started_at) }} · Updated
+                    {{
+                      relTime(
+                        row.incident.updated_at ||
+                          lastUpdate(row.incident.updates)?.created_at ||
+                          row.incident.started_at,
+                      )
+                    }}
+                    · {{ row.incident.updates?.length ?? 0 }} updates
+                  </span>
+                  <span
+                    v-if="lastUpdate(row.incident.updates)?.body"
+                    class="incident-preview-clamp mt-2 block whitespace-pre-wrap text-[13px] leading-relaxed text-ink-2"
+                    data-testid="latest-update-preview"
+                    >{{ lastUpdate(row.incident.updates)?.body }}</span
+                  >
+                  <span
+                    v-else
+                    class="mt-2 block text-[13px] text-ink-3"
+                    data-testid="latest-update-preview"
+                    >No further details were published.</span
+                  >
+                </button>
+                <div
+                  v-if="isExpanded(row.key)"
+                  :id="row.panelID"
+                  role="region"
+                  :aria-labelledby="row.headerID"
+                  class="border-t border-border bg-surface-2 px-[18px] py-[15px]"
+                  data-testid="active-incident-panel"
+                >
+                  <div
+                    class="mb-[10px] text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3"
+                  >
+                    Timeline
+                  </div>
+                  <template v-if="row.incident.updates?.length">
+                    <div
+                      v-for="(u, updateIndex) in row.incident.updates"
+                      :key="updateIndex"
+                      class="border-l-2 border-border pb-[11px] pl-3 last:pb-0"
+                    >
+                      <div
+                        class="flex flex-wrap items-center gap-2 text-[11px]"
+                      >
+                        <span class="font-semibold text-ink-2">{{
+                          statusBadge(u.status).label
+                        }}</span>
+                        <span class="font-mono text-ink-3">{{
+                          relTime(u.created_at)
+                        }}</span>
+                        <span
+                          v-if="updateIndex === row.incident.updates.length - 1"
+                          class="rounded-full bg-accent-weak px-2 py-[1px] font-semibold text-accent"
+                          >Latest</span
+                        >
+                      </div>
+                      <p
+                        v-if="u.body"
+                        class="mt-[3px] whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink-2"
+                      >
+                        {{ u.body }}
+                      </p>
+                    </div>
+                  </template>
+                  <p v-else class="m-0 text-[13px] text-ink-3">
+                    No further details were published.
+                  </p>
+                </div>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <!-- scheduled / active maintenance -->
+        <section
+          v-if="page.maintenance && page.maintenance.length"
+          data-section="maintenance"
+          class="mt-[26px]"
+        >
+          <h2 class="mb-[10px] text-[13px] font-semibold">
+            Scheduled maintenance
+          </h2>
+          <div
+            class="overflow-hidden rounded-lg border border-border bg-surface shadow-card"
+          >
+            <div
+              v-for="m in page.maintenance"
+              :key="m.id"
+              class="flex min-w-0 flex-wrap items-center gap-3 border-b border-border px-[18px] py-[13px] last:border-b-0"
+            >
+              <span
+                class="grid h-[30px] w-[30px] flex-none place-items-center rounded-full bg-maint-weak text-maint"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  class="h-[15px] w-[15px]"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <path
+                    d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2 2.3-2.3z"
+                  />
+                </svg>
+              </span>
+              <div class="min-w-0 flex-1">
+                <div class="break-words text-[13.5px] font-medium">
+                  {{ m.reason || "Scheduled maintenance" }}
+                </div>
+                <div class="font-mono text-[11.5px] text-ink-3">
+                  {{ fmtDay(m.starts_at) }} → {{ fmtDay(m.ends_at) }}
+                </div>
+              </div>
+              <span
+                class="rounded-full bg-maint-weak px-[9px] py-[2px] text-[11.5px] font-medium text-maint"
+                >{{ maintState(m) }}</span
+              >
+            </div>
+          </div>
+        </section>
 
         <!-- incident history (resolved, last 90 days) -->
-        <template v-if="page.recent_incidents && page.recent_incidents.length">
+        <section
+          v-if="page.recent_incidents && page.recent_incidents.length"
+          data-section="past-incidents"
+        >
           <div class="mb-[10px] mt-[26px] flex items-center gap-[10px]">
             <h2 class="m-0 text-[13px] font-semibold">Past incidents</h2>
             <span class="ml-auto text-[12px] text-ink-3">last 90 days</span>
           </div>
-          <div class="overflow-hidden rounded-lg border border-border bg-surface shadow-card">
-            <div v-for="inc in page.recent_incidents" :key="inc.id" class="border-b border-border last:border-b-0">
+          <div
+            class="overflow-hidden rounded-lg border border-border bg-surface shadow-card"
+          >
+            <div
+              v-for="(inc, incidentIndex) in page.recent_incidents"
+              :key="pastKey(incidentIndex)"
+              class="border-b border-border last:border-b-0"
+            >
               <!-- collapsed row (click to expand) -->
-              <button type="button" class="flex w-full items-center gap-3 px-[18px] py-[13px] text-left hover:bg-surface-2" @click="toggleInc(inc.id)">
-                <span class="h-[8px] w-[8px] flex-none rounded-full bg-up"></span>
-                <div class="min-w-0">
+              <button
+                :id="pastHeaderID(incidentIndex)"
+                type="button"
+                class="flex w-full min-w-0 flex-wrap items-center gap-3 px-[18px] py-[13px] text-left hover:bg-surface-2"
+                :aria-expanded="isExpanded(pastKey(incidentIndex))"
+                :aria-controls="pastPanelID(incidentIndex)"
+                @click="toggleInc(pastKey(incidentIndex))"
+                @keydown.enter.prevent="toggleInc(pastKey(incidentIndex))"
+                @keydown.space.prevent="toggleInc(pastKey(incidentIndex))"
+              >
+                <span
+                  class="h-[8px] w-[8px] flex-none rounded-full bg-up"
+                ></span>
+                <div class="min-w-0 flex-1">
                   <div class="text-[13.5px] font-medium">{{ inc.title }}</div>
                   <div class="font-mono text-[11.5px] text-ink-3">
-                    resolved {{ relTime(inc.resolved_at ?? undefined) }}<template v-if="duration(inc.started_at, inc.resolved_at)"> · lasted {{ duration(inc.started_at, inc.resolved_at) }}</template> · {{ impactBadge(inc.impact).label.toLowerCase() }} impact<template v-if="inc.postmortem"> · <span class="text-accent">postmortem</span></template>
+                    resolved {{ relTime(inc.resolved_at ?? undefined)
+                    }}<template
+                      v-if="duration(inc.started_at, inc.resolved_at)"
+                    >
+                      · lasted
+                      {{ duration(inc.started_at, inc.resolved_at) }}</template
+                    >
+                    ·
+                    {{ impactBadge(inc.impact).label.toLowerCase() }}
+                    impact<template v-if="inc.postmortem">
+                      · <span class="text-accent">postmortem</span></template
+                    >
                   </div>
                 </div>
-                <span class="ml-auto rounded-full px-[9px] py-[2px] text-[11.5px] font-semibold" :class="statusBadge(inc.status).cls">{{ statusBadge(inc.status).label }}</span>
-                <svg viewBox="0 0 24 24" class="h-[15px] w-[15px] flex-none text-ink-3 transition-transform" :class="inc.id && expanded.has(inc.id) ? 'rotate-180' : ''" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6" /></svg>
+                <span
+                  class="rounded-full px-[9px] py-[2px] text-[11.5px] font-semibold"
+                  :class="statusBadge(inc.status).cls"
+                  >{{ statusBadge(inc.status).label }}</span
+                >
+                <svg
+                  viewBox="0 0 24 24"
+                  class="h-[15px] w-[15px] flex-none text-ink-3 transition-transform"
+                  :class="
+                    isExpanded(pastKey(incidentIndex)) ? 'rotate-180' : ''
+                  "
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <path d="M6 9l6 6 6-6" />
+                </svg>
               </button>
               <!-- expanded: postmortem if published, else the update timeline -->
-              <div v-if="inc.id && expanded.has(inc.id)" class="border-t border-border bg-surface-2 px-[18px] py-[15px]">
-                <template v-if="inc.postmortem && renderSections(inc.postmortem.body).length">
-                  <div class="mb-[10px] text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3">Postmortem</div>
-                  <div v-for="sec in renderSections(inc.postmortem.body)" :key="sec.heading" class="mb-3 last:mb-0">
-                    <h4 class="mb-1 text-[12px] font-semibold uppercase tracking-[0.05em] text-ink-3">{{ sec.heading }}</h4>
-                    <p class="whitespace-pre-wrap text-[13px] leading-relaxed text-ink-2">{{ sec.content }}</p>
+              <div
+                v-if="isExpanded(pastKey(incidentIndex))"
+                :id="pastPanelID(incidentIndex)"
+                role="region"
+                :aria-labelledby="pastHeaderID(incidentIndex)"
+                class="border-t border-border bg-surface-2 px-[18px] py-[15px]"
+              >
+                <template
+                  v-if="
+                    inc.postmortem && renderSections(inc.postmortem.body).length
+                  "
+                >
+                  <div
+                    class="mb-[10px] text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3"
+                  >
+                    Postmortem
+                  </div>
+                  <div
+                    v-for="sec in renderSections(inc.postmortem.body)"
+                    :key="sec.heading"
+                    class="mb-3 last:mb-0"
+                  >
+                    <h4
+                      class="mb-1 text-[12px] font-semibold uppercase tracking-[0.05em] text-ink-3"
+                    >
+                      {{ sec.heading }}
+                    </h4>
+                    <p
+                      class="whitespace-pre-wrap text-[13px] leading-relaxed text-ink-2"
+                    >
+                      {{ sec.content }}
+                    </p>
                   </div>
                 </template>
                 <template v-else-if="inc.updates && inc.updates.length">
-                  <div class="mb-[10px] text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3">Timeline</div>
-                  <div v-for="u in inc.updates" :key="u.id" class="border-l-2 border-border pb-[11px] pl-3 last:pb-0">
+                  <div
+                    class="mb-[10px] text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3"
+                  >
+                    Timeline
+                  </div>
+                  <div
+                    v-for="(u, updateIndex) in inc.updates"
+                    :key="updateIndex"
+                    class="border-l-2 border-border pb-[11px] pl-3 last:pb-0"
+                  >
                     <div class="flex items-center gap-2">
-                      <span class="rounded-full px-[8px] py-[1px] text-[11px] font-semibold" :class="statusBadge(u.status).cls">{{ statusBadge(u.status).label }}</span>
-                      <span class="font-mono text-[11px] text-ink-3">{{ relTime(u.created_at) }}</span>
+                      <span
+                        class="rounded-full px-[8px] py-[1px] text-[11px] font-semibold"
+                        :class="statusBadge(u.status).cls"
+                        >{{ statusBadge(u.status).label }}</span
+                      >
+                      <span class="font-mono text-[11px] text-ink-3">{{
+                        relTime(u.created_at)
+                      }}</span>
                     </div>
-                    <p v-if="u.body" class="mt-[3px] whitespace-pre-wrap text-[13px] text-ink-2">{{ u.body }}</p>
+                    <p
+                      v-if="u.body"
+                      class="mt-[3px] whitespace-pre-wrap text-[13px] text-ink-2"
+                    >
+                      {{ u.body }}
+                    </p>
                   </div>
                 </template>
-                <p v-else class="text-[13px] text-ink-3">No further details were published.</p>
+                <p v-else class="text-[13px] text-ink-3">
+                  No further details were published.
+                </p>
               </div>
             </div>
           </div>
-        </template>
+        </section>
 
         <!-- subscribe + feeds -->
-        <div class="mt-[30px] flex flex-col gap-4 rounded-lg border border-border bg-surface px-5 py-[18px] shadow-card">
+        <section
+          data-section="subscribe"
+          class="mt-[30px] flex flex-col gap-4 rounded-lg border border-border bg-surface px-5 py-[18px] shadow-card"
+        >
           <div class="flex flex-wrap items-center gap-4">
             <div class="min-w-0">
               <b class="text-[14px]">Subscribe to updates</b>
-              <span class="block text-[12.5px] text-ink-3">Get an email when an incident is opened, updated, or resolved.</span>
+              <span class="block text-[12.5px] text-ink-3"
+                >Get an email when an incident is opened, updated, or
+                resolved.</span
+              >
             </div>
-            <form class="ml-auto flex gap-2 max-[520px]:w-full" @submit.prevent="subscribe">
-              <input v-model="subEmail" type="email" required placeholder="you@company.com" class="h-[38px] w-[220px] rounded-sm border border-border bg-surface-2 px-[11px] text-[13px] outline-none focus:border-accent max-[520px]:w-full" />
-              <button type="submit" :disabled="subscribing || !subEmail.trim()" class="h-[38px] shrink-0 rounded-sm bg-accent px-[15px] text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50">
+            <form
+              class="ml-auto flex gap-2 max-[520px]:w-full"
+              @submit.prevent="subscribe"
+            >
+              <input
+                v-model="subEmail"
+                type="email"
+                required
+                placeholder="you@company.com"
+                class="h-[38px] w-[220px] rounded-sm border border-border bg-surface-2 px-[11px] text-[13px] outline-none focus:border-accent max-[520px]:w-full"
+              />
+              <button
+                type="submit"
+                :disabled="subscribing || !subEmail.trim()"
+                class="h-[38px] shrink-0 rounded-sm bg-accent px-[15px] text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50"
+              >
                 {{ subscribing ? "…" : "Subscribe" }}
               </button>
             </form>
           </div>
           <p v-if="subMsg" class="text-[12.5px] text-up">{{ subMsg }}</p>
           <p v-if="subErr" class="text-[12.5px] text-down">{{ subErr }}</p>
-          <div class="flex gap-4 border-t border-border pt-3 font-mono text-[12.5px] text-ink-3">
+          <div
+            class="flex gap-4 border-t border-border pt-3 font-mono text-[12.5px] text-ink-3"
+          >
             <span>Also by feed:</span>
             <a :href="feed('rss')" class="hover:text-accent">RSS</a>
             <a :href="feed('atom')" class="hover:text-accent">Atom</a>
             <a :href="feed('json')" class="hover:text-accent">JSON</a>
           </div>
-        </div>
+        </section>
         <div class="mt-[22px] text-center text-[12px] text-ink-3">
-          <p v-if="branding.footerText" class="mb-[6px]">{{ branding.footerText }}</p>
-          <a v-if="branding.supportUrl" :href="branding.supportUrl" target="_blank" rel="noopener" class="mb-[6px] inline-block text-ink-2 underline decoration-border-strong underline-offset-2 hover:text-accent">Support</a>
+          <p v-if="branding.footerText" class="mb-[6px]">
+            {{ branding.footerText }}
+          </p>
+          <a
+            v-if="branding.supportUrl"
+            :href="branding.supportUrl"
+            target="_blank"
+            rel="noopener"
+            class="mb-[6px] inline-block text-ink-2 underline decoration-border-strong underline-offset-2 hover:text-accent"
+            >Support</a
+          >
           <div>
             Powered by
-            <span class="inline-flex translate-y-[3px] text-accent"><svg viewBox="0 0 24 24" class="h-[14px] w-[14px]" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" /><path d="M8.5 12l2 2 4.5-4.5" /></svg></span>
+            <span class="inline-flex translate-y-[3px] text-accent"
+              ><svg
+                viewBox="0 0 24 24"
+                class="h-[14px] w-[14px]"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" />
+                <path d="M8.5 12l2 2 4.5-4.5" /></svg
+            ></span>
             <b class="text-ink-2">cerbix</b>
           </div>
         </div>

@@ -3,7 +3,37 @@
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. `DEFERRED` is not permitted. Every `DONE` links to code,
 tests, and metrics.
 
-## Latest closed iteration (iter-0188 — OPENED 2026-09-20, CLOSED 2026-09-21. Scope: post-close
+## Latest closed iteration (iter-0190 — OPENED AND CLOSED 2026-09-21. Scope: owner-authorized
+post-close remediation for status-page accessibility/performance and scheduler race-gate determinism;
+see D-0261.)
+
+| ID | Acceptance criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| NFR-031 / iter-0190 hardening | Post-close status-page corrections are delivered without modifying the immutable iter-0189 closure report. | DONE | [`iter-0189.md`](iterations/iter-0189.md) remains the restored closure snapshot; all later corrections and verification are recorded in [`iter-0190.md`](iterations/iter-0190.md). |
+| AC-0190-1 | `Scheduled maintenance` is a logical `h2` and a role/name regression prevents semantic hierarchy drift. | DONE | [`PublicStatusView.vue`](../frontend/src/views/PublicStatusView.vue) renders the heading; [`PublicStatusView.spec.ts`](../frontend/src/views/PublicStatusView.spec.ts) requires `getByRole("heading", { name: "Scheduled maintenance" })`. |
+| AC-0190-2 | Status-page affected-component projection and component navigation use one backend anchor index and one frontend component→incident map rather than repeated full-list scans. | DONE | [`handlers_statuspage.go`](../internal/api/handlers_statuspage.go) builds the page-order monitor/service index once; [`PublicStatusView.vue`](../frontend/src/views/PublicStatusView.vue) builds one computed component map; projection and frontend regressions pass. |
+| AC-0190-3 | The scheduler readiness test keeps the scheduler leader alive through assertions, rejects the startup `ready=0` transient, and cancels/joins only during explicit cleanup. | DONE | [`scheduler_test.go`](../internal/scheduler/scheduler_test.go) waits for the specific `lagging` verdict and registers joined cleanup with `t.Cleanup`; the regression passes `1000×`, `200×` under `-race`, and two consecutive full `make race` runs. |
+| DoD-0190 | Focused stress, full Go/race/build/vet/lint, frontend/type/build/embed, docs/diff and live status-page gates pass with synchronized living docs. | DONE | [`iter-0190.md`](iterations/iter-0190.md) records full Go tests, two race gates, build/vet, lint `0 issues`, 62/715 frontend tests, generated/schema/embed parity, docs/diff gates and rebuilt-stack Playwright `4/4`. |
+
+## Previous closed iteration (iter-0189 — OPENED AND CLOSED 2026-09-21. Scope: service-first public status page and
+compact active incidents under [`func-status-pages-incidents.md`](specs/func-status-pages-incidents.md),
+approved by the owner and recorded in D-0260.)
+
+| ID | Acceptance criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| FR-037 / NFR-031 | Keep status pages readable with many active incidents: component state precedes incident detail, active rows are compact and accessible, and component navigation uses a privacy-safe page-local relation. | DONE | Core delivery is recorded in [`iter-0189.md`](iterations/iter-0189.md); the post-close semantic-heading and linear-index corrections are recorded in [`iter-0190.md`](iterations/iter-0190.md). No new metric is required because the change is a bounded render projection and presentation contract. |
+| AC-0189-1 | Canonical section order is overall status → current status by service → active incidents → scheduled maintenance → past incidents → subscribe/feeds while configured group/component order and logical heading hierarchy are preserved. | DONE | [`PublicStatusView.vue`](../frontend/src/views/PublicStatusView.vue) owns the order and section headings; [`PublicStatusView.spec.ts`](../frontend/src/views/PublicStatusView.spec.ts) asserts exact DOM order, configured component order and the `Scheduled maintenance` heading role/name. |
+| AC-0189-2 | Active incidents use one compact full-row accordion with one lifecycle badge, one impact badge, opened/updated/update count and no public source label. | DONE | [`PublicStatusView.vue`](../frontend/src/views/PublicStatusView.vue) renders the native-button header; [`PublicStatusView.spec.ts`](../frontend/src/views/PublicStatusView.spec.ts) asserts badge cardinality, metadata, source absence and no separate timeline link. |
+| AC-0189-3 | The latest public update is clamped to two visual lines while collapsed and fully available in the expanded real timeline, whose latest entry is marked without synthetic updates. | DONE | [`PublicStatusView.vue`](../frontend/src/views/PublicStatusView.vue), [`style.css`](../frontend/src/style.css), and [`PublicStatusView.spec.ts`](../frontend/src/views/PublicStatusView.spec.ts) cover clamp, expansion, `Latest`, full text and the empty-update case. |
+| AC-0189-4 | The full row is a collapsed-by-default accessible accordion with native keyboard activation, `aria-expanded`, `aria-controls`, stable panel IDs and visible focus. | DONE | [`PublicStatusView.vue`](../frontend/src/views/PublicStatusView.vue) implements the semantics; [`PublicStatusView.spec.ts`](../frontend/src/views/PublicStatusView.spec.ts) covers default state, Enter/Space toggles and ARIA linkage. |
+| AC-0189-5 | Eight or fewer incidents form one deterministic list; more than eight group only by explicit impact, sorted by impact, `updated_at` descending and stable API order. | DONE | Sorting/grouping lives in [`PublicStatusView.vue`](../frontend/src/views/PublicStatusView.vue); [`PublicStatusView.spec.ts`](../frontend/src/views/PublicStatusView.spec.ts) covers the 8/9 boundary, impact-only grouping and stable tie order. |
+| AC-0189-6 | Status-page `IncidentDetail.affected_component_ids` contains only ordered, deduplicated IDs from `components[]` in the same render response and never persists or exposes internal anchors. | DONE | [`handlers_statuspage.go`](../internal/api/handlers_statuspage.go), [`openapi.yaml`](../openapi.yaml), [`handlers_statuspage_projection_test.go`](../internal/api/handlers_statuspage_projection_test.go), and [`api_statuspage_test.go`](../internal/api/api_statuspage_test.go) cover monitor/service anchors, duplicates/order, project-level empty mapping, foreign-page exclusion, preview/public parity and full public redaction. |
+| AC-0189-7 | An affected component action focuses and opens the first matching incident without putting internal IDs in the URL. | DONE | [`PublicStatusView.vue`](../frontend/src/views/PublicStatusView.vue), [`PublicStatusView.spec.ts`](../frontend/src/views/PublicStatusView.spec.ts), and live [`statuspages.spec.ts`](../e2e/tests/statuspages.spec.ts) prove expand/scroll/focus and URL privacy. |
+| AC-0189-8 | Desktop and 430 px layouts remain readable, keyboard operable and free of horizontal overflow. | DONE | Live [`statuspages.spec.ts`](../e2e/tests/statuspages.spec.ts) passes desktop multi-incident navigation and explicit 430 px document/body overflow assertions; frontend accessibility behaviour is covered by [`PublicStatusView.spec.ts`](../frontend/src/views/PublicStatusView.spec.ts). |
+| AC-0189-9 | Feeds, webhooks, subscribers, incident-detail API, lifecycle, maintenance and past-incident semantics remain unchanged. | DONE | The implementation is confined to the status-page render projection and public view; existing full-lifecycle feed/subscriber coverage plus the new live density scenario pass in [`statuspages.spec.ts`](../e2e/tests/statuspages.spec.ts), and the complete Go/frontend suites remain green. |
+| DoD-0189 | Full Go/race/build/vet/lint, generated-client, SPA unit/type/build, docs, redaction and live status-page gates pass; canonical docs carry final evidence. | DONE | [`iter-0189.md`](iterations/iter-0189.md) records focused and full Go tests, race, build, vet, Dockerized golangci-lint `0 issues`, generated TypeScript and embedded SPA parity, 62 frontend files / 715 tests, vue-tsc, Vite build, docs-check, diff-check and 4/4 focused live Playwright tests. |
+
+## Earlier closed iteration (iter-0188 — OPENED 2026-09-20, CLOSED 2026-09-21. Scope: post-close
 remediation for the iter-0183…0187 implementation audit; see D-0258/D-0259 and
 [`2026-09-20-iter-0183-0187-implementation-audit.md`](checks/2026-09-20-iter-0183-0187-implementation-audit.md).)
 
@@ -16,7 +46,7 @@ remediation for the iter-0183…0187 implementation audit; see D-0258/D-0259 and
 | AUD-0188-P2 | Registered request contracts compare required/type/format as well as names, and tenant-reference inventory entries prove behaviour rather than token presence. | DONE | [`requestcontract_test.go`](../internal/api/requestcontract_test.go) compares property sets, required sets, bounded types and formats and contains required/type/format mutation tests. [`tenantreferenceowners_test.go`](../internal/store/tenantreferenceowners_test.go) binds each registry key to a real PostgreSQL corruption regression; `tenantref` tags fail newly introduced unowned cross-object ID fields. |
 | DoD-0188 | Every P0/P1 finding has a fix, killing regression and synchronized operational evidence; full DB/live/frontend/Go gates pass. | DONE | [`iter-0188.md`](iterations/iter-0188.md) records PostgreSQL normal/race matrices, full Go and SPA suites, type-check/build, Dockerized lint and docs gates; D-0259 closes the audit without editing the immutable finding snapshot. |
 
-## Latest closed iteration (iter-0187 — OPENED 2026-09-19, **CLOSED 2026-09-20 BY THE OWNER**. Scope: production onboarding under [`func-onboarding.md`](specs/func-onboarding.md).)
+## Earlier closed iteration (iter-0187 — OPENED 2026-09-19, **CLOSED 2026-09-20 BY THE OWNER**. Scope: production onboarding under [`func-onboarding.md`](specs/func-onboarding.md).)
 
 | ID | Acceptance criterion | Status | Evidence |
 | --- | --- | --- | --- |
@@ -41,7 +71,7 @@ remediation for the iter-0183…0187 implementation audit; see D-0258/D-0259 and
 | AC-0183-4 | The iteration adds no endpoint, response field, config key, migration or metric; default tests stay hermetic and PostgreSQL remains opt-in. | DONE | Code diff is named DTOs and test infrastructure only; no `openapi.yaml`, migration, config, route, response or metrics file changed. Default store test skips the DB suite without `CERBIX_TEST_DATABASE_DSN`; the explicit PostgreSQL 16 run passed. |
 | DoD-0183 | Spec, decision, status, traceability, roadmap and iteration report are synchronized; focused tests, full Go tests, race, vet, build, docs-check, lint and diff-check are recorded, with DB/live gates run where available. | DONE | [`iter-0183`](iterations/iter-0183.md) §4 records the original delivery matrix; [`iter-0188`](iterations/iter-0188.md) records strengthened required/type/format and behavioural ownership guards plus the full revalidation matrix. No UI/runtime path changed in iter-0183, so Playwright was not applicable. The owner explicitly closed iter-0183 on 2026-09-21. |
 
-## Commissioned and active product iterations
+## Commissioned product iterations
 
 Only `TODO` rows below are uncommissioned drafts. `IN_PROGRESS` rows have the authorization stated in
 their evidence.

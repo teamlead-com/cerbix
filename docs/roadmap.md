@@ -7,8 +7,11 @@ being done, or by being declined with its reason moved to §5.
 
 **Where the tree stands (2026-09-21).** Iter-0189 shipped the owner-approved FR-037/NFR-031 contract;
 iter-0190 closed its post-review accessibility/performance corrections in the correct governance
-container and removed the scheduler readiness test's two transient-state races. No tag or push is
-implied by the prepared release headings.
+container and removed the scheduler readiness test's two transient-state races. Iter-0191 delivered
+the owner-approved incident-aware overall-status contract. Iter-0192 now owns its post-close review
+corrections: immutable-report restoration, complete state/count/impact coverage, shared incident
+vocabulary, full live disclosure, and authoritative `summary_state` copy/visual semantics. No tag or
+push is implied by the prepared release headings.
 
 ---
 
@@ -18,6 +21,24 @@ The commissioned implementation queue is empty. Open a new numbered iteration be
 product or reliability contracts.
 
 ## 2. Latest completed work
+
+**R15 — iter-0192, overall-status post-close remediation. DONE 2026-09-21.** Iter-0191 is restored
+to its closure snapshot. Explicit `summary_state` now owns headline selection, component truth,
+visual fallback and all-clear eligibility; `summary` is used only when state is absent or for severity
+inside explicit impairment. The helper reuses shared incident impact vocabulary, the required
+36-case cross-product plus exact conflict regressions pass, and live public/preview desktop/430 px
+coverage requires the full unmeasured disclosure. Decision: D-0263; contract:
+[`func-status-pages-overall-status.md`](specs/func-status-pages-overall-status.md); report:
+[`iter-0192.md`](iterations/iter-0192.md).
+
+**R14 — iter-0191, incident-aware overall status. DONE 2026-09-21.** The previous green
+`All systems operational` hero can coexist with active Major incidents because component health and
+incident lifecycle are independently correct but were composed incorrectly. The delivered contract
+keeps both owners, adds no API fact, and assigns the complete headline/copy/band composition to one
+pure frontend helper. Full helper/component/live desktop/430 px and repository gates pass. Decision:
+D-0262; post-close hardening is isolated in iter-0192 under D-0263. Contract:
+[`func-status-pages-overall-status.md`](specs/func-status-pages-overall-status.md); report:
+[`iter-0191.md`](iterations/iter-0191.md).
 
 **R13 — iter-0190, governance and deterministic race gate. DONE 2026-09-21.** Iter-0189 remains an
 immutable closure snapshot; the status-page heading/index corrections live in iter-0190; and the

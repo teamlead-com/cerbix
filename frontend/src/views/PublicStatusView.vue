@@ -4,7 +4,11 @@ import { useRoute } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import { useTheme } from "@/composables/useTheme";
-import { componentMeta, summaryHeadline, withheldText } from "@/lib/statuspage";
+import {
+  componentMeta,
+  overallStatusPresentation,
+  withheldText,
+} from "@/lib/statuspage";
 import { useBranding } from "@/stores/branding";
 import { impactBadge, relTime, statusBadge } from "@/lib/incident";
 import { renderSections } from "@/lib/postmortem";
@@ -63,41 +67,16 @@ const feed = (fmt: string) =>
     ? `/api/v1/status-pages/${previewID}/feed?format=${fmt}`
     : `/api/v1/public/status-pages/${slug}/feed?format=${fmt}${token ? "&token=" + token : ""}`;
 
-// Banner sub-line derived from the page summary (no dedicated backend copy field).
-//
-// The unmeasured half is stated FIRST when it exists, because "all monitored services are running
-// normally" beside two components nobody measured is the sentence FR-021 §17 set out to remove.
-const summarySub = computed(() => {
-  const unmeasured = page.value?.unmeasured_count ?? 0;
-  switch (page.value?.summary_state) {
-    case "empty":
-      return "This page has no components yet, so there is nothing to report.";
-    case "no_data":
-      return unmeasured === 1
-        ? "The one component on this page has no measurement yet."
-        : "None of the components on this page have a measurement yet.";
-  }
-  const tail =
-    unmeasured > 0
-      ? ` ${unmeasured} component${unmeasured === 1 ? "" : "s"} on this page ${unmeasured === 1 ? "has" : "have"} no measurement.`
-      : "";
-  switch (page.value?.summary) {
-    case "operational":
-      return "All measured services are running normally." + tail;
-    case "degraded":
-      return (
-        "Some services are experiencing elevated latency. We’re on it." + tail
-      );
-    case "partial_outage":
-      return "Some services are partially unavailable." + tail;
-    case "major_outage":
-      return "A major outage is affecting one or more services." + tail;
-    case "maintenance":
-      return "Scheduled maintenance is in progress." + tail;
-    default:
-      return "Live status of every monitored service." + tail;
-  }
-});
+const overallStatus = computed(() =>
+  overallStatusPresentation({
+    summary: page.value?.summary,
+    state: page.value?.summary_state,
+    unmeasuredCount: page.value?.unmeasured_count,
+    activeIncidentImpacts: (page.value?.active_incidents ?? []).map(
+      (incident) => incident.impact,
+    ),
+  }),
+);
 const updatedUTC = computed(() => {
   if (!page.value?.updated_at) return "";
   return utcClockLabel(page.value.updated_at);
@@ -461,17 +440,20 @@ onMounted(async () => {
         <!-- overall summary banner -->
         <div
           data-section="overall"
+          data-testid="overall-status"
+          :data-visual="overallStatus.visual"
           class="mb-[14px] flex flex-wrap items-center gap-4 rounded-lg border p-[22px] shadow-card"
-          :class="[componentMeta(page.summary).band, 'border-border']"
+          :class="[overallStatus.bandClass, 'border-border']"
         >
           <span
+            data-testid="overall-status-icon"
+            :data-icon="overallStatus.icon"
             class="grid h-[42px] w-[42px] flex-none place-items-center rounded-[11px] text-white"
-            :class="meterColor(page.summary)"
+            :class="overallStatus.iconClass"
           >
             <svg
-              v-if="
-                page.summary === 'operational' && !(page.unmeasured_count ?? 0)
-              "
+              v-if="overallStatus.icon === 'check'"
+              data-testid="overall-status-check-icon"
               viewBox="0 0 24 24"
               class="h-[22px] w-[22px]"
               fill="none"
@@ -482,6 +464,7 @@ onMounted(async () => {
             </svg>
             <svg
               v-else
+              data-testid="overall-status-alert-icon"
               viewBox="0 0 24 24"
               class="h-[22px] w-[22px]"
               fill="none"
@@ -495,18 +478,15 @@ onMounted(async () => {
           <div class="min-w-0">
             <h1
               class="m-0 text-[20px] font-semibold tracking-tight"
-              :class="componentMeta(page.summary).text"
+              :class="overallStatus.textClass"
             >
-              {{
-                summaryHeadline(
-                  page.summary,
-                  page.summary_state,
-                  page.unmeasured_count,
-                )
-              }}
+              {{ overallStatus.headline }}
             </h1>
-            <div class="mt-[2px] text-[13.5px] text-ink-2">
-              {{ summarySub }}
+            <div
+              data-testid="overall-status-supporting"
+              class="mt-[2px] text-[13.5px] text-ink-2"
+            >
+              {{ overallStatus.supportingCopy }}
             </div>
           </div>
           <div class="ml-auto text-right font-mono text-[12px] text-ink-3">

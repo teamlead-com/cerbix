@@ -169,6 +169,106 @@ describe("PublicStatusView service-first active incidents", () => {
     vi.restoreAllMocks();
   });
 
+  it("suppresses every all-clear cue for an operational page with an active Major incident", async () => {
+    const wrapper = await mountView({
+      ...renderFixture([incident(1, "major")]),
+      summary: "operational",
+      summary_state: "operational",
+      components: renderFixture([]).components.map((component) => ({
+        ...component,
+        status: "operational",
+      })),
+    });
+
+    const hero = wrapper.get('[data-testid="overall-status"]');
+    expect(
+      getByRole(wrapper, "heading", { name: "1 active incident" }).element
+        .tagName,
+    ).toBe("H1");
+    expect(hero.text()).toContain(
+      "Major impact. All measured services are currently operational.",
+    );
+    expect(hero.text()).not.toContain("All systems operational");
+    expect(hero.attributes("data-visual")).toBe("warning");
+    expect(hero.classes()).not.toContain("bg-up-weak");
+    expect(
+      wrapper
+        .get('[data-testid="overall-status-icon"]')
+        .attributes("data-icon"),
+    ).toBe("alert");
+    expect(
+      wrapper.find('[data-testid="overall-status-check-icon"]').exists(),
+    ).toBe(false);
+    expect(
+      wrapper.get('[data-testid="overall-status-alert-icon"]').exists(),
+    ).toBe(true);
+  });
+
+  it("keeps an impaired component headline and adds incident context", async () => {
+    const wrapper = await mountView(renderFixture([incident(1, "critical")]));
+    const hero = wrapper.get('[data-testid="overall-status"]');
+    expect(
+      getByRole(wrapper, "heading", { name: "Degraded performance" }).element
+        .tagName,
+    ).toBe("H1");
+    expect(hero.text()).toContain(
+      "Some services are experiencing elevated latency. We’re on it.",
+    );
+    expect(hero.text()).toContain("1 active incident · Critical impact.");
+    expect(hero.text()).not.toContain("1 active incidentCritical impact");
+  });
+
+  it("renders identical hero composition for public and authenticated preview data", async () => {
+    const render = {
+      ...renderFixture([incident(1, "major")]),
+      summary: "operational",
+      summary_state: "operational",
+    };
+    const publicWrapper = await mountView(render);
+    const publicHero = publicWrapper.get('[data-testid="overall-status"]');
+    const publicComposition = {
+      headline: publicHero.get("h1").text(),
+      supporting: publicWrapper
+        .get('[data-testid="overall-status-supporting"]')
+        .text(),
+      visual: publicHero.attributes("data-visual"),
+      classes: publicHero.classes(),
+      icon: publicWrapper
+        .get('[data-testid="overall-status-icon"]')
+        .attributes("data-icon"),
+    };
+    publicWrapper.unmount();
+    document.body.innerHTML = "";
+
+    routeMock.query = { preview: "status-page-id" };
+    apiMock.GET.mockImplementation((path: string) => {
+      if (path === "/api/v1/public/status-pages/{slug}") {
+        return Promise.resolve({ error: { error: "not found" } });
+      }
+      if (path === "/api/v1/status-pages/{pageID}/render") {
+        return Promise.resolve({ data: render });
+      }
+      return Promise.resolve({ error: { error: "not found" } });
+    });
+    const previewWrapper = mount(PublicStatusView, { attachTo: document.body });
+    await flushPromises();
+    const previewHero = previewWrapper.get('[data-testid="overall-status"]');
+    expect({
+      headline: previewHero.get("h1").text(),
+      supporting: previewWrapper
+        .get('[data-testid="overall-status-supporting"]')
+        .text(),
+      visual: previewHero.attributes("data-visual"),
+      classes: previewHero.classes(),
+      icon: previewWrapper
+        .get('[data-testid="overall-status-icon"]')
+        .attributes("data-icon"),
+    }).toEqual(publicComposition);
+    expect(previewWrapper.text()).toContain(
+      "Internal page — visible to signed-in members only",
+    );
+  });
+
   it("renders the canonical section order and preserves configured group/component order", async () => {
     const wrapper = await mountView();
     expect(

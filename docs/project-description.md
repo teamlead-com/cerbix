@@ -106,6 +106,19 @@ delivery evidence: [`func-status-pages-incidents.md`](specs/func-status-pages-in
 a semantic heading and replaces repeated incident/component scans with one page-order backend index
 and one frontend component map; evidence is in [`iter-0190.md`](iterations/iter-0190.md).
 
+**FR-038 / NFR-032 (DONE in iter-0191; hardened in iter-0192).** The overall hero composes component health
+and active-incident attention without conflating them. An active incident suppresses the green
+`All systems operational` all-clear, but does not rewrite operational component rows or reliability
+summary algebra. Measured impairments retain headline precedence; otherwise the hero leads with the
+active incident count and explicitly states both worst incident impact and current measured-service
+health. The single frontend rule owner is the pure `overallStatusPresentation` helper; no backend,
+API, persistence, config, metric, or lifecycle contract changes. An explicit `summary_state` is
+authoritative; the older `summary` fallback is used only when that field is absent, and incident
+impact type/rank reuse the shared incident vocabulary. Approved contract:
+[`func-status-pages-overall-status.md`](specs/func-status-pages-overall-status.md); decisions:
+D-0262/D-0263; delivery snapshot: [`iter-0191.md`](iterations/iter-0191.md); post-close remediation:
+[`iter-0192.md`](iterations/iter-0192.md).
+
 ## Console & API Surface (cross-cutting)
 
 - **Global search** — `GET /api/v1/search` returns tenant-scoped hits across monitors,

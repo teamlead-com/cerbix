@@ -54,6 +54,192 @@ test.describe("status pages", () => {
     }
   });
 
+  test("incident-aware hero matches on public and authenticated preview at desktop and 430px", async ({
+    page,
+  }) => {
+    const { orgID } = await firstProject(page);
+    const slug = "e2e-status-incident-aware";
+    const projectResponse = await apiSend(page, "post", `/api/v1/organizations/${orgID}/projects`, {
+      slug: `e2e-status-incident-aware-${Date.now()}`,
+      name: "E2E Incident-aware Status",
+    });
+    expect(projectResponse.status()).toBe(201);
+    const project = await projectResponse.json();
+    const projectID = project.id as string;
+    for (const existing of await apiGet(
+      page,
+      `/api/v1/organizations/${orgID}/status-pages`,
+    )) {
+      if (existing.slug === slug) {
+        await apiSend(page, "delete", `/api/v1/status-pages/${existing.id}`);
+      }
+    }
+
+    const statusPageResponse = await apiSend(
+      page,
+      "post",
+      `/api/v1/organizations/${orgID}/status-pages`,
+      {
+        slug,
+        title: "E2E Incident-aware Status",
+        visibility: "public",
+        project_id: projectID,
+      },
+    );
+    expect(statusPageResponse.status()).toBe(201);
+    const statusPage = await statusPageResponse.json();
+    let incident: any = null;
+    let monitor: any = null;
+
+    const assertHero = async () => {
+      const hero = page.getByTestId("overall-status");
+      await expect(
+        page.getByRole("heading", { level: 1, name: "1 active incident" }),
+      ).toBeVisible();
+      await expect(
+        page.getByTestId("overall-status-supporting"),
+      ).toHaveText(
+        "Major impact. All measured services are currently operational. 1 component on this page has no measurement.",
+      );
+      await expect(hero).not.toContainText("All systems operational");
+      await expect(hero).toHaveAttribute("data-visual", "warning");
+      await expect(hero).not.toHaveClass(/bg-up-weak/);
+      await expect(page.getByTestId("overall-status-icon")).toHaveAttribute(
+        "data-icon",
+        "alert",
+      );
+      await expect(page.getByTestId("overall-status-check-icon")).toHaveCount(
+        0,
+      );
+      await expect(page.getByTestId("overall-status-alert-icon")).toBeVisible();
+    };
+
+    const assertNoOverflow = async () => {
+      const overflow = await page.evaluate(() => ({
+        viewport: window.innerWidth,
+        document: document.documentElement.scrollWidth,
+        body: document.body.scrollWidth,
+      }));
+      expect(overflow.document).toBeLessThanOrEqual(overflow.viewport);
+      expect(overflow.body).toBeLessThanOrEqual(overflow.viewport);
+    };
+
+    try {
+      const monitorResponse = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors`, {
+        name: "e2e-status-incident-aware-monitor", type: "http",
+        target: "https://example.com/status-incident-aware", interval_seconds: 300,
+        timeout_seconds: 5, region: "core", enabled: false,
+      });
+      expect(monitorResponse.status()).toBe(201);
+      monitor = await monitorResponse.json();
+      const componentResponse = await apiSend(
+        page,
+        "post",
+        `/api/v1/status-pages/${statusPage.id}/components`,
+        {
+          name: "Checkout API",
+          group: "Customer services",
+          description: "Public checkout traffic",
+          position: 1,
+          manual_status: "operational",
+        },
+      );
+      expect(componentResponse.status()).toBe(201);
+      const incidentComponentResponse = await apiSend(
+        page,
+        "post",
+        `/api/v1/status-pages/${statusPage.id}/components`,
+        {
+          name: "Incident signal",
+          group: "Customer services",
+          position: 2,
+          monitor_id: monitor.id,
+        },
+      );
+      expect(incidentComponentResponse.status()).toBe(201);
+      const incidentResponse = await apiSend(
+        page,
+        "post",
+        `/api/v1/projects/${projectID}/incidents`,
+        {
+          title: "e2e incident-aware major",
+          impact: "major",
+          monitor_id: monitor.id,
+          body: "Checkout requests are degraded while recovery proceeds.",
+        },
+      );
+      expect(incidentResponse.status()).toBe(201);
+      incident = await incidentResponse.json();
+
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto(`/status/${slug}`);
+      await assertHero();
+      const publicComposition = await page
+        .getByTestId("overall-status")
+        .evaluate((hero) => ({
+          headline: hero.querySelector("h1")?.textContent,
+          supporting: hero.querySelector('[data-testid="overall-status-supporting"]')?.textContent,
+          classes: hero.className,
+          visual: hero.getAttribute("data-visual"),
+          icon: hero
+            .querySelector('[data-testid="overall-status-icon"]')
+            ?.getAttribute("data-icon"),
+        }));
+
+      await page.setViewportSize({ width: 430, height: 932 });
+      await page.reload();
+      await assertHero();
+      await assertNoOverflow();
+
+      const internalResponse = await apiSend(
+        page,
+        "patch",
+        `/api/v1/status-pages/${statusPage.id}`,
+        {
+          title: "E2E Incident-aware Status",
+          visibility: "internal",
+        },
+      );
+      expect(internalResponse.ok()).toBeTruthy();
+
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto(`/status/${slug}?preview=${statusPage.id}`);
+      await expect(
+        page.getByText("Internal page — visible to signed-in members only", {
+          exact: false,
+        }),
+      ).toBeVisible();
+      await assertHero();
+      const previewComposition = await page
+        .getByTestId("overall-status")
+        .evaluate((hero) => ({
+          headline: hero.querySelector("h1")?.textContent,
+          supporting: hero.querySelector('[data-testid="overall-status-supporting"]')?.textContent,
+          classes: hero.className,
+          visual: hero.getAttribute("data-visual"),
+          icon: hero
+            .querySelector('[data-testid="overall-status-icon"]')
+            ?.getAttribute("data-icon"),
+        }));
+      expect(previewComposition).toEqual(publicComposition);
+
+      await page.setViewportSize({ width: 430, height: 932 });
+      await page.reload();
+      await assertHero();
+      await assertNoOverflow();
+    } finally {
+      if (incident) {
+        await apiSend(page, "post", `/api/v1/incidents/${incident.id}/updates`, {
+          status: "resolved",
+          body: "e2e cleanup",
+        });
+      }
+      await apiSend(page, "delete", `/api/v1/status-pages/${statusPage.id}`);
+      if (monitor) await apiSend(page, "delete", `/api/v1/monitors/${monitor.id}`);
+      await apiSend(page, "delete", `/api/v1/projects/${projectID}`);
+    }
+  });
+
   // iter-0181, reported from production: adding a component whose source is a SERVICE answered
   // `400 Bad Request` with `invalid JSON body`. The handler did not name `service_id` while the
   // contract declared it and the SPA sent it, and `DisallowUnknownFields` turned the request into a

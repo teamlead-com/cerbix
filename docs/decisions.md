@@ -8526,3 +8526,53 @@ unknown cannot satisfy it. Production scheduler readiness logic is unchanged.
 The previously flaky test passes 1000 ordinary repetitions, 200 repetitions under `-race`, and two
 consecutive complete repository race gates before iter-0190 closes. No product endpoint, persistence,
 metric, alert or scheduler runtime contract changes.
+
+## D-0262 — component health and incident attention remain independent; frontend presentation composes them (2026-09-21)
+
+**Context.** A status-page render can truthfully report every measured component as operational while
+also carrying an unresolved Major or Critical incident. Component/reliability evaluation and incident
+lifecycle are separate domain facts, but the previous hero read only the component summary and emitted
+the exact green `All systems operational` all-clear above the active incident list. Making incidents
+mutate component status would replace one presentation defect with a duplicate health owner.
+
+**Decision.** Revision 1 of
+[`func-status-pages-overall-status.md`](specs/func-status-pages-overall-status.md) is approved for
+iter-0191. Component health continues to own `summary`, `summary_state`, `unmeasured_count`, component
+rows, uptime and reliability semantics. Incident lifecycle continues to own `active_incidents[]` and
+its explicit impacts. One pure frontend `overallStatusPresentation` helper derives active count and
+worst impact (`critical > major > minor > none`) from that already public-redacted list and composes the
+hero headline, supporting copy, visual semantics and icon. Measured impairment or maintenance keeps
+headline precedence; otherwise any active incident suppresses the all-clear and leads with incident
+count. Incident age is not a presentation input.
+
+**Consequences.** Public and authenticated preview consume the same helper. There is no new backend,
+OpenAPI, database, migration, configuration, cache-key, metric or alert fact, and no incident may
+silently downgrade or auto-resolve. Component rows, feeds, webhooks, subscriptions, SLA/SLO and the
+existing hero timestamp retain their contracts. Tests must kill restoration of the all-clear phrase,
+green band or check icon, enforce worst-impact ordering and impairment precedence, prove public/preview
+parity, and cover desktop plus 430 px without horizontal overflow.
+
+## D-0263 — post-close overall-status corrections belong to iter-0192; explicit summary state owns all presentation facts (2026-09-21)
+
+**Context.** Independent review after iter-0191 closure found that the compatibility `summary`
+fallback still participated when an explicit `summary_state` existed. The first defect affected
+headline ownership; a neighbouring defect allowed `summary=no_data` to override
+`summary_state=operational` in active-incident supporting copy. The review also found that the
+required cross-product test matrix and full live unmeasured disclosure assertion were added by
+editing the already closed iter-0191 report, repeating the immutable-iteration violation addressed
+by D-0261.
+
+**Decision.** Iter-0191 is restored to its exact closure narrative and remains immutable. Iter-0192
+owns every post-close correction: explicit `summary_state` controls headline ownership, component
+truth, visual fallback and all-clear eligibility; `summary` is consulted as a compatibility fallback
+only when `summary_state` is absent, or as severity detail inside an explicit `impaired` state. The
+helper imports `IncidentImpact`, `IMPACT_ORDER` and impact labels from the shared incident vocabulary.
+The helper test suite executes the complete operational/impaired/no-data/empty × zero/one/many ×
+every-impact matrix and exact contradictory state/summary expectations. Live public/preview coverage
+asserts the complete supporting sentence including unmeasured disclosure.
+
+**Consequences.** Living status, traceability, roadmap, specification index and changelog identify
+iter-0192 as the remediation owner while retaining iter-0191 as the original closure snapshot. No
+backend, OpenAPI, persistence, configuration, cache, metric, alert, incident lifecycle, component-row,
+SLA/SLO or timestamp contract changes. Public and authenticated preview continue to consume one
+frontend presentation helper.

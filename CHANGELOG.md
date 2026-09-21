@@ -10,7 +10,8 @@ This patch release combines the status-page service-component repair from `iter-
 alert-routing tenant-boundary hardening from `iter-0182`, bounded audit retention from `iter-0184`,
 project-level inherited release-gate policy from `iter-0185`, and worst-of-all-windows gate evaluation
 from `iter-0186`, the evidence-driven onboarding journey from `iter-0187`, and the service-first public
-status-page incident experience from `iter-0189`, hardened in `iter-0190`.
+status-page incident experience from `iter-0189`, hardened in `iter-0190`, plus the incident-aware
+overall-status composition from `iter-0191`, hardened in `iter-0192`.
 
 ### ✨ Added
 
@@ -47,6 +48,17 @@ status-page incident experience from `iter-0189`, hardened in `iter-0190`.
   without exposing internal monitor, service, project, actor, update, or postmortem identifiers.
 
 ### 🩹 Fixed
+
+- **Active status-page incidents can no longer coexist with a false green all-clear (iter-0191,
+  hardened in iter-0192; FR-038 / NFR-032).** Public and authenticated-preview heroes compose
+  measured component health with the existing public active-incident list in one pure frontend
+  helper. Explicit `summary_state` owns the component truth and all-clear eligibility; the legacy
+  summary fallback runs only when state is absent. Measured impairment or maintenance keeps its
+  headline, while otherwise active incidents lead with count and order-independent worst impact.
+  Major and Minor render warning attention, Critical renders danger attention, and impact `none`
+  remains neutral rather than green. Complete supporting copy retains no-data, empty-page and
+  unmeasured-component disclosure. Component rows, incident lifecycle, API/OpenAPI, persistence,
+  cache, metrics, alerts, SLA/SLO and timestamp semantics remain unchanged.
 
 - **Status-page post-close hardening is isolated in iter-0190.** The scheduled-maintenance title is
   restored to the logical heading hierarchy without changing its visual style. Backend incident
@@ -116,7 +128,9 @@ documentation checks and configured lint green · live status-page Playwright re
 including the full DB-backed `internal/store` package. `iter-0184` completed its delivery gates;
 `iter-0185` and `iter-0186` pass their PostgreSQL migration/snapshot regressions, full Go and SPA
 suites, generated-schema parity, Dockerized lint, build, docs checks, and the scoped live gate UI
-Playwright suite.</sub>
+Playwright suite. `iter-0191` / `iter-0192` pass 56 focused helper/component tests, 764 frontend tests,
+full Go/race/build/vet/lint, generated API and embedded-SPA parity, and rebuilt-stack public/preview
+Playwright at desktop and 430 px with exact copy, accessible heading and no horizontal overflow.</sub>
 
 ---
 

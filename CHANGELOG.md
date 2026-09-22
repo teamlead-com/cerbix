@@ -4,9 +4,9 @@ All notable changes to **cerbix** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.2.1] - Unreleased
+## [v0.3.0] - 2026-09-22
 
-This patch release combines the status-page service-component repair from `iter-0181` with the
+This minor release combines the status-page service-component repair from `iter-0181` with the
 alert-routing tenant-boundary hardening from `iter-0182`, bounded audit retention from `iter-0184`,
 project-level inherited release-gate policy from `iter-0185`, and worst-of-all-windows gate evaluation
 from `iter-0186`, the evidence-driven onboarding journey from `iter-0187`, and the service-first public

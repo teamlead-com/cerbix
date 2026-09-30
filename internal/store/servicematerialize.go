@@ -352,24 +352,29 @@ func epochAt(ctx context.Context, tx pgx.Tx, serviceID string, at time.Time) (st
 // observationsFor reads the heartbeats the bucket needs, INCLUDING the last one before it
 // began. Sample-and-hold cannot start a bucket without the observation in force when it
 // opened, and dropping it would make every bucket start UNKNOWN.
+const observationsForSQL = `SELECT monitor_id, ts, up FROM heartbeats
+	WHERE monitor_id = ANY($1) AND ts >= $2 AND ts < $3
+	UNION ALL
+	SELECT ids.monitor_id, carry.ts, carry.up
+	  FROM unnest($1::uuid[]) AS ids(monitor_id)
+	  CROSS JOIN LATERAL (
+	      SELECT h.ts, h.up
+	        FROM heartbeats h
+	       WHERE h.monitor_id = ids.monitor_id AND h.ts < $2
+	       ORDER BY h.ts DESC
+	       LIMIT 1
+	  ) AS carry`
+
 func observationsFor(ctx context.Context, tx pgx.Tx, members []reliability.Member, start, end time.Time) ([]reliability.Observation, error) {
 	ids := make([]string, 0, len(members))
 	for _, m := range members {
 		ids = append(ids, m.MonitorID)
 	}
-	// The carry-in branch is PARENTHESIZED so its ORDER BY belongs to the DISTINCT ON
-	// (iter-0139): a trailing ORDER BY after a UNION binds to the WHOLE union, which left
-	// DISTINCT ON with no defined order — an ARBITRARY prior observation became the
-	// carry-in state whenever a member had more than one row before the bucket. Every
-	// phase-1 fixture happened to plant exactly one prior observation, which is how a
-	// sample-and-hold evaluator shipped with an undefined hold state.
-	rows, err := tx.Query(ctx,
-		`SELECT monitor_id, ts, up FROM heartbeats
-		  WHERE monitor_id = ANY($1) AND ts >= $2 AND ts < $3
-		 UNION ALL
-		 (SELECT DISTINCT ON (monitor_id) monitor_id, ts, up FROM heartbeats
-		   WHERE monitor_id = ANY($1) AND ts < $2
-		   ORDER BY monitor_id, ts DESC)`, ids, start, end)
+	// The carry-in is one bounded, index-backed lookup per monitor. A global historical
+	// DISTINCT ON sort makes a short materialization slice proportional to every retained
+	// heartbeat before the bucket; the lateral LIMIT keeps it proportional to the declared
+	// member set while preserving the latest-prior sample-and-hold observation.
+	rows, err := tx.Query(ctx, observationsForSQL, ids, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("store: read observations: %w", err)
 	}

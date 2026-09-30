@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -434,5 +436,35 @@ func TestCarryInIsTheLatestPriorObservation(t *testing.T) {
 	}
 	if fact.bad != 0 {
 		t.Errorf("bad = %dµs from an older DOWN that a newer UP superseded", fact.bad)
+	}
+}
+
+// The carry-in plan must seek one latest-prior row per member instead of sorting retained
+// history. This is the regression for the original Service-slice stall.
+func TestCarryInPlanUsesBoundedPerMonitorLookup(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+	start := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Minute)
+	if _, err := st.pool.Exec(ctx, `INSERT INTO heartbeats (monitor_id,ts,up)
+		SELECT $1,$2::timestamptz - (g * interval '1 second'),true
+		FROM generate_series(1,50000) AS g
+		ON CONFLICT (monitor_id,ts) DO NOTHING`, f.http, start); err != nil {
+		t.Fatalf("seed retained history: %v", err)
+	}
+	var plan json.RawMessage
+	if err := st.pool.QueryRow(ctx,
+		`EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, FORMAT JSON) `+observationsForSQL,
+		[]string{f.http}, start, start.Add(time.Minute)).Scan(&plan); err != nil {
+		t.Fatalf("explain carry-in query: %v", err)
+	}
+	text := string(plan)
+	if strings.Contains(text, `"Node Type": "Sort"`) {
+		t.Fatalf("carry-in query still sorts retained history: %s", text)
+	}
+	if !strings.Contains(text, `"Node Type": "Limit"`) {
+		t.Fatalf("carry-in query has no per-monitor LIMIT: %s", text)
+	}
+	if !strings.Contains(text, `"Index Scan"`) && !strings.Contains(text, `"Index Only Scan"`) {
+		t.Fatalf("carry-in query has no index-backed scan: %s", text)
 	}
 }

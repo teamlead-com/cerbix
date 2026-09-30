@@ -4,6 +4,29 @@ All notable changes to **cerbix** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.5] - Unreleased
+
+### 🩹 Fixed
+
+- **Service reliability materialization no longer globally sorts retained heartbeat history for
+  carry-in.** The historical sample-and-hold lookup now performs one bounded, index-backed latest
+  prior observation lookup per declared monitor, preserving the exact carry-in semantics while
+  preventing a large retained history from consuming the Service materialization slice. This is a
+  data-compatible change and requires no database migration.
+
+### 🧪 Tests
+
+- **Gate fixtures now match schema 109.** Test rows and assertions were aligned with the persisted
+  policy source/owner fields, all-window fields, and the schema-109 payload limits. PostgreSQL 16
+  declarative-partition and TimescaleDB normal/race `internal/store` suites pass.
+
+### Upgrade notes
+
+- This unreleased change contains no schema migration and does not require an offline database
+  upgrade. Existing installations retain their current data and watermarks.
+
+---
+
 ## [v0.3.0] - 2026-09-22
 
 This minor release combines the status-page service-component repair from `iter-0181` with the

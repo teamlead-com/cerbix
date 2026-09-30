@@ -15,27 +15,27 @@ import (
 // Agent B — adversarial pass over changeset 2 (func-reliability-gate §7 *Presence*, *Ledger*,
 // *Identity and reads*; D7, D10, §5 listing contract).
 
-// §7 *Identity and reads*: "a synthetic 5 KiB evidence fails the decision at the CHECK". The
-// evidence is assembled from owners, so the driver is the owner: a target carrying 40 burn
-// rules (planted by SQL past the domain's cap of 4) yields 40 `burn_leases[]` entries and an
-// evidence past 4 KiB. The decision must FAIL — SQLSTATE 23514 on the payload CHECK, not a
-// truncated row, not ErrGateLedgerUnwritable (the other 23514) — and write nothing.
+// §7 *Identity and reads*: a synthetic 17 KiB evidence fails the decision at the CHECK. The
+// evidence is assembled from owners, so the driver is the owner: a target carrying 600 burn
+// rules (planted by SQL past the domain's cap of 4) yields enough `burn_leases[]` entries to
+// exceed the schema-109 16 KiB payload bound. The decision must FAIL — SQLSTATE 23514 on the
+// payload CHECK, not a truncated row, not ErrGateLedgerUnwritable (the other 23514) — and write nothing.
 func TestGateBEvidenceOverTheCheckFailsTheDecisionAndNeverTruncates(t *testing.T) {
 	st, ctx := gateStore(t)
 	f := gateService(t, st, ctx, 2*time.Minute, minute, 0)
 	gateArmCoverage(t, st, ctx, f, 90*time.Second)
 	gatePut(t, st, ctx, f, nil, gateDoc(nil))
 
-	rules := make([]string, 0, 40)
-	for i := 0; i < 40; i++ {
+	rules := make([]string, 0, 600)
+	for i := 0; i < 600; i++ {
 		rules = append(rules, fmt.Sprintf(`{"long_window_seconds":%d,"short_window_seconds":300,"threshold":14.4,"severity":"page"}`, 3600+60*i))
 	}
 	if _, err := st.pool.Exec(ctx, `UPDATE sla_targets SET burn_rules = $2::jsonb WHERE id = $1`, f.targetID, "["+strings.Join(rules, ",")+"]"); err != nil {
-		t.Fatalf("plant 40 rules: %v", err)
+		t.Fatalf("plant 600 rules: %v", err)
 	}
-	_, err := st.DecideGate(ctx, f.projectID, f.serviceID, gateBudget)
+	dec, err := st.DecideGate(ctx, f.projectID, f.serviceID, gateBudget)
 	if err == nil {
-		t.Fatal("a decision whose evidence exceeds 4 KiB was recorded; the writer must never truncate and the CHECK must refuse it")
+		t.Fatalf("a decision whose evidence exceeds 16 KiB was recorded; evidence=%d bytes", len(gateCanon(t, dec.GateDecisionEvidence)))
 	}
 	if pgErrCode(err) != "23514" || !strings.Contains(err.Error(), "service_gate_decisions_payload_chk") {
 		t.Errorf("err = %v, want SQLSTATE 23514 on service_gate_decisions_payload_chk", err)
@@ -153,8 +153,8 @@ func TestGateBWorstCaseValidRowFitsTheByteChecks(t *testing.T) {
 		  FROM service_gate_decisions WHERE id = $1`, dec.DecisionID).Scan(&evidenceLen, &reasonsLen, &snapshotLen); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("worst valid row: evidence=%d/4096 reasons=%d/1024 snapshot=%d/4096 bytes", evidenceLen, reasonsLen, snapshotLen)
-	if evidenceLen > 4096 || reasonsLen > 1024 || snapshotLen > 4096 {
+	t.Logf("worst valid row: evidence=%d/16384 reasons=%d/4096 snapshot=%d/4096 bytes", evidenceLen, reasonsLen, snapshotLen)
+	if evidenceLen > 16384 || reasonsLen > 4096 || snapshotLen > 4096 {
 		t.Errorf("the worst valid row does not fit the CHECKs: evidence=%d reasons=%d snapshot=%d", evidenceLen, reasonsLen, snapshotLen)
 	}
 }

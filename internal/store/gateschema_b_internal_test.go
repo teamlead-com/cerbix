@@ -165,8 +165,8 @@ func TestGateIdBindingCheckIsTheMechanism(t *testing.T) {
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO service_gate_decisions (id, project_id, service_id, service_slug, service_name, state, action, reasons, evidence,
-		     policy_revision, window_name, policy_snapshot, evaluated_at)
-		VALUES ($1, $2, $3, 's', 'n', 'ALLOW', 'ALLOW', '[]', '{}', 1, '30d', '{}', $4)`, planted, proj, svc, at); err != nil {
+		     policy_revision, policy_source, policy_owner_id, window_name, window_mode, evaluated_windows, policy_snapshot, evaluated_at)
+		VALUES ($1, $2, $3, 's', 'n', 'ALLOW', 'ALLOW', '[]', '{}', 1, 'service', $3, '30d', 'one', '[]', '{}', $4)`, planted, proj, svc, at); err != nil {
 		t.Fatalf("with the CHECK gone the planted row is still refused, so something else refuses it and the assertion above names the wrong mechanism: %v", err)
 	}
 	if err := tx.Rollback(ctx); err != nil {
@@ -215,8 +215,8 @@ func TestGateLocalUniqueIdIndexIsTheMechanism(t *testing.T) {
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO service_gate_decisions (id, project_id, service_id, service_slug, service_name, state, action, reasons, evidence,
-		     policy_revision, window_name, policy_snapshot, evaluated_at)
-		VALUES ($1, $2, $3, 's', 'n', 'ALLOW', 'ALLOW', '[]', '{}', 1, '30d', '{}', $4)`, id, proj, svc, twin); err != nil {
+		     policy_revision, policy_source, policy_owner_id, window_name, window_mode, evaluated_windows, policy_snapshot, evaluated_at)
+		VALUES ($1, $2, $3, 's', 'n', 'ALLOW', 'ALLOW', '[]', '{}', 1, 'service', $3, '30d', 'one', '[]', '{}', $4)`, id, proj, svc, twin); err != nil {
 		t.Fatalf("with the local unique gone the twin is still refused; the assertion above names the wrong mechanism: %v", err)
 	}
 	if err := tx.Rollback(ctx); err != nil {
@@ -386,7 +386,7 @@ func TestGatePolicyAndOverrideShapeChecks(t *testing.T) {
 		clauses string
 		cons    string
 	}{
-		{"empty window", "", 1, `{}`, "service_gate_policies_window_chk"},
+		{"empty window", "", 1, `{}`, "service_gate_policies_mode_window_chk"},
 		{"schema_version 0", "30d", 0, `{}`, "service_gate_policies_schema_version_chk"},
 		{"clauses as an array", "30d", 1, `[]`, "service_gate_policies_clauses_chk"},
 		{"clauses as a string", "30d", 1, `"block"`, "service_gate_policies_clauses_chk"},
@@ -398,22 +398,25 @@ func TestGatePolicyAndOverrideShapeChecks(t *testing.T) {
 	}
 
 	_, err := st.pool.Exec(ctx, `
-		INSERT INTO service_gate_overrides (service_id, project_id, policy_revision, via_token, actor_label, reason, expires_at)
-		VALUES ($1, $2, 1, true, '', 'deploying', now() + interval '1 hour')`, svc, proj)
+		INSERT INTO service_gate_overrides (service_id, project_id, policy_revision, policy_source, policy_owner_id,
+			via_token, actor_label, reason, expires_at)
+		VALUES ($1, $2, 1, 'service', $1, true, '', 'deploying', now() + interval '1 hour')`, svc, proj)
 	if code, name := pgCode(err); code != "23514" || name != "service_gate_overrides_actor_label_chk" {
 		t.Errorf("empty actor_label: want 23514 from service_gate_overrides_actor_label_chk, got code=%q constraint=%q err=%v", code, name, err)
 	}
 	_, err = st.pool.Exec(ctx, `
-		INSERT INTO service_gate_overrides (service_id, project_id, policy_revision, via_token, actor_label, reason)
-		VALUES ($1, $2, 1, true, 'token:ci', 'deploying')`, svc, proj)
+		INSERT INTO service_gate_overrides (service_id, project_id, policy_revision, policy_source, policy_owner_id,
+			via_token, actor_label, reason)
+		VALUES ($1, $2, 1, 'service', $1, true, 'token:ci', 'deploying')`, svc, proj)
 	if code, _ := pgCode(err); code != "23502" {
 		t.Errorf("an override without expires_at: want 23502 (not null), got code=%q err=%v", code, err)
 	}
 	// A manual closure by a token: user null, via_token true, label set — the D9 triple as data.
 	if _, err := st.pool.Exec(ctx, `
-		INSERT INTO service_gate_overrides (service_id, project_id, policy_revision, via_token, actor_label, reason, expires_at,
-		    revoked_at, revoked_reason, revoked_by_user_id, revoked_via_token, revoked_by_label)
-		VALUES ($1, $2, 1, true, 'token:ci', 'deploying', now() + interval '1 hour', now(), 'manual', NULL, true, 'token:release-bot')`, svc, proj); err != nil {
+		INSERT INTO service_gate_overrides (service_id, project_id, policy_revision, policy_source, policy_owner_id,
+		    via_token, actor_label, reason, expires_at, revoked_at, revoked_reason, revoked_by_user_id,
+		    revoked_via_token, revoked_by_label)
+		VALUES ($1, $2, 1, 'service', $1, true, 'token:ci', 'deploying', now() + interval '1 hour', now(), 'manual', NULL, true, 'token:release-bot')`, svc, proj); err != nil {
 		t.Errorf("a manual token closure with the complete triple was refused: %v", err)
 	}
 }

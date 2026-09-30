@@ -45,13 +45,15 @@ func gateInsertRow(t *testing.T, st *Store, ctx context.Context, f gateFixture, 
 	}
 	var policy *domain.GatePolicy
 	if state != domain.GateStateNotConfigured {
+		source := domain.GatePolicySourceService
+		dec.PolicySource, dec.PolicyOwnerID = &source, &sid
 		act := domain.GateActionAllow
 		if state == domain.GateStateBlock {
 			act = domain.GateActionBlock
 		}
 		rev := int64(1)
 		dec.Action, dec.PolicyRevision = &act, &rev
-		p := domain.GatePolicy{Window: gateWindow, SchemaVersion: 1, Revision: 1,
+		p := domain.GatePolicy{Window: gateWindow, WindowMode: domain.GateWindowModeOne, SchemaVersion: 1, Revision: 1,
 			Clauses:               map[domain.GateClause]domain.ClauseAssignment{domain.ClauseBudgetExhausted: domain.ClauseAssignBlock},
 			BudgetConsumedPercent: 90, MaxSealLagSeconds: 900, UnknownBehavior: domain.GateUnknownWarn}
 		policy = &p
@@ -649,12 +651,13 @@ func gateBulkRows(t *testing.T, st *Store, ctx context.Context, projectID string
 	if _, err := st.pool.Exec(ctx, `
 		INSERT INTO service_gate_decisions
 		    (id, project_id, service_id, service_slug, service_name, state, action, reasons, evidence,
-		     policy_revision, window_name, policy_snapshot, evaluated_at)
+		     policy_revision, policy_source, policy_owner_id, window_name, window_mode, evaluated_windows,
+		     policy_snapshot, evaluated_at)
 		SELECT (lpad(to_hex(floor(extract(epoch FROM gs) * 1000)::bigint), 12, '0')
 		        || '7' || substr(h, 1, 3)
 		        || substr('89ab', 1 + (('x' || substr(h, 4, 1))::bit(4)::int % 4), 1)
 		        || substr(h, 5, 3) || substr(h, 8, 12))::uuid,
-		       $1, $2, 'bulk', 'Bulk', 'ALLOW', 'ALLOW', '[]', '{}', 1, '24h', '{"revision":1}', gs
+		       $1, $2, 'bulk', 'Bulk', 'ALLOW', 'ALLOW', '[]', '{}', 1, 'service', $2, '24h', 'one', '[]', '{"revision":1}', gs
 		  FROM (SELECT gs, md5(random()::text || gs::text) AS h
 		          FROM generate_series($3::timestamptz, $3::timestamptz + ($4 - 1) * interval '20 milliseconds', interval '20 milliseconds') gs) x`,
 		projectID, serviceID, base, n); err != nil {

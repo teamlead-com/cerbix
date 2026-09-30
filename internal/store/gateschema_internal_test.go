@@ -67,18 +67,25 @@ func pgCode(err error) (string, string) {
 // insertDecision writes a minimal, valid decision row; the caller varies one thing.
 func insertDecision(st *Store, ctx context.Context, id, projectID string, serviceID *string, state string, action *string, at time.Time, evidence string) error {
 	var policyRev *int64
-	var window, snapshot *string
+	var policySource, policyOwner *string
+	var window, windowMode, snapshot *string
+	var evaluatedWindows any
 	if state != "NOT_CONFIGURED" {
 		rev := int64(1)
-		w, s := "30d", `{"clauses":{}}`
-		policyRev, window, snapshot = &rev, &w, &s
+		source := "service"
+		w, mode, s := "30d", "one", `{"clauses":{}}`
+		policyRev, policySource, window, windowMode, snapshot = &rev, &source, &w, &mode, &s
+		policyOwner = serviceID
+		evaluatedWindows = `[]`
 	}
 	_, err := st.pool.Exec(ctx, `
 		INSERT INTO service_gate_decisions
 		    (id, project_id, service_id, service_slug, service_name, state, action, reasons, evidence,
-		     policy_revision, window_name, policy_snapshot, evaluated_at)
-		VALUES ($1, $2, $3, 'checkout', 'Checkout', $4, $5, '[]', $6, $7, $8, $9, $10)`,
-		id, projectID, serviceID, state, action, evidence, policyRev, window, snapshot, at)
+		     policy_revision, policy_source, policy_owner_id, window_name, window_mode, evaluated_windows,
+		     policy_snapshot, evaluated_at)
+		VALUES ($1, $2, $3, 'checkout', 'Checkout', $4, $5, '[]', $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		id, projectID, serviceID, state, action, evidence, policyRev, policySource, policyOwner,
+		window, windowMode, evaluatedWindows, snapshot, at)
 	return err
 }
 
@@ -292,21 +299,21 @@ func TestGateDecisionPresenceAndPayloadChecks(t *testing.T) {
 	if err := insertDecision(st, ctx, gateUUIDv7(t, gateMs(at)), proj, &svc, "ALLOW", &pass, at, `{}`); err == nil {
 		t.Fatal("action PASS accepted")
 	}
-	// A synthetic 5 KiB evidence fails at the CHECK; 4 KiB exactly passes.
-	big := `{"pad":"` + strings.Repeat("x", 5*1024) + `"}`
+	// A synthetic 17 KiB evidence fails at the CHECK; 16 KiB exactly passes.
+	big := `{"pad":"` + strings.Repeat("x", 17*1024) + `"}`
 	err = insertDecision(st, ctx, gateUUIDv7(t, gateMs(at)), proj, &svc, "ALLOW", &allow, at, big)
 	if code, name := pgCode(err); code != "23514" || !strings.Contains(name, "payload") {
-		t.Fatalf("5 KiB evidence accepted or refused otherwise: code=%s constraint=%s err=%v", code, name, err)
+		t.Fatalf("17 KiB evidence accepted or refused otherwise: code=%s constraint=%s err=%v", code, name, err)
 	}
-	exact := `{"pad":"` + strings.Repeat("x", 4096-len(`{"pad": ""}`)) + `"}`
+	exact := `{"pad":"` + strings.Repeat("x", 16384-len(`{"pad": ""}`)) + `"}`
 	if err := insertDecision(st, ctx, gateUUIDv7(t, gateMs(at)), proj, &svc, "ALLOW", &allow, at, exact); err != nil {
 		t.Fatalf("evidence at exactly the bound refused: %v", err)
 	}
 	// reasons must be an array, evidence an object.
 	_, err = st.pool.Exec(ctx, `
 		INSERT INTO service_gate_decisions (id, project_id, service_id, service_slug, service_name, state, action, reasons, evidence,
-		     policy_revision, window_name, policy_snapshot, evaluated_at)
-		VALUES ($1, $2, $3, 's', 'n', 'ALLOW', 'ALLOW', '{}', '{}', 1, '30d', '{}', $4)`,
+		     policy_revision, policy_source, policy_owner_id, window_name, window_mode, evaluated_windows, policy_snapshot, evaluated_at)
+		VALUES ($1, $2, $3, 's', 'n', 'ALLOW', 'ALLOW', '{}', '{}', 1, 'service', $3, '30d', 'one', '[]', '{}', $4)`,
 		gateUUIDv7(t, gateMs(at)), proj, svc, at)
 	if code, name := pgCode(err); code != "23514" || !strings.Contains(name, "reasons") {
 		t.Fatalf("an object in reasons accepted: %v", err)
@@ -454,9 +461,10 @@ func TestGateOverrideChecksAndHistoryIndex(t *testing.T) {
 	insert := func(r row) error {
 		_, err := st.pool.Exec(ctx, `
 			INSERT INTO service_gate_overrides
-			    (service_id, project_id, policy_revision, actor_user_id, via_token, actor_label, reason,
-			     expires_at, revoked_at, revoked_reason, revoked_by_user_id, revoked_via_token, revoked_by_label)
-			VALUES ($1, $2, 1, NULL, true, 'token:ci', $3, now() + interval '1 hour',
+			    (service_id, project_id, policy_revision, policy_source, policy_owner_id, actor_user_id,
+			     via_token, actor_label, reason, expires_at, revoked_at, revoked_reason, revoked_by_user_id,
+			     revoked_via_token, revoked_by_label)
+			VALUES ($1, $2, 1, 'service', $1, NULL, true, 'token:ci', $3, now() + interval '1 hour',
 			        CASE WHEN $4::text IS NULL THEN NULL ELSE now() END, $4, $5::uuid, $6, $7)`,
 			svc, proj, r.reason, r.revokedReason, r.byUser, r.viaToken, r.byLabel)
 		return err
@@ -492,8 +500,9 @@ func TestGateOverrideChecksAndHistoryIndex(t *testing.T) {
 	}
 	// revoked_at without a reason, and a reason without revoked_at: the lifecycle pair.
 	_, err := st.pool.Exec(ctx, `
-		INSERT INTO service_gate_overrides (service_id, project_id, policy_revision, via_token, actor_label, reason, expires_at, revoked_at)
-		VALUES ($1, $2, 1, true, 'token:ci', 'x', now() + interval '1 hour', now())`, svc, proj)
+		INSERT INTO service_gate_overrides (service_id, project_id, policy_revision, policy_source, policy_owner_id,
+			via_token, actor_label, reason, expires_at, revoked_at)
+		VALUES ($1, $2, 1, 'service', $1, true, 'token:ci', 'x', now() + interval '1 hour', now())`, svc, proj)
 	if code, name := pgCode(err); code != "23514" || !strings.Contains(name, "close_chk") {
 		t.Fatalf("revoked_at without a reason accepted: %v", err)
 	}

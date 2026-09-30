@@ -415,8 +415,8 @@ func TestGateMaintAttachCompletesWhileADecisionInsertHoldsItsRowLock(t *testing.
 	allow := "ALLOW"
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO service_gate_decisions (id, project_id, service_id, service_slug, service_name, state, action, reasons, evidence,
-		     policy_revision, window_name, policy_snapshot, evaluated_at)
-		VALUES ($1, $2, $3, 'checkout', 'Checkout', 'ALLOW', $4, '[]', '{}', 1, '30d', '{}', $5)`,
+		     policy_revision, policy_source, policy_owner_id, window_name, window_mode, evaluated_windows, policy_snapshot, evaluated_at)
+		VALUES ($1, $2, $3, 'checkout', 'Checkout', 'ALLOW', $4, '[]', '{}', 1, 'service', $3, '30d', 'one', '[]', '{}', $5)`,
 		gateUUIDv7(t, gateMs(at)), proj, svc, allow, at); err != nil {
 		t.Fatalf("open insert: %v", err)
 	}

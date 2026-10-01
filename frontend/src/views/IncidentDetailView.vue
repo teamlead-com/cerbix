@@ -48,6 +48,7 @@ const id = computed(() => route.params.id as string);
 let loadTicket = 0;
 
 const loading = ref(true);
+const loadError = ref("");
 const incident = ref<Incident | null>(null);
 const canWrite = computed(() => !!incident.value && session.canProjectWrite(ws.orgId, incident.value.project_id ?? ""));
 const updates = ref<IncidentUpdate[]>([]);
@@ -84,18 +85,44 @@ const precededError = ref("");
 const precededStatus = ref<number | null>(null);
 const openedAt = computed(() => incident.value?.started_at || "");
 
-async function loadPreceded(ticket: number) {
+function workspaceGeneration() {
+  return ws.transition?.generation ?? 0;
+}
+
+function isCurrentContext(ticket: number, generation: number, projectID: string) {
+  return (
+    ticket === loadTicket &&
+    workspaceGeneration() === generation &&
+    !ws.transitionPending &&
+    (!projectID || ws.projectId === projectID)
+  );
+}
+
+function clearLoadedData() {
+  incident.value = null;
+  updates.value = [];
+  postmortem.value = null;
+  subjectName.value = "";
+  preceded.value = [];
+  precededLoading.value = false;
+  precededError.value = "";
+  precededStatus.value = null;
+  editingPm.value = false;
+}
+
+async function loadPreceded(ticket: number, generation: number, projectID: string) {
   const inc = incident.value;
   preceded.value = [];
   precededError.value = "";
   precededStatus.value = null;
-  if (!inc?.service_id || !inc.project_id) return;
+  if (!inc?.service_id || !inc.project_id || !isCurrentContext(ticket, generation, projectID)) return;
   precededLoading.value = true;
+  const incidentID = id.value;
   try {
     const res = await api.GET("/api/v1/projects/{projectID}/incidents/{incidentID}/changes", {
-      params: { path: { projectID: inc.project_id, incidentID: id.value } },
+      params: { path: { projectID: inc.project_id, incidentID } },
     });
-    if (ticket !== loadTicket) return;
+    if (!isCurrentContext(ticket, generation, projectID)) return;
     if (res.error || !res.data) {
       const f = failureOf(res);
       precededError.value = describeChangeFailure(f, {
@@ -107,11 +134,11 @@ async function loadPreceded(ticket: number) {
     }
     preceded.value = res.data.items ?? [];
   } catch (e) {
-    if (ticket !== loadTicket) return;
+    if (!isCurrentContext(ticket, generation, projectID)) return;
     precededError.value = transportFailure(e);
     precededStatus.value = 0;
   } finally {
-    if (ticket === loadTicket) precededLoading.value = false;
+    if (isCurrentContext(ticket, generation, projectID)) precededLoading.value = false;
   }
 }
 
@@ -129,60 +156,104 @@ function compareRoute(c: IncidentChange) {
 }
 
 async function acknowledge() {
-  if (!incident.value) return;
+  if (!incident.value || ws.transitionPending) return;
+  const ticket = loadTicket;
+  const generation = workspaceGeneration();
+  const projectID = incident.value.project_id ?? "";
+  if (!isCurrentContext(ticket, generation, projectID)) return;
   posting.value = true;
-  const res = await api.POST("/api/v1/incidents/{incidentID}/acknowledge", {
-    params: { path: { incidentID: id.value } },
-  });
-  // The acknowledge response is the BASE incident — it carries no impacts and no
-  // impacts_unavailable ([298] P1-1). Assigning it wholesale would silently erase the
-  // enrichment the detail was loaded with, so merge the base fields into what we have
-  // and keep the impact state this endpoint knows nothing about.
-  if (!res.error && res.data && incident.value) {
-    incident.value = {
-      ...res.data,
-      impacts: incident.value.impacts,
-      impacts_unavailable: incident.value.impacts_unavailable,
-    } as Incident;
+  try {
+    const res = await api.POST("/api/v1/incidents/{incidentID}/acknowledge", {
+      params: { path: { incidentID: id.value } },
+    });
+    if (!isCurrentContext(ticket, generation, projectID)) return;
+    // The acknowledge response is the BASE incident — it carries no impacts and no
+    // impacts_unavailable ([298] P1-1). Assigning it wholesale would silently erase the
+    // enrichment the detail was loaded with, so merge the base fields into what we have
+    // and keep the impact state this endpoint knows nothing about.
+    if (!res.error && res.data && incident.value) {
+      incident.value = {
+        ...res.data,
+        impacts: incident.value.impacts,
+        impacts_unavailable: incident.value.impacts_unavailable,
+      } as Incident;
+    }
+  } finally {
+    posting.value = false;
   }
-  posting.value = false;
 }
 
 async function load() {
   const ticket = ++loadTicket;
   const incidentID = id.value;
   loading.value = true;
-  const [inc, ups, pm] = await Promise.all([
-    api.GET("/api/v1/incidents/{incidentID}", { params: { path: { incidentID } } }),
-    api.GET("/api/v1/incidents/{incidentID}/updates", { params: { path: { incidentID } } }),
-    api.GET("/api/v1/incidents/{incidentID}/postmortem", { params: { path: { incidentID } } }),
-  ]);
-  if (ticket !== loadTicket) return;
-  incident.value = inc.data ?? null;
-  updates.value = ups.data ?? [];
-  postmortem.value = pm.error ? null : (pm.data ?? null);
-  loading.value = false;
-  loadSubjectName().catch(() => {});
-  loadPreceded(ticket).catch(() => {});
+  loadError.value = "";
+  clearLoadedData();
+
+  try {
+    await ws.init();
+    if (ticket !== loadTicket || ws.transitionPending) {
+      if (ticket === loadTicket) loading.value = false;
+      return;
+    }
+    const generation = workspaceGeneration();
+    const projectID = ws.projectId;
+    if (!projectID) {
+      loading.value = false;
+      return;
+    }
+
+    const [inc, ups, pm] = await Promise.all([
+      api.GET("/api/v1/incidents/{incidentID}", { params: { path: { incidentID } } }),
+      api.GET("/api/v1/incidents/{incidentID}/updates", { params: { path: { incidentID } } }),
+      api.GET("/api/v1/incidents/{incidentID}/postmortem", { params: { path: { incidentID } } }),
+    ]);
+    if (!isCurrentContext(ticket, generation, projectID)) return;
+    if (inc.error || !inc.data) {
+      clearLoadedData();
+      loadError.value = (inc.error as { error?: string } | undefined)?.error || "Could not load the incident.";
+      loading.value = false;
+      return;
+    }
+    if (inc.data.project_id !== projectID) {
+      clearLoadedData();
+      loadError.value = "This incident does not belong to the selected project, or you cannot see it.";
+      loading.value = false;
+      return;
+    }
+    incident.value = inc.data;
+    updates.value = ups.data ?? [];
+    postmortem.value = pm.error ? null : (pm.data ?? null);
+    subjectName.value = "";
+    loading.value = false;
+    loadSubjectName(ticket, generation, projectID).catch(() => {});
+    loadPreceded(ticket, generation, projectID).catch(() => {});
+  } catch {
+    if (ticket !== loadTicket) return;
+    clearLoadedData();
+    loadError.value = "Could not load the incident.";
+    loading.value = false;
+  }
 }
 
 // Best-effort by design: without the name the chip still states the KIND, and an incident whose
 // subject was DELETED must keep rendering — its timeline is a record of something that happened,
 // and the anchor being gone does not unhappen it.
-async function loadSubjectName() {
+async function loadSubjectName(ticket: number, generation: number, projectID: string) {
   const inc = incident.value;
-  const projectID = inc?.project_id;
-  if (!inc || !projectID) return;
+  if (!inc || !projectID || !isCurrentContext(ticket, generation, projectID)) return;
   if (inc.service_id) {
     const res = await api.GET("/api/v1/projects/{projectID}/services/{serviceID}", {
       params: { path: { projectID, serviceID: inc.service_id } },
     });
-    subjectName.value = res.data?.service?.slug || res.data?.service?.name || "";
+    if (isCurrentContext(ticket, generation, projectID)) {
+      subjectName.value = res.data?.service?.slug || res.data?.service?.name || "";
+    }
   } else if (inc.monitor_id) {
     const res = await api.GET("/api/v1/monitors/{monitorID}", {
       params: { path: { monitorID: inc.monitor_id } },
     });
-    subjectName.value = res.data?.name || "";
+    if (isCurrentContext(ticket, generation, projectID)) subjectName.value = res.data?.name || "";
   }
 }
 
@@ -196,6 +267,11 @@ const nextStatus = computed(() => composer.status || incident.value?.status || "
 const willChangeStatus = computed(() => !!composer.status && composer.status !== incident.value?.status);
 
 async function addUpdate(forceResolve = false) {
+  if (!incident.value || ws.transitionPending) return;
+  const ticket = loadTicket;
+  const generation = workspaceGeneration();
+  const projectID = incident.value.project_id ?? "";
+  if (!isCurrentContext(ticket, generation, projectID)) return;
   posting.value = true;
   updateError.value = "";
   // A plain comment sends NO status. Echoing the status this screen last loaded is how a comment
@@ -209,6 +285,7 @@ async function addUpdate(forceResolve = false) {
       params: { path: { incidentID: id.value } },
       body: { ...(status ? { status: status as IncidentUpdate["status"] } : {}), body },
     });
+    if (!isCurrentContext(ticket, generation, projectID)) return;
     if (res.error) {
       updateError.value = (res.error as { error?: string })?.error || "Could not post the update.";
       return;
@@ -241,7 +318,11 @@ function cancelEditPm() {
 }
 
 async function publishPostmortem() {
-  if (!pmHasContent.value) return;
+  if (!pmHasContent.value || !incident.value || ws.transitionPending) return;
+  const ticket = loadTicket;
+  const generation = workspaceGeneration();
+  const projectID = incident.value.project_id ?? "";
+  if (!isCurrentContext(ticket, generation, projectID)) return;
   pmPosting.value = true;
   pmError.value = "";
   try {
@@ -249,6 +330,7 @@ async function publishPostmortem() {
       params: { path: { incidentID: id.value } },
       body: { body: serializePostmortem(pm) },
     });
+    if (!isCurrentContext(ticket, generation, projectID)) return;
     if (res.error || !res.data) {
       pmError.value = (res.error as { error?: string })?.error || "Could not publish the postmortem.";
       return;
@@ -261,16 +343,18 @@ async function publishPostmortem() {
 }
 
 onMounted(() => {
-  ws.init();
-  load();
+  void load();
 });
 
-// The route identity and the workspace, the same pair ServiceDetail watches.
-watch(() => [id.value, ws.projectId], load);
+// The route identity and the workspace, including transition generation and pending/error state.
+watch(
+  () => [id.value, ws.projectId, ws.transitionPending, ws.transitionError, workspaceGeneration()],
+  () => void load(),
+);
 </script>
 
 <template>
-  <AppShell active="incidents" :crumbs="['incidents', incident?.title || '…']">
+  <AppShell active="incidents" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Incidents', to: { name: 'incidents' } }, { label: incident?.title || '…' }]">
     <template #actions>
       <button
         v-if="incident && !isResolved && !isAcked && canWrite"
@@ -294,6 +378,15 @@ watch(() => [id.value, ws.projectId], load);
     </template>
 
     <div class="mx-auto max-w-[900px] px-[22px] pb-16 pt-6">
+      <div
+        v-if="loadError"
+        role="alert"
+        data-testid="incident-load-error"
+        class="mb-5 rounded border border-down/40 bg-down-weak px-4 py-3 text-[13px] text-down"
+      >
+        {{ loadError }}
+      </div>
+
       <div v-if="incident" class="mb-5">
         <div class="flex flex-wrap items-center gap-[10px]">
           <h1 class="text-[22px] font-semibold tracking-tight">{{ incident.title }}</h1>
@@ -414,7 +507,7 @@ watch(() => [id.value, ws.projectId], load);
       </section>
 
       <!-- timeline -->
-      <section class="mb-5 rounded border border-border bg-surface shadow-card">
+      <section v-if="incident" class="mb-5 rounded border border-border bg-surface shadow-card">
         <div class="border-b border-border px-4 py-[13px] text-[13px] font-semibold">Timeline</div>
         <ol class="flex flex-col">
           <!-- A system-authored note (⚡ Context:, ⏸ Suppressed:, 🕸 Impact:, 🚀 Changes:) is detected by
@@ -468,7 +561,7 @@ watch(() => [id.value, ws.projectId], load);
       </section>
 
       <!-- postmortem -->
-      <section class="rounded border border-border bg-surface p-4 shadow-card">
+      <section v-if="incident" class="rounded border border-border bg-surface p-4 shadow-card">
         <div class="mb-3 flex items-center gap-[10px]">
           <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Postmortem</span>
           <button

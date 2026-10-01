@@ -34,9 +34,15 @@ vi.mock("@/components/AppShell.vue", () => ({
 vi.mock("@/stores/session", () => ({
   useSession: () => ({ canProjectWrite: () => true, canOrgWrite: () => true }),
 }));
-vi.mock("@/stores/workspace", () => ({
-  useWorkspace: () => ({ init: () => Promise.resolve(), orgId: "o1", projectId: "p1", projects: [], orgs: [] }),
+const workspace = vi.hoisted(() => ({
+  init: vi.fn(() => Promise.resolve()),
+  orgId: "o1",
+  projectId: "p1",
+  projects: [],
+  orgs: [],
+  transitionPending: false,
 }));
+vi.mock("@/stores/workspace", () => ({ useWorkspace: () => workspace }));
 vi.mock("@/stores/live", () => ({
   useLive: () => ({ connect: () => {}, statuses: {} as Record<string, string> }),
 }));
@@ -96,6 +102,35 @@ describe("a detail view follows the id in the route", () => {
 
     expect(w.text()).toContain("monitor mon-b");
     expect(w.text()).not.toContain("monitor mon-a");
+  });
+
+  it("clears a monitor detail while the workspace organization transition is pending", async () => {
+    route.current = reactive({ params: { id: "mon-a" } });
+    workspace.transitionPending = true;
+    workspace.projectId = "";
+    apiMock.GET.mockReset();
+    apiMock.GET.mockImplementation((path: string) => {
+      if (path === "/api/v1/monitors/{monitorID}") {
+        return Promise.resolve({
+          data: { id: "mon-a", project_id: "p1", name: "monitor mon-a", type: "http", target: "https://x", status: "up", enabled: true },
+        });
+      }
+      if (path.includes("/heartbeats")) return Promise.resolve({ data: [] });
+      if (path.includes("/sla")) return Promise.resolve({ data: { windows: [] } });
+      if (path.includes("/availability")) return Promise.resolve({ data: [] });
+      if (path.includes("/incidents")) return Promise.resolve({ data: [] });
+      if (path.includes("/projects/{projectID}/monitors")) return Promise.resolve({ data: [] });
+      return Promise.resolve({ data: [] });
+    });
+
+    const w = mount(MonitorDetailView, {
+      global: { stubs: { RouterLink: { props: ["to"], template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    expect(w.text()).not.toContain("monitor mon-a");
+    workspace.transitionPending = false;
+    workspace.projectId = "p1";
   });
 
   it("loads the incident the URL names after an A → B navigation", async () => {

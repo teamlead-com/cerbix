@@ -8576,3 +8576,30 @@ iter-0192 as the remediation owner while retaining iter-0191 as the original clo
 backend, OpenAPI, persistence, configuration, cache, metric, alert, incident lifecycle, component-row,
 SLA/SLO or timestamp contract changes. Public and authenticated preview continue to consume one
 frontend presentation helper.
+
+## D-0264 — cross-brand identity implementation uses Sealed C without an SPA redesign (2026-10-01)
+
+**Context.** The approved cross-brand identity contract replaces the maintained shield/check fallback
+with Sealed C across runtime and static surfaces, while preserving instance branding, the product's
+Operational Proof language, and the existing desktop composition. Tasks 1–8 implemented the contract's
+runtime, asset, shell, transition, overlay, search, Dashboard-state and contrast seams in the worktree.
+The implementation evidence is recorded in the open iter-0193 report; owner review has not yet closed it.
+
+**Decision.** The implementation adopts Sealed C as the default mark and keeps custom-logo priority:
+a configured `logo_url` continues to render instead of the fallback geometry. A valid custom accent
+uses contrast-selected custom-accent ink through one pure WCAG helper and the branding store's clear
+path removes all four inline brand properties. Operational colors remain independent from the brand
+accent. The Vue glyph, light/dark SVGs, favicon and raster logo retain static geometry parity with the
+canonical two paths and stroke contract. The responsive drawer, overlays, workspace fencing, SearchBox,
+Dashboard states, breadcrumbs, theme state and announcement policy improve access and truthful
+communication without redesigning the SPA, changing desktop geometry, adding routes, or changing
+reliability semantics. This record documents the implementation boundary and available evidence; it
+does not claim owner approval or closure.
+
+**Consequences.** The embedded SPA snapshot and existing public/authenticated surfaces carry the
+shared identity and shell behavior, while no API, OpenAPI, migration, Go domain, scheduler, worker,
+agent, storage, production setting, DNS record, deployment, restart or production data path changes.
+The current static/component evidence includes keyboard-oriented focus and ARIA assertions, deterministic
+responsive harness checks at 320/375/768/900, and the reviewed contrast matrix. No live disposable-stack
+E2E or 16/24/32/128px visual review was run; those remain explicit gaps in iter-0193. The iteration
+remains `OPEN — owner review pending`.

@@ -490,7 +490,7 @@ function errCompare(g: ChangeGroup): string | null {
 </script>
 
 <template>
-  <AppShell active="services" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'Services', name || '…', 'Timeline']">
+  <AppShell active="services" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Services', to: { name: 'services' } }, { label: name || '…', to: { name: 'service', params: { id: serviceId } } }, { label: 'Timeline' }]">
     <div class="mx-auto max-w-[1180px] px-[22px] pb-16 pt-[26px]" data-testid="service-changes-view">
       <RouterLink :to="{ name: 'service', params: { id: serviceId } }" class="text-[12.5px] text-ink-3 hover:text-accent" data-testid="changes-back">← back to the service</RouterLink>
 

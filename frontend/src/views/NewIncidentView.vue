@@ -29,8 +29,6 @@ const error = ref("");
 const session = useSession();
 const writeAllowed = computed(() => !!form.projectId && session.canProjectWrite(ws.orgId, form.projectId));
 const canSubmit = computed(() => writeAllowed.value && !!form.title.trim() && !submitting.value);
-const projectName = computed(() => ws.projects.find((p) => p.id === form.projectId)?.name || "…");
-
 // The affected monitor list follows the chosen project.
 async function loadMonitors() {
   form.monitorId = "";
@@ -72,7 +70,7 @@ watch(() => form.projectId, loadMonitors);
 </script>
 
 <template>
-  <AppShell active="incidents" :crumbs="[ws.orgName || 'cerbix', projectName, 'New incident']">
+  <AppShell active="incidents" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: 'New incident' }]">
     <div class="mx-auto max-w-[760px] px-[22px] pb-16 pt-[26px]">
       <div class="mb-[22px]">
         <h1 class="text-[21px] font-semibold tracking-tight">Open an incident</h1>

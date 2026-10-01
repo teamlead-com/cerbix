@@ -12,13 +12,25 @@ const routeMock = vi.hoisted(() => ({
   params: { slug: "public-status" },
   query: {} as Record<string, string>,
 }));
+const brandingMock = vi.hoisted(() => ({
+  logoUrl: "",
+  footerText: "",
+  supportUrl: "",
+}));
+const themeMock = vi.hoisted(() => ({
+  theme: { value: "light" as "light" | "dark" },
+  toggle: vi.fn(),
+}));
 vi.mock("@/api/client", () => ({ api: apiMock }));
 vi.mock("vue-router", () => ({ useRoute: () => routeMock }));
-vi.mock("@/composables/useTheme", () => ({
-  useTheme: () => ({ toggle: vi.fn() }),
-}));
+vi.mock("@/composables/useTheme", async () => {
+  const { ref } = await import("vue");
+  const theme = ref<"light" | "dark">("light");
+  themeMock.theme = theme;
+  return { useTheme: () => ({ theme, toggle: themeMock.toggle }) };
+});
 vi.mock("@/stores/branding", () => ({
-  useBranding: () => ({ logoUrl: "", footerText: "", supportUrl: "" }),
+  useBranding: () => brandingMock,
 }));
 
 const LONG_UPDATE =
@@ -157,10 +169,81 @@ describe("PublicStatusView service-first active incidents", () => {
     apiMock.POST.mockReset();
     apiMock.DELETE.mockReset();
     routeMock.query = {};
+    brandingMock.logoUrl = "";
+    brandingMock.footerText = "";
+    brandingMock.supportUrl = "";
+    themeMock.theme.value = "light";
+    themeMock.toggle.mockReset();
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
       configurable: true,
       value: vi.fn(),
     });
+  });
+
+  it("uses BrandMark for the header and an un-tiled BrandGlyph in the footer", async () => {
+    const wrapper = await mountView();
+
+    const header = wrapper.get("header");
+    expect(header.get('[data-testid="brand-mark"]').exists()).toBe(true);
+    expect(header.get('[data-brand-glyph="sealed-c"]').exists()).toBe(true);
+
+    const poweredBy = wrapper.get('[data-testid="powered-by"]');
+    expect(poweredBy.get('[data-brand-glyph="sealed-c"]').exists()).toBe(true);
+    expect(poweredBy.find(".bg-accent").exists()).toBe(false);
+    expect(poweredBy.text()).toContain("Powered by");
+    expect(poweredBy.text()).toContain("cerbix");
+  });
+
+  it("keeps a configured custom image in the header without a fallback glyph", async () => {
+    brandingMock.logoUrl = "/custom.svg";
+
+    const wrapper = await mountView();
+    const header = wrapper.get("header");
+
+    expect(header.get('[data-testid="brand-mark"] img').attributes("src")).toBe(
+      "/custom.svg",
+    );
+    expect(header.find('[data-brand-glyph="sealed-c"]').exists()).toBe(false);
+  });
+
+  it("renders configured footer text and support link alongside the shared footer mark", async () => {
+    brandingMock.footerText = "Need help? Contact the reliability team.";
+    brandingMock.supportUrl = "https://support.example.invalid/cerbix";
+
+    const wrapper = await mountView();
+    const footer = wrapper.get("[data-testid='powered-by']").element.parentElement!;
+
+    expect(footer.textContent).toContain("Need help? Contact the reliability team.");
+    const support = wrapper.findAll("a").find((link) => link.text() === "Support");
+    expect(support).toBeDefined();
+    expect(support!.attributes("href")).toBe("https://support.example.invalid/cerbix");
+    expect(support!.attributes("target")).toBe("_blank");
+    expect(support!.attributes("rel")).toBe("noopener");
+  });
+
+  it("communicates the next theme state on the public status control", async () => {
+    const light = await mountView();
+    const lightControl = light.get("header button[aria-label]");
+    expect(lightControl.attributes("aria-label")).toBe("Switch to dark theme");
+    expect(lightControl.attributes("aria-pressed")).toBe("false");
+    light.unmount();
+    document.body.innerHTML = "";
+
+    themeMock.theme.value = "dark";
+    const dark = await mountView();
+    const darkControl = dark.get("header button[aria-label]");
+    expect(darkControl.attributes("aria-label")).toBe("Switch to light theme");
+    expect(darkControl.attributes("aria-pressed")).toBe("true");
+  });
+
+  it("does not render the legacy shield/check paths", async () => {
+    const wrapper = await mountView();
+    const markup = wrapper.html();
+
+    const legacyShieldPath = ["M12 3l7 3", "v5"].join("");
+    const legacyCheckPath = ["M8.", "5 12l2", " 2", "4.5-4.5"].join("");
+    expect(markup).not.toContain(legacyShieldPath);
+    expect(markup).not.toContain(legacyCheckPath);
   });
 
   afterEach(() => {

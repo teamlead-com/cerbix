@@ -79,7 +79,7 @@ watch(() => ws.projectId, load);
 </script>
 
 <template>
-  <AppShell active="services" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'Services']">
+  <AppShell active="services" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Services' }]">
     <template #actions>
       <button
         v-if="canWrite"

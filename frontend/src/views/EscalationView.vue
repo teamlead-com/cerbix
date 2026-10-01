@@ -280,7 +280,7 @@ const selectCls =
 </script>
 
 <template>
-  <AppShell active="escalation" :crumbs="['escalation']">
+  <AppShell active="escalation" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Escalation' }]">
     <div class="mx-auto max-w-[980px] px-[22px] pb-16 pt-6">
       <div class="mb-5">
         <h1 class="text-[22px] font-semibold tracking-tight">On-call &amp; escalation</h1>

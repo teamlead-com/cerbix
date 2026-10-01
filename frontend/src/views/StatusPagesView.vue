@@ -382,7 +382,7 @@ watch(() => ws.orgId, loadPages);
 </script>
 
 <template>
-  <AppShell active="status" :crumbs="[ws.orgName || 'cerbix', 'Status pages']">
+  <AppShell active="status" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: 'Status pages' }]">
     <template #actions>
       <button v-if="canManage" type="button" class="flex h-[34px] items-center gap-[7px] rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2" @click="showCreate = !showCreate">
         <svg viewBox="0 0 24 24" class="h-[15px] w-[15px]" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14" /></svg>

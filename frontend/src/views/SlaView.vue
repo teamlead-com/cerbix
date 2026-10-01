@@ -664,7 +664,7 @@ watch(() => ws.projectId, () => {
 </script>
 
 <template>
-  <AppShell active="sla" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'SLA & SLO']">
+  <AppShell active="sla" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'SLA & SLO' }]">
     <div class="mx-auto max-w-[1120px] px-[22px] pb-16 pt-6">
       <!-- page head -->
       <div class="mb-[18px] flex flex-wrap items-start gap-[14px]">

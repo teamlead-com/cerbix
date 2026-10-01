@@ -196,7 +196,7 @@ watch(() => ws.projectId, load);
 </script>
 
 <template>
-  <AppShell active="incidents" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'Incidents']">
+  <AppShell active="incidents" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Incidents' }]">
     <template #actions>
       <RouterLink
         v-if="session.canProjectWrite(ws.orgId, ws.projectId)"

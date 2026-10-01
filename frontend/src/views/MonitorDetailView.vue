@@ -615,12 +615,22 @@ async function load() {
   const ticket = ++loadTicket;
   const monitorID = id.value;
   loading.value = true;
+  if (ws.transitionPending) {
+    monitor.value = null;
+    windows.value = [];
+    heartbeats.value = [];
+    availability.value = [];
+    projectMonitors.value = [];
+    openIncident.value = null;
+    loading.value = false;
+    return;
+  }
   const [mon, sla, hb] = await Promise.all([
     api.GET("/api/v1/monitors/{monitorID}", { params: { path: { monitorID } } }),
     api.GET("/api/v1/monitors/{monitorID}/sla", { params: { path: { monitorID } } }),
     api.GET("/api/v1/monitors/{monitorID}/heartbeats", { params: { path: { monitorID }, query: { limit: 60 } } }),
   ]);
-  if (ticket !== loadTicket) return;
+  if (ticket !== loadTicket || ws.transitionPending) return;
   monitor.value = mon.data ?? null;
   windows.value = sla.data?.windows ?? [];
   heartbeats.value = hb.data ?? [];
@@ -628,6 +638,7 @@ async function load() {
   const pid = monitor.value?.project_id;
   if (pid) {
     await ws.init();
+    if (ticket !== loadTicket || ws.transitionPending) return;
     // FR-032 §13a. The window the panel actually drew, so the ledger answer and the points
     // describe the same span: asking for a fixed range would fetch windows for time the panel is
     // not showing, and — worse — could miss the ones it is.
@@ -810,7 +821,7 @@ onMounted(() => {
 // Reload when the ROUTE identity changes, or when the workspace does — the pattern ServiceDetail
 // already used. Either one alone leaves an entrance open: a search hit changes both, a workspace
 // switcher changes only the second.
-watch(() => [id.value, ws.projectId], load);
+watch(() => [id.value, ws.projectId, ws.transitionPending, ws.transitionError], load);
 
 // Reflect live status changes for this monitor immediately.
 watch(
@@ -822,7 +833,7 @@ watch(
 </script>
 
 <template>
-  <AppShell active="monitors" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'monitors', monitor?.name || '…']">
+  <AppShell active="monitors" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Monitors', to: { name: 'monitors' } }, { label: monitor?.name || '…' }]">
     <div class="mx-auto max-w-[1180px] px-[22px] pb-16 pt-6">
       <div v-if="onboardingReturn && monitor" class="mb-4 flex flex-wrap items-center gap-3 rounded border border-accent bg-accent-weak px-4 py-3 text-[12.5px] text-ink-2" data-testid="onboarding-return">
         <span class="flex-1">

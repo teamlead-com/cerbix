@@ -105,7 +105,7 @@ const name = computed(() => service.value?.service.name || "");
 </script>
 
 <template>
-  <AppShell active="services" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'Services', name || '…', 'Override history']">
+  <AppShell active="services" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Services', to: { name: 'services' } }, { label: name || '…', to: { name: 'service', params: { id: serviceId } } }, { label: 'Override history' }]">
     <div class="mx-auto max-w-[1180px] px-[22px] pb-16 pt-[26px]" data-testid="gate-overrides">
       <RouterLink :to="{ name: 'service', params: { id: serviceId } }" class="text-[12.5px] text-ink-3 hover:text-accent" data-testid="gate-overrides-back">← back to the service</RouterLink>
 

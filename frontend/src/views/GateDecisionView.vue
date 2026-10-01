@@ -127,7 +127,7 @@ function evaluatedWindowDetermines(item: EvaluatedWindow): boolean {
 </script>
 
 <template>
-  <AppShell active="gate-decisions" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'Gate decisions', decision ? shortId(decision.decision_id) : '…']">
+  <AppShell active="gate-decisions" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Gate decisions', to: { name: 'gate-decisions' } }, { label: decision ? shortId(decision.decision_id) : '…' }]">
     <div class="mx-auto max-w-[1180px] px-[22px] pb-16 pt-[26px]" data-testid="gate-decision">
       <RouterLink :to="{ name: 'gate-decisions' }" class="text-[12.5px] text-ink-3 hover:text-accent" data-testid="gate-decision-back">← all decisions</RouterLink>
 

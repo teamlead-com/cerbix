@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cerbix · cross-brand shell contract review</title>
+<style>
+:root {
+  --bg:#fafafb;--surface:#fff;--surface-2:#f5f5f8;--inset:#f0f0f4;
+  --border:#e9e9ef;--border-strong:#dadae4;--ink:#17171f;--ink-2:#55556a;--ink-3:#76768b;
+  --accent:#5854f2;--accent-2:#7a77ff;--accent-ink:#fff;--accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;--up:#12a05c;--up-weak:rgba(18,160,92,.12);--down:#e0393f;
+  --down-weak:rgba(224,57,63,.12);--degraded:#9b6400;--degraded-weak:rgba(185,120,0,.13);
+  --pending:#76768b;--pending-weak:rgba(118,118,139,.14);--shadow:0 1px 2px rgba(20,20,40,.04),0 4px 16px rgba(20,20,40,.04);
+  color-scheme:light;
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f;--surface:#141419;--surface-2:#1a1a20;--inset:#101015;
+  --border:#262630;--border-strong:#34343f;--ink:#f2f2f6;--ink-2:#b4b4c5;--ink-3:#8d8da0;
+  --accent:#7d79ff;--accent-2:#928fff;--accent-ink:#0b0b0f;--accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;--up:#35c67f;--up-weak:rgba(53,198,127,.15);--down:#ff5f64;
+  --down-weak:rgba(255,95,100,.15);--degraded:#e0a53a;--degraded-weak:rgba(224,165,58,.15);
+  --pending:#8d8da0;--pending-weak:rgba(141,141,160,.18);--shadow:0 1px 2px rgba(0,0,0,.4),0 6px 20px rgba(0,0,0,.3);
+  color-scheme:dark;
+}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+button,input{font:inherit;color:inherit}button{cursor:pointer}:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:4px}
+.review{position:sticky;top:0;z-index:100;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--border-strong);background:var(--surface);box-shadow:var(--shadow)}
+.review strong{margin-right:4px;font:600 12px ui-monospace,"SF Mono",Menlo,monospace}.review .group{display:flex;flex-wrap:wrap;gap:5px;padding-right:8px;border-right:1px solid var(--border)}
+.review button{height:30px;padding:0 9px;border:1px solid var(--border);border-radius:4px;background:var(--surface-2);font-size:12px}.review button[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-weak);color:var(--accent);font-weight:650}
+.review-note{margin-left:auto;color:var(--ink-2);font-size:11.5px}.stage{min-height:calc(100vh - 51px);padding:18px;overflow:auto}.viewport{width:min(100%,var(--review-width,1440px));min-height:780px;margin:0 auto;border:1px solid var(--border-strong);background:var(--bg);box-shadow:var(--shadow);overflow:hidden;transition:width .15s ease}
+.app{display:grid;grid-template-columns:240px minmax(0,1fr);min-height:780px}.sidebar{display:flex;min-width:0;flex-direction:column;gap:4px;padding:12px;border-right:1px solid var(--border);background:var(--surface)}
+.brand{display:flex;align-items:center;gap:9px;padding:6px 8px 13px}.brand-tile{display:grid;width:26px;height:26px;place-items:center;border-radius:4px;background:var(--accent);color:var(--accent-ink)}
+.glyph{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:square;stroke-linejoin:round}.wordmark{font:650 15px ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:-.02em}
+.switcher{position:relative;margin:0 0 6px}.switcher-trigger{display:flex;width:100%;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border);border-radius:4px;background:var(--surface-2);text-align:left}.avatar{display:grid;width:22px;height:22px;place-items:center;border-radius:6px;background:var(--accent);color:var(--accent-ink);font-size:11px;font-weight:700}.scope{display:flex;min-width:0;flex:1;flex-direction:column;line-height:1.2}.scope b,.scope span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.scope b{font-size:13px}.scope span{color:var(--ink-2);font-size:11px}.chevron{margin-left:auto;color:var(--ink-2)}
+.section-label{padding:12px 10px 4px;color:var(--ink-2);font-size:10.5px;font-weight:650;letter-spacing:.09em;text-transform:uppercase}.navlink{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:4px;color:var(--ink-2);font-size:13.5px;text-decoration:none}.navlink[aria-current="page"]{background:var(--accent-weak);color:var(--accent);font-weight:600}.navicon{width:16px;text-align:center}.sidebar-foot{margin-top:auto}.version{padding:6px 10px 2px;color:var(--ink-3);font:10.5px ui-monospace,"SF Mono",Menlo,monospace}
+.main{min-width:0}.announcement{display:none;align-items:center;gap:7px;padding:7px 22px;background:var(--degraded-weak);color:var(--degraded);font-size:12.5px;font-weight:600}.topbar{position:sticky;top:0;z-index:10;display:flex;height:56px;align-items:center;gap:12px;padding:0 22px;border-bottom:1px solid var(--border);background:var(--surface)}
+.menu-trigger{display:none;width:34px;height:34px;place-items:center;border:1px solid var(--border);border-radius:4px;background:var(--surface);font-size:18px}.breadcrumbs{display:flex;min-width:0;align-items:center;gap:8px;overflow:hidden;color:var(--ink-2);font-size:13.5px}.breadcrumbs a{color:var(--ink-2);text-decoration:none}.breadcrumbs [aria-current="page"]{color:var(--ink);font-weight:650}.slash{color:var(--border-strong)}.top-actions{display:flex;align-items:center;gap:8px;margin-left:auto}.search{width:240px;height:34px;border:1px solid var(--border);border-radius:4px;background:var(--surface);padding:0 10px;color:var(--ink-2);font-size:13px}.icon-button{display:grid;width:34px;height:34px;place-items:center;border:1px solid var(--border);border-radius:4px;background:var(--surface);color:var(--ink-2)}.account{border:0;border-radius:999px;background:var(--accent);color:var(--accent-ink);font-size:12px;font-weight:700}
+.content{max-width:1180px;margin:0 auto;padding:26px 22px 64px}.title{margin-bottom:22px}.title h1{margin:0;font-size:21px;letter-spacing:-.02em}.title p{margin:3px 0 0;color:var(--ink-2);font-size:13px}.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card{border:1px solid var(--border);border-radius:6px;background:var(--surface);box-shadow:var(--shadow)}.kpi{min-height:102px;padding:14px 16px}.label{color:var(--ink-2);font-size:11px;font-weight:650;letter-spacing:.07em;text-transform:uppercase}.value{margin-top:10px;font:400 26px ui-monospace,"SF Mono",Menlo,monospace}.sub{margin-top:5px;color:var(--ink-2);font-size:11.5px}.availability{margin-top:12px;padding:15px 18px 17px}.card-head{display:flex;align-items:baseline;gap:10px}.card-head .metric{margin-left:auto;color:var(--ink-2);font:12px ui-monospace,"SF Mono",Menlo,monospace}.strip{display:grid;grid-template-columns:repeat(30,1fr);gap:2px;height:38px;margin-top:11px}.strip i{border-radius:2px;background:var(--inset)}.legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:10px;color:var(--ink-2);font-size:12px}.legend span{display:inline-flex;align-items:center;gap:6px}.swatch{width:9px;height:9px;border-radius:2px;background:var(--pending)}.swatch.hatch,.strip.no-data i{border:1px dashed var(--pending);background:var(--surface-2)}
+.skeleton{position:relative;overflow:hidden;color:transparent!important;background:var(--inset);border-radius:3px;animation:pulse 1.2s ease-in-out infinite}.loading .value{width:64px;height:31px;margin-top:10px}.loading .sub{width:92px;height:13px}.loading .strip i{animation:pulse 1.2s ease-in-out infinite}.error-card{display:none;margin-top:12px;padding:18px;border-color:var(--down);background:var(--down-weak)}.error-card h2{margin:0 0 5px;font-size:15px}.error-card p{margin:0 0 12px;color:var(--ink-2);font-size:13px}.button{height:34px;padding:0 13px;border:1px solid var(--border);border-radius:4px;background:var(--surface);font-size:13px;font-weight:600}.button.primary{border-color:var(--accent);background:var(--accent);color:var(--accent-ink)}
+.popover{position:absolute;z-index:40;width:260px;padding:4px;border:1px solid var(--border-strong);border-radius:5px;background:var(--surface);box-shadow:var(--shadow)}.popover h2{margin:0;padding:9px 9px 4px;color:var(--ink-2);font-size:10px;letter-spacing:.08em;text-transform:uppercase}.popover button,.popover a{display:flex;width:100%;align-items:center;gap:8px;padding:7px 9px;border:0;border-radius:4px;background:transparent;color:var(--ink-2);font-size:13px;text-align:left;text-decoration:none}.popover button:hover,.popover a:hover{background:var(--surface-2);color:var(--ink)}.workspace-popover{top:44px;left:0}.account-wrap{position:relative}.account-popover{top:40px;right:0}.account-summary{padding:9px}.account-summary b,.account-summary span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account-summary span{margin-top:2px;color:var(--ink-2);font-size:11.5px}.divider{margin:3px 4px;border-top:1px solid var(--border)}
+.scrim{position:fixed;inset:0;z-index:50;background:rgba(10,10,20,.45)}.drawer{position:fixed;inset:0 auto 0 0;z-index:60;display:flex;width:min(286px,calc(100vw - 24px));flex-direction:column;gap:4px;padding:12px;border-right:1px solid var(--border-strong);background:var(--surface);box-shadow:var(--shadow)}.drawer-head{display:flex;align-items:center}.drawer-head .brand{flex:1;padding-bottom:10px}.close{width:34px;height:34px;border:1px solid var(--border);border-radius:4px;background:var(--surface);font-size:19px}.drawer .switcher{margin-top:2px}.drawer .navlink{font-size:14px}.drawer-note{margin-top:auto;padding:10px;color:var(--ink-2);font-size:11.5px;line-height:1.4}
+.dialog-layer{position:fixed;inset:0;z-index:70;display:grid;place-items:center;padding:20px;background:rgba(10,10,20,.45)}.dialog{width:min(460px,100%);border:1px solid var(--border-strong);border-radius:6px;background:var(--surface);box-shadow:var(--shadow)}.dialog-head{padding:18px 20px 2px}.dialog h2{margin:0;font-size:16px}.dialog p{margin:5px 0 0;color:var(--ink-2);font-size:12.5px}.dialog-body{display:grid;gap:14px;padding:14px 20px}.field{display:grid;gap:6px}.field label{color:var(--ink-2);font-size:11px;font-weight:650;letter-spacing:.07em;text-transform:uppercase}.field input{height:38px;border:1px solid var(--border);border-radius:4px;background:var(--surface-2);padding:0 11px}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px 18px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.hidden{display:none!important}
+.app.mobile{grid-template-columns:1fr}.app.mobile .sidebar{display:none}.app.mobile .menu-trigger{display:grid}.app.mobile .topbar{height:auto;min-height:56px;flex-wrap:wrap;gap:8px;padding:8px 12px}.app.mobile .breadcrumbs{order:1;min-width:0;flex:1}.app.mobile .top-actions{order:2;width:100%;margin:0}.app.mobile .search{min-width:0;flex:1;width:auto}.app.mobile .content{padding:22px 14px 48px}.app.mobile .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.app.mobile .review-desktop-only{display:none}.app.mobile .legend .range{width:100%}.app.mobile .announcement{padding-inline:14px}
+.viewport[data-width="320"] .app.mobile .kpis,.viewport[data-width="375"] .app.mobile .kpis{grid-template-columns:1fr}.viewport[data-width="320"] .breadcrumbs a:first-child,.viewport[data-width="320"] .slash:first-of-type{display:none}.viewport[data-width="320"] .theme-label{display:none}
+@keyframes pulse{50%{opacity:.45}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+</style>
+</head>
+<body>
+<div class="review" aria-label="Mock review controls">
+  <strong>Review only</strong>
+  <div class="group" aria-label="Viewport">
+    <button data-width="1440" aria-pressed="true">Desktop</button>
+    <button data-width="900" aria-pressed="false">900</button>
+    <button data-width="768" aria-pressed="false">768</button>
+    <button data-width="375" aria-pressed="false">375</button>
+    <button data-width="320" aria-pressed="false">320</button>
+  </div>
+  <div class="group" aria-label="State">
+    <button data-state="loaded" aria-pressed="true">Loaded</button>
+    <button data-state="loading" aria-pressed="false">Loading</button>
+    <button data-state="nodata" aria-pressed="false">No data</button>
+    <button data-state="error" aria-pressed="false">Read error</button>
+    <button data-state="drawer" aria-pressed="false">Drawer</button>
+    <button data-state="workspace" aria-pressed="false">Workspace menu</button>
+    <button data-state="account" aria-pressed="false">Account menu</button>
+    <button data-state="dialog" aria-pressed="false">Create dialog</button>
+  </div>
+  <button id="theme" aria-pressed="false">Dark theme</button>
+  <span class="review-note">No new route, status hue, dashboard card, or desktop geometry.</span>
+</div>
+<div class="stage">
+  <div class="viewport" id="viewport" data-width="1440">
+    <div class="app" id="app">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <div class="brand"><span class="brand-tile"><svg class="glyph" viewBox="0 0 32 32" aria-hidden="true"><path d="M21.4 9.5a8.5 8.5 0 1 0 .1 12.9"/><path d="M19.9 16h4.9"/></svg></span><span class="wordmark">cerbix</span></div>
+        <div class="switcher">
+          <button class="switcher-trigger" id="workspaceTrigger" aria-expanded="false" aria-controls="workspaceMenu"><span class="avatar">E</span><span class="scope"><b>Example Organization</b><span>API Platform</span></span><span class="chevron">⌄</span></button>
+          <div class="popover workspace-popover hidden" id="workspaceMenu" role="menu" aria-labelledby="workspaceTrigger">
+            <h2>Organization</h2><button role="menuitem">Example Organization <span style="margin-left:auto;color:var(--accent)">✓</span></button><button role="menuitem">Operations</button>
+            <div class="divider"></div><h2>Project</h2><button role="menuitem">API Platform <span style="margin-left:auto;color:var(--accent)">✓</span></button><button role="menuitem">Internal Tools</button>
+          </div>
+        </div>
+        <div class="section-label">Project</div>
+        <a class="navlink" href="#dashboard" aria-current="page"><span class="navicon">▦</span>Dashboard</a>
+        <a class="navlink" href="#services"><span class="navicon">▤</span>Services</a>
+        <a class="navlink" href="#monitors"><span class="navicon">⌁</span>Monitors</a>
+        <a class="navlink" href="#sla"><span class="navicon">⌜</span>SLA &amp; SLO</a>
+        <a class="navlink" href="#gate"><span class="navicon">▣</span>Gate decisions</a>
+        <a class="navlink" href="#escalation"><span class="navicon">⇣</span>Escalation</a>
+        <a class="navlink" href="#incidents"><span class="navicon">△</span>Incidents</a>
+        <a class="navlink" href="#status"><span class="navicon">▭</span>Status pages</a>
+        <div class="sidebar-foot"><a class="navlink" href="#settings"><span class="navicon">⚙</span>Settings</a><div class="version">cerbix v0.3.5</div></div>
+      </aside>
+      <main class="main">
+        <div class="announcement" id="announcement" role="status" aria-live="polite">Maintenance window starts at 22:00 UTC.</div>
+        <header class="topbar">
+          <button class="menu-trigger" id="drawerTrigger" aria-label="Open navigation" aria-expanded="false" aria-controls="navigationDrawer">☰</button>
+          <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="#org">Example Organization</a><span class="slash">/</span><a href="#project">API Platform</a><span class="slash">/</span><span aria-current="page">Dashboard</span></nav>
+          <div class="top-actions">
+            <input class="search" aria-label="Search" role="combobox" aria-expanded="false" aria-controls="searchResults" placeholder="Search…">
+            <button class="icon-button" id="themeInside" aria-label="Switch to dark theme"><span aria-hidden="true">◐</span><span class="sr-only theme-label">Theme</span></button>
+            <div class="account-wrap"><button class="icon-button account" id="accountTrigger" aria-label="Account menu" aria-expanded="false" aria-controls="accountMenu">EA</button>
+              <div class="popover account-popover hidden" id="accountMenu" role="menu" aria-labelledby="accountTrigger"><div class="account-summary"><b>Example Admin</b><span>admin@example.invalid</span></div><div class="divider"></div><a href="#settings" role="menuitem">Settings</a><button role="menuitem" style="color:var(--down)">Sign out</button></div>
+            </div>
+          </div>
+        </header>
+        <div class="content">
+          <div class="title"><h1>API Platform</h1><p id="dashboardSummary">2 monitors · Example Organization</p></div>
+          <section id="dashboard" aria-busy="false" aria-label="Dashboard summary">
+            <div class="kpis" id="kpis">
+              <article class="card kpi"><div class="label">Availability · 30d</div><div class="value" data-value="99.98%">99.98%</div><div class="sub" data-sub="rolling 30-day window">rolling 30-day window</div></article>
+              <article class="card kpi"><div class="label">Monitors up</div><div class="value" data-value="2 / 2">2 / 2</div><div class="sub" data-sub="all operational">all operational</div></article>
+              <article class="card kpi"><div class="label">Error budget · 30d</div><div class="value" data-value="94%">94%</div><div class="sub" data-sub="across 2 SLOs">across 2 SLOs</div></article>
+              <article class="card kpi"><div class="label">P95 latency · 30d</div><div class="value" data-value="184 ms">184 ms</div><div class="sub" data-sub="across 8,642 checks">across 8,642 checks</div></article>
+            </div>
+            <article class="card availability" id="availability"><div class="card-head"><span class="label">Project availability · 90 days</span><span class="metric" id="availabilityMetric">99.98% uptime</span></div><div class="strip" id="strip" role="img" aria-label="90-day project availability: measured data"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="legend"><span><i class="swatch" style="background:var(--up)"></i>Operational</span><span><i class="swatch" style="background:var(--degraded)"></i>Degraded</span><span><i class="swatch" style="background:var(--down)"></i>Down</span><span id="noDataLegend"><i class="swatch hatch"></i>No data / UNKNOWN</span><span class="range" style="margin-left:auto;font-family:ui-monospace,monospace">90 days ago → today</span></div></article>
+            <article class="card error-card" id="errorCard" role="alert"><h2>Dashboard data could not be loaded</h2><p>The selected project is still active. Check the connection and retry the read.</p><button class="button">Retry</button></article>
+            <div id="liveState" class="sr-only" aria-live="polite"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+</div>
+<div class="scrim hidden" id="scrim"></div>
+<aside class="drawer hidden" id="navigationDrawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
+  <div class="drawer-head"><div class="brand"><span class="brand-tile"><svg class="glyph" viewBox="0 0 32 32" aria-hidden="true"><path d="M21.4 9.5a8.5 8.5 0 1 0 .1 12.9"/><path d="M19.9 16h4.9"/></svg></span><span class="wordmark" id="drawerTitle">cerbix navigation</span></div><button class="close" id="drawerClose" aria-label="Close navigation">×</button></div>
+  <button class="switcher-trigger"><span class="avatar">E</span><span class="scope"><b>Example Organization</b><span>API Platform</span></span><span class="chevron">⌄</span></button>
+  <div class="section-label">Project</div>
+  <a class="navlink" href="#dashboard" aria-current="page"><span class="navicon">▦</span>Dashboard</a><a class="navlink" href="#services"><span class="navicon">▤</span>Services</a><a class="navlink" href="#monitors"><span class="navicon">⌁</span>Monitors</a><a class="navlink" href="#sla"><span class="navicon">⌜</span>SLA &amp; SLO</a><a class="navlink" href="#gate"><span class="navicon">▣</span>Gate decisions</a><a class="navlink" href="#escalation"><span class="navicon">⇣</span>Escalation</a><a class="navlink" href="#incidents"><span class="navicon">△</span>Incidents</a><a class="navlink" href="#status"><span class="navicon">▭</span>Status pages</a>
+  <div class="drawer-note">Modal only while open: Escape, outside activation, and successful navigation close it; focus returns to the menu button.</div>
+</aside>
+<div class="dialog-layer hidden" id="dialogLayer">
+  <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialogTitle" aria-describedby="dialogDescription"><div class="dialog-head"><h2 id="dialogTitle">New project</h2><p id="dialogDescription">A team or app inside Example Organization — holds its own monitors, channels and members.</p></div><div class="dialog-body"><div class="field"><label for="projectName">Name</label><input id="projectName" placeholder="API"></div><div class="field"><label for="projectSlug">Slug — used in URLs, lowercase</label><input id="projectSlug" placeholder="api"></div></div><div class="dialog-actions"><button class="button" id="dialogCancel">Cancel</button><button class="button primary">Create project</button></div></section>
+</div>
+<div id="searchResults" class="sr-only" role="listbox" aria-label="Search results"></div>
+<script>
+const root=document.documentElement,viewport=document.getElementById('viewport'),app=document.getElementById('app');
+const widthButtons=[...document.querySelectorAll('[data-width]')],stateButtons=[...document.querySelectorAll('[data-state]')];
+const dashboard=document.getElementById('dashboard'),summary=document.getElementById('dashboardSummary'),strip=document.getElementById('strip'),metric=document.getElementById('availabilityMetric'),errorCard=document.getElementById('errorCard'),liveState=document.getElementById('liveState');
+const scrim=document.getElementById('scrim'),drawer=document.getElementById('navigationDrawer'),drawerTrigger=document.getElementById('drawerTrigger'),drawerClose=document.getElementById('drawerClose');
+const workspaceMenu=document.getElementById('workspaceMenu'),workspaceTrigger=document.getElementById('workspaceTrigger'),accountMenu=document.getElementById('accountMenu'),accountTrigger=document.getElementById('accountTrigger');
+const dialogLayer=document.getElementById('dialogLayer'),dialogCancel=document.getElementById('dialogCancel');let lastFocus=null;
+function press(buttons,current){buttons.forEach(b=>b.setAttribute('aria-pressed',String(b===current)))}
+function setWidth(value){viewport.style.setProperty('--review-width',value==='1440'?'1440px':value+'px');viewport.dataset.width=value;app.classList.toggle('mobile',Number(value)<=900)}
+widthButtons.forEach(b=>b.addEventListener('click',()=>{press(widthButtons,b);setWidth(b.dataset.width)}));
+function closeTransient(restore=false){drawer.classList.add('hidden');scrim.classList.add('hidden');workspaceMenu.classList.add('hidden');accountMenu.classList.add('hidden');dialogLayer.classList.add('hidden');drawerTrigger.setAttribute('aria-expanded','false');workspaceTrigger.setAttribute('aria-expanded','false');accountTrigger.setAttribute('aria-expanded','false');if(restore&&lastFocus)lastFocus.focus()}
+function openLayer(kind){lastFocus=document.activeElement;closeTransient();if(kind==='drawer'){drawer.classList.remove('hidden');scrim.classList.remove('hidden');drawerTrigger.setAttribute('aria-expanded','true');drawerClose.focus()}if(kind==='workspace'){workspaceMenu.classList.remove('hidden');workspaceTrigger.setAttribute('aria-expanded','true');workspaceMenu.querySelector('[role="menuitem"]').focus()}if(kind==='account'){accountMenu.classList.remove('hidden');accountTrigger.setAttribute('aria-expanded','true');accountMenu.querySelector('[role="menuitem"]').focus()}if(kind==='dialog'){dialogLayer.classList.remove('hidden');document.getElementById('projectName').focus()}}
+function setState(state){closeTransient();dashboard.classList.toggle('loading',state==='loading');dashboard.setAttribute('aria-busy',String(state==='loading'));errorCard.style.display=state==='error'?'block':'none';document.getElementById('kpis').style.display=state==='error'?'none':'grid';document.getElementById('availability').style.display=state==='error'?'none':'block';strip.classList.toggle('no-data',state==='nodata');
+ document.querySelectorAll('.kpi').forEach(card=>{const v=card.querySelector('.value'),s=card.querySelector('.sub');v.classList.toggle('skeleton',state==='loading');s.classList.toggle('skeleton',state==='loading');if(state==='loading'){v.textContent='—';s.textContent='Loading';}else if(state==='nodata'){v.textContent='—';s.textContent=card===document.querySelectorAll('.kpi')[1]?'2 monitors · status unavailable':'No measured data';}else{v.textContent=v.dataset.value;s.textContent=s.dataset.sub}});
+ if(state==='loading'){summary.textContent='Loading dashboard…';metric.textContent='Loading…';strip.setAttribute('aria-label','90-day project availability: loading');liveState.textContent='Loading dashboard';}
+ else if(state==='nodata'){summary.textContent='2 monitors · evidence not available';metric.textContent='— · No data';strip.setAttribute('aria-label','90-day project availability: no data, UNKNOWN for all days');liveState.textContent='Dashboard loaded. No measured availability data is available.';}
+ else if(state==='error'){summary.textContent='Dashboard read failed';liveState.textContent='Dashboard data could not be loaded. Retry is available.';}
+ else{summary.textContent='2 monitors · Example Organization';metric.textContent='99.98% uptime';strip.setAttribute('aria-label','90-day project availability: measured data');liveState.textContent='Dashboard loaded';}
+ if(['drawer','workspace','account','dialog'].includes(state))openLayer(state)}
+stateButtons.forEach(b=>b.addEventListener('click',()=>{press(stateButtons,b);if(b.dataset.state==='drawer'&&Number(viewport.dataset.width)>900){const mobile=widthButtons.find(x=>x.dataset.width==='375');press(widthButtons,mobile);setWidth('375')}setState(b.dataset.state)}));
+drawerTrigger.addEventListener('click',()=>openLayer('drawer'));drawerClose.addEventListener('click',()=>closeTransient(true));scrim.addEventListener('click',()=>closeTransient(true));workspaceTrigger.addEventListener('click',()=>openLayer('workspace'));accountTrigger.addEventListener('click',()=>openLayer('account'));dialogCancel.addEventListener('click',()=>closeTransient(true));dialogLayer.addEventListener('click',e=>{if(e.target===dialogLayer)closeTransient(true)});
+drawer.querySelectorAll('a').forEach(a=>a.addEventListener('click',()=>closeTransient(true)));
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeTransient(true);const active=!drawer.classList.contains('hidden')?drawer:!dialogLayer.classList.contains('hidden')?dialogLayer:null;if(e.key==='Tab'&&active){const f=[...active.querySelectorAll('button,a,input')].filter(x=>!x.disabled);const first=f[0],last=f[f.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus()}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}}});
+function toggleTheme(){const dark=root.dataset.theme!=='dark';root.dataset.theme=dark?'dark':'light';document.getElementById('theme').setAttribute('aria-pressed',String(dark));document.getElementById('theme').textContent=dark?'Light theme':'Dark theme';document.getElementById('themeInside').setAttribute('aria-label',dark?'Switch to light theme':'Switch to dark theme')}
+document.getElementById('theme').addEventListener('click',toggleTheme);document.getElementById('themeInside').addEventListener('click',toggleTheme);setWidth('1440');setState('loaded');
+</script>
+</body>
+</html>

@@ -211,7 +211,7 @@ const KPI_SMALL = "ml-[6px] text-[12px] font-normal tracking-normal text-ink-3";
 </script>
 
 <template>
-  <AppShell active="services" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'Services', name || '…', 'before and after']">
+  <AppShell active="services" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Services', to: { name: 'services' } }, { label: name || '…', to: { name: 'service', params: { id: serviceId } } }, { label: 'before and after' }]">
     <div class="mx-auto max-w-[1180px] px-[22px] pb-16 pt-[26px]" data-testid="change-compare" :data-source="source" :data-external-id="externalId" :data-horizon="horizon">
       <RouterLink :to="{ name: 'service', params: { id: serviceId } }" class="text-[12.5px] text-ink-3 hover:text-accent" data-testid="compare-back">← back to the service</RouterLink>
 

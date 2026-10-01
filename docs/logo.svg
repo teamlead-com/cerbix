@@ -1,7 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="128" height="128" role="img" aria-label="cerbix">
-  <rect width="32" height="32" rx="7" fill="#5854f2"/>
-  <g transform="translate(6 6) scale(0.8333)" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/>
-    <path d="M8.5 12l2 2 4.5-4.5"/>
-  </g>
+<svg width="128" height="128" viewBox="0 0 32 32" fill="none"
+     xmlns="http://www.w3.org/2000/svg">
+  <rect width="32" height="32" rx="4" fill="#5854F2"/>
+  <path d="M21.4 9.5a8.5 8.5 0 1 0 .1 12.9" fill="none" stroke="#FFFFFF"
+        stroke-width="2.5" stroke-linecap="square" stroke-linejoin="round"/>
+  <path d="M19.9 16h4.9" fill="none" stroke="#FFFFFF"
+        stroke-width="2.5" stroke-linecap="square" stroke-linejoin="round"/>
 </svg>

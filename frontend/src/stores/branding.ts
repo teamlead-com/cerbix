@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { api } from "@/api/client";
+import { accentInkFor } from "@/lib/brandColor";
 import type { components } from "@/api/schema";
 
 type PublicBranding = components["schemas"]["PublicBranding"];
@@ -16,15 +17,21 @@ function hexToRgba(hex: string, alpha: number): string {
 function applyAccent(color: string) {
   const root = document.documentElement.style;
   if (!/^#[0-9a-f]{6}$/i.test(color)) {
-    root.removeProperty("--accent");
-    root.removeProperty("--accent-2");
-    root.removeProperty("--accent-weak");
+    for (const property of [
+      "--accent",
+      "--accent-2",
+      "--accent-weak",
+      "--accent-ink",
+    ]) {
+      root.removeProperty(property);
+    }
     return;
   }
   root.setProperty("--accent", color);
   root.setProperty("--accent-2", color);
   const weak = hexToRgba(color, 0.14);
   if (weak) root.setProperty("--accent-weak", weak);
+  root.setProperty("--accent-ink", accentInkFor(color));
 }
 
 export const useBranding = defineStore("branding", {
@@ -48,7 +55,7 @@ export const useBranding = defineStore("branding", {
         this.footerText = b.footer_text || "";
         this.supportUrl = b.support_url || "";
         this.announcement = b.announcement ?? { enabled: false, text: "", level: "info" };
-        if (this.accentColor) applyAccent(this.accentColor);
+        applyAccent(this.accentColor);
         document.title = this.productName;
       } catch {
         /* branding is best-effort; defaults stand */

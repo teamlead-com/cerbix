@@ -3,6 +3,8 @@ import { computed, nextTick, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
+import BrandGlyph from "@/components/BrandGlyph.vue";
+import BrandMark from "@/components/BrandMark.vue";
 import { useTheme } from "@/composables/useTheme";
 import {
   componentMeta,
@@ -21,8 +23,9 @@ type ComponentDay = components["schemas"]["ComponentDay"];
 type IncidentDetail = components["schemas"]["IncidentDetail"];
 
 const route = useRoute();
-const { toggle } = useTheme();
+const { theme, toggle } = useTheme();
 const branding = useBranding(); // loaded app-wide in App.vue (public endpoint)
+const themeLabel = computed(() => (theme.value === "dark" ? "Switch to light theme" : "Switch to dark theme"));
 const slug = route.params.slug as string;
 const token = (route.query.token as string) || "";
 const previewID = (route.query.preview as string) || "";
@@ -341,29 +344,7 @@ onMounted(async () => {
       class="sticky top-0 z-10 border-b border-border bg-surface/80 backdrop-blur"
     >
       <div class="mx-auto flex h-[60px] max-w-[820px] items-center gap-3 px-5">
-        <img
-          v-if="branding.logoUrl"
-          :src="branding.logoUrl"
-          alt=""
-          class="h-[28px] w-[28px] rounded-md object-contain"
-        />
-        <span
-          v-else
-          class="grid h-[28px] w-[28px] place-items-center rounded-md bg-accent text-accent-ink"
-        >
-          <svg
-            viewBox="0 0 24 24"
-            class="h-4 w-4"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" />
-            <path d="M8.5 12l2 2 4.5-4.5" />
-          </svg>
-        </span>
+        <BrandMark :tile="28" :glyph="16" />
         <b class="text-[15px] font-semibold tracking-tight">{{
           page?.title || "Status"
         }}</b>
@@ -371,7 +352,8 @@ onMounted(async () => {
           <button
             class="grid h-[34px] w-[34px] place-items-center rounded-sm border border-border bg-surface text-ink-2 hover:border-border-strong hover:text-ink"
             type="button"
-            aria-label="Toggle theme"
+            :aria-label="themeLabel"
+            :aria-pressed="theme === 'dark'"
             @click="toggle"
           >
             <svg
@@ -1034,21 +1016,11 @@ onMounted(async () => {
             class="mb-[6px] inline-block text-ink-2 underline decoration-border-strong underline-offset-2 hover:text-accent"
             >Support</a
           >
-          <div>
+          <div data-testid="powered-by">
             Powered by
-            <span class="inline-flex translate-y-[3px] text-accent"
-              ><svg
-                viewBox="0 0 24 24"
-                class="h-[14px] w-[14px]"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2.2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" />
-                <path d="M8.5 12l2 2 4.5-4.5" /></svg
-            ></span>
+            <span class="inline-flex translate-y-[3px] text-accent">
+              <BrandGlyph :size="14" />
+            </span>
             <b class="text-ink-2">cerbix</b>
           </div>
         </div>

@@ -296,7 +296,7 @@ const stateLabel = (s: GateState) => statePill(s).label;
 </script>
 
 <template>
-  <AppShell active="gate-decisions" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'Gate decisions']">
+  <AppShell active="gate-decisions" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Gate decisions' }]">
     <div class="mx-auto max-w-[1180px] px-[22px] pb-16 pt-[26px]" data-testid="gate-decisions">
       <div class="mb-[22px]">
         <h1 class="text-[21px] font-semibold tracking-tight">{{ ws.projectName || "…" }} · gate decisions</h1>

@@ -45,6 +45,7 @@ interface Card {
 }
 
 type DailyAvailability = components["schemas"]["DailyAvailability"];
+type DashboardRenderState = "loading" | "loaded" | "empty" | "error";
 
 const ws = useWorkspace();
 const session = useSession();
@@ -53,6 +54,7 @@ const live = useLive();
 const route = useRoute();
 const router = useRouter();
 const loading = ref(true);
+const renderState = ref<DashboardRenderState>("loading");
 const cards = ref<Card[]>([]);
 const monitors = ref<Monitor[]>([]);
 const evidence = ref<MonitorEvidence[]>([]);
@@ -132,6 +134,10 @@ function pct(n?: number) {
   return n === undefined ? "—" : `${n.toFixed(2)}%`;
 }
 
+function hasSlaEvidence(window?: WindowSLA): boolean {
+  return (window?.total ?? 0) > 0;
+}
+
 // Aggregate 90-day uptime shown in the timeline header (mean of days with data).
 const timelineUptime = computed(() => {
   const vals = timeline.value
@@ -156,6 +162,7 @@ async function loadMonitorExtras(m: Monitor): Promise<{
   card: Card;
   heartbeat: Heartbeat | null;
   heartbeatError: string;
+  sloConfigured: boolean;
 }> {
   const [slaRes, hbRes] = await Promise.all([
     api.GET("/api/v1/monitors/{monitorID}/sla", {
@@ -170,14 +177,19 @@ async function loadMonitorExtras(m: Monitor): Promise<{
   const hbs = (hbRes.data ?? []).slice().reverse();
   const segments: Seg[] = hbs.map((h) => (h.up ? "up" : "down"));
   const spark = hbs.map((h) => h.latency_ms ?? 0).filter((v) => v > 0);
-  const eb = w30?.error_budget;
+  const hasEvidence = hasSlaEvidence(w30);
+  const eb = hasEvidence ? w30?.error_budget : undefined;
   return {
     card: {
       monitor: m,
-      uptime: m.type === "push" ? "—" : pct(w30?.uptime_percent),
-      latency: w30?.avg_latency_ms
-        ? `${Math.round(w30.avg_latency_ms)} ms`
-        : "—",
+      uptime:
+        m.type === "push" || !hasEvidence
+          ? "—"
+          : pct(w30?.uptime_percent),
+      latency:
+        hasEvidence && w30?.avg_latency_ms
+          ? `${Math.round(w30.avg_latency_ms)} ms`
+          : "—",
       segments,
       spark,
       budgetLeft: eb ? Math.max(0, 100 - (eb.burned_percent ?? 0)) : null,
@@ -187,6 +199,9 @@ async function loadMonitorExtras(m: Monitor): Promise<{
     heartbeatError: hbRes.error
       ? errorMessage(hbRes.error, "Could not load recent heartbeats.")
       : "",
+    sloConfigured:
+      w30?.error_budget !== undefined ||
+      (w30?.objective !== undefined && w30.objective !== null),
   };
 }
 
@@ -226,6 +241,7 @@ async function load(forceWorkspace = false, allowAutoOpen = true) {
   const generation = ++loadGeneration;
   const current = () => generation === loadGeneration;
   loading.value = true;
+  renderState.value = "loading";
   empty.value = "";
   emptyKind.value = "";
   cards.value = [];
@@ -244,12 +260,22 @@ async function load(forceWorkspace = false, allowAutoOpen = true) {
     evidence: [],
   });
   try {
+    if (ws.transitionError && !forceWorkspace) {
+      onboardingReadError.value = ws.transitionError;
+      empty.value = ws.transitionError;
+      emptyKind.value = "error";
+      renderState.value = "error";
+      recomputeOnboarding(allowAutoOpen);
+      return;
+    }
+    if (ws.transitionPending) return;
     await ws.init(forceWorkspace);
-    if (!current()) return;
+    if (!current() || ws.transitionPending) return;
     if (!ws.orgs.length) {
       empty.value =
         "Organizations are the top-level tenant — a product or team, isolated from the others. Create your first one to start adding projects and monitors.";
       emptyKind.value = "org";
+      renderState.value = "empty";
       recomputeOnboarding(allowAutoOpen);
       return;
     }
@@ -258,6 +284,7 @@ async function load(forceWorkspace = false, allowAutoOpen = true) {
       empty.value =
         "Projects are the teams and apps inside an organization — each holds its own monitors, channels and members. Add the first one.";
       emptyKind.value = "project";
+      renderState.value = "empty";
       recomputeOnboarding(allowAutoOpen);
       return;
     }
@@ -278,17 +305,27 @@ async function load(forceWorkspace = false, allowAutoOpen = true) {
       throw new Error(
         errorMessage(monitorRes.error, "Could not load monitors."),
       );
+    if (projectSla.error)
+      throw new Error(
+        errorMessage(projectSla.error, "Could not load project SLA."),
+      );
+    if (avail.error)
+      throw new Error(
+        errorMessage(avail.error, "Could not load project availability."),
+      );
     timeline.value = buildTimeline(avail.data ?? []);
     const list = monitorRes.data ?? [];
     const monitorList = list as Monitor[];
     const w30 = projectSla.data?.windows?.find(
       (w: WindowSLA) => w.window === "30d",
     );
+    const projectHasEvidence = hasSlaEvidence(w30);
 
     if (!monitorList.length) {
       empty.value =
         "No monitors in this project yet. Add one to begin checking.";
       emptyKind.value = "monitor";
+      renderState.value = "empty";
       recomputeOnboarding(allowAutoOpen);
       return;
     }
@@ -315,6 +352,7 @@ async function load(forceWorkspace = false, allowAutoOpen = true) {
     recomputeOnboarding(allowAutoOpen);
 
     // Project error budget = mean of the monitors that have an SLO target.
+    const configuredSloCount = loaded.filter((item) => item.sloConfigured).length;
     const budgets = cards.value.filter((c) => c.budgetLeft !== null);
     const meanBudget = budgets.length
       ? budgets.reduce((a, c) => a + (c.budgetLeft as number), 0) /
@@ -349,7 +387,11 @@ async function load(forceWorkspace = false, allowAutoOpen = true) {
       ? `across ${checks} check${checks === 1 ? "" : "s"}`
       : "";
     let p95Trend: Trend | undefined;
-    if (w30?.p95_latency_ms && w30?.avg_latency_ms) {
+    if (
+      projectHasEvidence &&
+      w30?.p95_latency_ms &&
+      w30?.avg_latency_ms
+    ) {
       const stable = w30.p95_latency_ms <= w30.avg_latency_ms * 1.6;
       p95Trend = {
         dir: stable ? "pos" : "flat",
@@ -358,7 +400,7 @@ async function load(forceWorkspace = false, allowAutoOpen = true) {
     }
 
     kpis.value = {
-      availability: pct(w30?.uptime_percent),
+      availability: projectHasEvidence ? pct(w30?.uptime_percent) : "—",
       availSub,
       availTrend,
       up: String(monitorList.filter((m) => m.status === "up").length),
@@ -367,23 +409,30 @@ async function load(forceWorkspace = false, allowAutoOpen = true) {
       budget: meanBudget !== null ? `${Math.round(meanBudget)}%` : "—",
       budgetSub: budgets.length
         ? `across ${budgets.length} SLO${budgets.length > 1 ? "s" : ""}`
-        : "no SLO set",
+        : configuredSloCount
+          ? "no measured SLO evidence"
+          : "no SLO set",
       budgetMet: budgets.every((c) => c.budgetMet),
-      p95: w30?.p95_latency_ms ? `${Math.round(w30.p95_latency_ms)} ms` : "—",
-      p95Sub: checksSub,
+      p95:
+        projectHasEvidence && w30?.p95_latency_ms
+          ? `${Math.round(w30.p95_latency_ms)} ms`
+          : "—",
+      p95Sub: projectHasEvidence ? checksSub : "",
       p95Trend,
     };
+    renderState.value = "loaded";
   } catch (error) {
     if (!current()) return;
     onboardingReadError.value =
       error instanceof Error
         ? error.message
         : "Could not verify the selected workspace.";
-    recomputeOnboarding(allowAutoOpen);
-    empty.value = "Could not load the dashboard.";
+    recomputeOnboarding(false);
+    empty.value = onboardingReadError.value;
     emptyKind.value = "error";
+    renderState.value = "error";
   } finally {
-    if (current()) loading.value = false;
+    if (current()) loading.value = ws.transitionPending;
   }
 }
 
@@ -506,7 +555,7 @@ onBeforeUnmount(() => {
   if (pollTimer) clearTimeout(pollTimer);
 });
 watch(
-  () => [ws.orgId, ws.projectId],
+  () => [ws.orgId, ws.projectId, ws.transitionPending],
   () => load(),
 );
 watch(
@@ -544,7 +593,7 @@ watch(
 <template>
   <AppShell
     active="dashboard"
-    :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'Dashboard']"
+    :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Dashboard' }]"
   >
     <template #actions>
       <button
@@ -580,7 +629,7 @@ watch(
         <h1 class="text-[21px] font-semibold tracking-tight">
           {{ ws.projectName || "Dashboard" }}
         </h1>
-        <p class="mt-[3px] text-[13px] text-ink-3">
+        <p class="mt-[3px] text-[13px] text-ink-2">
           <span v-if="loading">Loading…</span>
           <span v-else>{{ cards.length }} monitors · {{ ws.orgName }}</span>
         </p>
@@ -602,7 +651,40 @@ watch(
       />
 
       <div
-        v-if="empty && !loading && !guideOpen"
+        v-if="renderState === 'loading' && !guideOpen"
+        data-testid="dashboard-loading"
+        role="status"
+        aria-label="Loading dashboard"
+        class="space-y-4 py-8"
+      >
+        <div class="rounded border border-border bg-surface p-5 shadow-card">
+          <p class="text-[13px] font-medium text-ink-2">Loading…</p>
+          <div class="mt-4 grid grid-cols-4 gap-3 max-[900px]:grid-cols-2">
+            <div
+              v-for="label in ['Availability · 30d', 'Monitors up', 'Error budget · 30d', 'P95 latency · 30d']"
+              :key="label"
+              class="rounded border border-border bg-inset p-4"
+            >
+              <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-2">{{ label }}</span>
+              <span class="mt-3 block font-mono text-[26px] leading-none text-ink-2">—</span>
+            </div>
+          </div>
+        </div>
+        <div
+          data-testid="availability-loading"
+          role="img"
+          aria-label="Loading 90-day project availability"
+          class="rounded border border-border bg-surface px-[18px] py-[17px] shadow-card"
+        >
+          <div class="h-[38px] animate-pulse rounded bg-inset"></div>
+          <p class="mt-3 text-[12px] text-ink-2">Loading availability…</p>
+        </div>
+      </div>
+
+      <div
+        v-if="(renderState === 'error' || renderState === 'empty') && !guideOpen"
+        :data-testid="renderState === 'error' ? 'dashboard-error' : 'dashboard-empty'"
+        :role="renderState === 'error' ? 'alert' : undefined"
         class="grid place-items-center py-16"
       >
         <div class="max-w-[480px] text-center">
@@ -665,12 +747,21 @@ watch(
             </svg>
           </div>
           <h2 class="mb-[6px] text-[19px] font-semibold tracking-tight">
-            {{ emptyTitle }}
+            {{ renderState === "error" ? "Dashboard data unavailable" : emptyTitle }}
           </h2>
-          <p class="mb-5 text-[13.5px] text-ink-3">{{ empty }}</p>
+          <p class="mb-5 text-[13.5px] text-ink-2">{{ empty }}</p>
 
           <button
-            v-if="emptyKind === 'org' && session.isGlobalAdmin"
+            v-if="renderState === 'error'"
+            type="button"
+            data-testid="dashboard-retry"
+            class="inline-flex h-[34px] items-center rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2"
+            @click="load(true, false)"
+          >
+            Retry
+          </button>
+          <button
+            v-else-if="emptyKind === 'org' && session.isGlobalAdmin"
             type="button"
             class="inline-flex h-[34px] items-center gap-[7px] rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2"
             @click="ui.openCreate('org')"
@@ -722,25 +813,25 @@ watch(
             </svg>
             New monitor
           </RouterLink>
-          <p v-else-if="emptyKind === 'org'" class="text-[12.5px] text-ink-3">
+          <p v-else-if="emptyKind === 'org'" class="text-[12.5px] text-ink-2">
             Ask a global admin to create an organization.
           </p>
           <p
             v-else-if="emptyKind === 'project'"
-            class="text-[12.5px] text-ink-3"
+            class="text-[12.5px] text-ink-2"
           >
             Ask an org admin to create a project in {{ ws.orgName }}.
           </p>
           <p
             v-else-if="emptyKind === 'monitor'"
-            class="text-[12.5px] text-ink-3"
+            class="text-[12.5px] text-ink-2"
           >
             Ask an editor or admin to create the first monitor.
           </p>
         </div>
       </div>
 
-      <template v-if="!empty">
+      <template v-else-if="renderState === 'loaded'">
         <!-- hero: KPIs as individual rounded cards + a 90-day availability card -->
         <div class="mb-6 flex flex-col gap-3">
           <div class="grid grid-cols-4 gap-3 max-[900px]:grid-cols-2">
@@ -773,19 +864,22 @@ watch(
           >
             <div class="mb-[10px] flex items-baseline gap-[10px]">
               <span
-                class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3"
+                class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-2"
                 >Project availability · 90 days</span
               >
-              <span class="ml-auto font-mono text-[12px] text-ink-2">{{
-                timelineUptime
-              }}</span>
+              <span
+                data-testid="timeline-uptime"
+                class="ml-auto font-mono text-[12px] text-ink-2"
+                >{{ timelineUptime }}</span
+              >
             </div>
             <svg
+              data-testid="availability-strip"
               :viewBox="`0 0 ${timeline.length} 10`"
               preserveAspectRatio="none"
               :style="{ height: '38px', width: '100%', display: 'block' }"
               role="img"
-              aria-label="90-day project availability"
+              aria-label="90-day project availability; No data / UNKNOWN buckets are neutral and not measured"
             >
               <rect
                 v-for="(d, i) in timeline"
@@ -796,6 +890,7 @@ watch(
                 height="10"
                 rx="0.2"
                 ry="0.7"
+                :data-state="d.pct === null ? 'no-data' : undefined"
                 :style="{ fill: dayFill(d.pct) }"
               >
                 <title>
@@ -807,7 +902,7 @@ watch(
                 </title>
               </rect>
             </svg>
-            <div class="mt-[10px] flex gap-4 text-[12px] text-ink-3">
+            <div class="mt-[10px] flex gap-4 text-[12px] text-ink-2">
               <span class="inline-flex items-center gap-[6px]"
                 ><i class="inline-block h-2 w-2 rounded-[2px] bg-up"></i>
                 Operational</span
@@ -820,6 +915,13 @@ watch(
                 ><i class="inline-block h-2 w-2 rounded-[2px] bg-down"></i>
                 Down</span
               >
+              <span
+                data-testid="availability-no-data-legend"
+                class="inline-flex items-center gap-[6px]"
+              >
+                <i class="inline-block h-2 w-2 rounded-[2px] bg-inset"></i>
+                No data / UNKNOWN
+              </span>
               <span class="ml-auto font-mono text-[11px]"
                 >90 days ago → today</span
               >

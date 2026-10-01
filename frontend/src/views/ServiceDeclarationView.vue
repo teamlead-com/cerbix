@@ -151,7 +151,7 @@ watch(() => [route.params.id, ws.projectId], load);
 </script>
 
 <template>
-  <AppShell active="services" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'Services', detail?.service.name || '…', 'Declaration']">
+  <AppShell active="services" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Services', to: { name: 'services' } }, { label: detail?.service.name || '…', to: { name: 'service', params: { id: serviceId } } }, { label: 'Declaration' }]">
     <div class="mx-auto max-w-[1180px] px-[22px] pb-16 pt-[26px]">
       <div v-if="error" class="rounded border border-down/40 bg-down-weak p-4 text-[13px] text-down">{{ error }}</div>
       <p v-else-if="loading" class="text-[13px] text-ink-3">Loading…</p>

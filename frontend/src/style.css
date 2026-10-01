@@ -8,13 +8,13 @@
   --bg: #fafafb; --surface: #ffffff; --surface-2: #f5f5f8; --inset: #f0f0f4;
   --border: #e9e9ef; --border-strong: #dadae4;
   --ink: #17171f; --ink-2: #55556a; --ink-3: #8a8a9d;
-  --accent: #5854f2; --accent-2: #7a77ff; --accent-ink: #ffffff; --accent-weak: rgba(88, 84, 242, 0.1);
+  --accent: #5854f2; --accent-2: #625ee8; --accent-ink: #ffffff; --accent-weak: rgba(88, 84, 242, 0.1);
   --focus: #5854f2;
-  --up: #12a05c; --up-weak: rgba(18, 160, 92, 0.12);
+  --up: #12a05c; --up-weak: rgba(18, 160, 92, 0.10);
   --down: #e0393f; --down-weak: rgba(224, 57, 63, 0.12);
   --degraded: #b97800; --degraded-weak: rgba(185, 120, 0, 0.13);
   --maint: #3a7de5; --maint-weak: rgba(58, 125, 229, 0.12);
-  --pending: #8a8a9d; --pending-weak: rgba(138, 138, 157, 0.14);
+  --pending: #8a8a9d; --pending-weak: rgba(138, 138, 157, 0.12);
   --shadow: 0 1px 2px rgba(20, 20, 40, 0.04), 0 4px 16px rgba(20, 20, 40, 0.04);
   color-scheme: light;
 }
@@ -30,7 +30,7 @@
     --down: #ff5f64; --down-weak: rgba(255, 95, 100, 0.15);
     --degraded: #e0a53a; --degraded-weak: rgba(224, 165, 58, 0.15);
     --maint: #5c9bff; --maint-weak: rgba(92, 155, 255, 0.15);
-    --pending: #6c6c7e; --pending-weak: rgba(108, 108, 126, 0.18);
+    --pending: #6c6c7e; --pending-weak: rgba(108, 108, 126, 0.15);
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.3);
     color-scheme: dark;
   }
@@ -46,7 +46,7 @@
   --down: #ff5f64; --down-weak: rgba(255, 95, 100, 0.15);
   --degraded: #e0a53a; --degraded-weak: rgba(224, 165, 58, 0.15);
   --maint: #5c9bff; --maint-weak: rgba(92, 155, 255, 0.15);
-  --pending: #6c6c7e; --pending-weak: rgba(108, 108, 126, 0.18);
+  --pending: #6c6c7e; --pending-weak: rgba(108, 108, 126, 0.15);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.3);
   color-scheme: dark;
 }
@@ -57,9 +57,22 @@
     margin: 0;
   }
   :focus-visible {
-    outline: 2px solid var(--focus);
+    outline: 2px solid var(--focus) !important;
     outline-offset: 2px;
     border-radius: 4px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Stop decorative motion while keeping state changes and focus available. */
+  .transition,
+  .transition-colors,
+  .transition-transform,
+  .animate-pulse,
+  .animate-spin,
+  .animate-ping {
+    animation: none !important;
+    transition: none !important;
   }
 }
 

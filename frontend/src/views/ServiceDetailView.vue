@@ -162,7 +162,7 @@ watch(() => [route.params.id, ws.projectId], load);
 </script>
 
 <template>
-  <AppShell active="services" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'Services', detail?.service.name || '…']">
+  <AppShell active="services" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Services', to: { name: 'services' } }, { label: detail?.service.name || '…' }]">
     <template #actions>
       <RouterLink
         v-if="canWrite"

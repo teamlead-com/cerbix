@@ -1032,7 +1032,7 @@ const selectCls =
 </script>
 
 <template>
-  <AppShell active="monitors" :crumbs="[ws.orgName || 'cerbix', ws.projectName || '…', 'monitors', isEdit ? 'Edit' : 'New']">
+  <AppShell active="monitors" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Monitors', to: { name: 'monitors' } }, { label: isEdit ? 'Edit' : 'New' }]">
     <div class="mx-auto max-w-[1060px] px-[22px] pb-16 pt-6">
       <div class="mb-5">
         <h1 class="text-[21px] font-semibold tracking-tight">{{ isEdit ? "Edit monitor" : "New monitor" }}</h1>

@@ -1,4 +1,5 @@
 import { flushPromises, mount } from "@vue/test-utils";
+import { reactive } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import IncidentDetailView from "@/views/IncidentDetailView.vue";
@@ -23,9 +24,18 @@ vi.mock("@/components/AppShell.vue", () => ({
 vi.mock("@/stores/session", () => ({
   useSession: () => ({ canProjectWrite: () => true }),
 }));
-vi.mock("@/stores/workspace", () => ({
-  useWorkspace: () => ({ init: () => Promise.resolve(), orgId: "o1", projectId: "p1" }),
+const workspaceMock = vi.hoisted(() => ({
+  init: vi.fn(() => Promise.resolve()),
+  orgId: "o1",
+  projectId: "p1",
+  orgName: "Org A",
+  projectName: "Project A",
+  transitionPending: false,
+  transitionError: "",
+  transition: { generation: 0, pendingOrgId: "", error: "", failedOrgId: "" },
 }));
+const reactiveWorkspace = reactive(workspaceMock);
+vi.mock("@/stores/workspace", () => ({ useWorkspace: () => reactiveWorkspace }));
 
 const RouterLink = { props: ["to"], template: "<a><slot /></a>" };
 
@@ -64,6 +74,82 @@ function mountWith(detail: Record<string, unknown>) {
   );
   return mount(IncidentDetailView, { global: { stubs: { RouterLink } } });
 }
+
+beforeEach(() => {
+  workspaceMock.init.mockReset();
+  workspaceMock.init.mockResolvedValue(undefined);
+  workspaceMock.orgId = "o1";
+  workspaceMock.projectId = "p1";
+  workspaceMock.orgName = "Org A";
+  workspaceMock.projectName = "Project A";
+  workspaceMock.transitionPending = false;
+  workspaceMock.transitionError = "";
+  workspaceMock.transition = { generation: 0, pendingOrgId: "", error: "", failedOrgId: "" };
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+describe("IncidentDetailView workspace fencing", () => {
+  it("does not read or render an incident after cold workspace initialization fails", async () => {
+    workspaceMock.init.mockRejectedValueOnce(new Error("project read failed"));
+    const wrapper = mountWith(BASE_INCIDENT);
+
+    await flushPromises();
+
+    expect(apiMock.GET.mock.calls.some(([path]) => path === "/api/v1/incidents/{incidentID}")).toBe(false);
+    expect(wrapper.text()).not.toContain(BASE_INCIDENT.title);
+  });
+
+  it("clears the old incident during a workspace transition and drops every late read", async () => {
+    const lateReads: Array<{
+      promise: Promise<{ data: Record<string, unknown> }>;
+      resolve: (value: { data: Record<string, unknown> }) => void;
+    }> = [];
+    let incidentReads = 0;
+    apiMock.GET.mockReset();
+    apiMock.POST.mockReset();
+    apiMock.GET.mockImplementation((path: string) => {
+      if (path === "/api/v1/incidents/{incidentID}") {
+        incidentReads += 1;
+        if (incidentReads === 1) return Promise.resolve({ data: BASE_INCIDENT });
+        const late = deferred<{ data: Record<string, unknown> }>();
+        lateReads.push(late);
+        return late.promise;
+      }
+      if (path.endsWith("/updates")) return Promise.resolve({ data: [] });
+      if (path.endsWith("/postmortem")) return Promise.resolve({ error: { error: "not found" } });
+      return Promise.resolve({ data: undefined });
+    });
+
+    const wrapper = mount(IncidentDetailView, { global: { stubs: { RouterLink } } });
+    await flushPromises();
+    expect(wrapper.text()).toContain(BASE_INCIDENT.title);
+
+    reactiveWorkspace.transition = { generation: 1, pendingOrgId: "", error: "", failedOrgId: "" };
+    await vi.waitFor(() => expect(incidentReads).toBeGreaterThan(1));
+    const readsBeforeTransition = incidentReads;
+
+    reactiveWorkspace.transitionPending = true;
+    reactiveWorkspace.projectId = "";
+    reactiveWorkspace.transition = { generation: 2, pendingOrgId: "org-b", error: "", failedOrgId: "" };
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain(BASE_INCIDENT.title);
+    expect(incidentReads).toBe(readsBeforeTransition);
+
+    for (const late of lateReads) late.resolve({ data: BASE_INCIDENT });
+    await flushPromises();
+    expect(wrapper.text()).not.toContain(BASE_INCIDENT.title);
+  });
+});
 
 // FR-022, mock panel 1: the header says what the incident is an incident OF. The name comes from a
 // SECOND request, so the interesting cases are the ones where that request has not answered or has

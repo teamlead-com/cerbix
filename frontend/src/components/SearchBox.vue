@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, ref } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
@@ -14,44 +14,138 @@ const q = ref("");
 const hits = ref<Hit[]>([]);
 const open = ref(false);
 const loading = ref(false);
+const error = ref("");
 const active = ref(-1);
+const inputRef = ref<HTMLInputElement | null>(null);
+const resultListRef = ref<HTMLElement | null>(null);
+const liveStatusRef = ref<HTMLElement | null>(null);
+const liveMessage = ref("");
 let timer: ReturnType<typeof setTimeout> | undefined;
+let inputGeneration = 0;
+let requestGeneration = 0;
+let inflight: AbortController | undefined;
+let suppressFocusOpen = false;
+
+function announce(message: string) {
+  liveMessage.value = message;
+  if (liveStatusRef.value) liveStatusRef.value.textContent = message;
+}
+
+function cancelPending() {
+  if (timer) {
+    clearTimeout(timer);
+    timer = undefined;
+  }
+  inflight?.abort();
+  inflight = undefined;
+}
 
 function onInput() {
+  const mine = ++inputGeneration;
+  cancelPending();
   active.value = -1;
-  if (timer) clearTimeout(timer);
   const term = q.value.trim();
   if (term.length < 2) {
     hits.value = [];
     open.value = false;
+    loading.value = false;
+    error.value = "";
+    announce("");
     return;
   }
+  hits.value = [];
+  error.value = "";
   open.value = true;
-  timer = setTimeout(runSearch, 220);
+  loading.value = true;
+  announce("Searching…");
+  timer = setTimeout(() => void runSearch(term, mine), 220);
 }
 
-async function runSearch() {
-  const term = q.value.trim();
-  if (term.length < 2) return;
+function isCurrent(mine: number, request: number) {
+  return mine === inputGeneration && request === requestGeneration;
+}
+
+function isAbort(error: unknown) {
+  return (error as { name?: string } | null)?.name === "AbortError";
+}
+
+async function runSearch(term: string, mine: number) {
+  if (mine !== inputGeneration || term.length < 2) return;
+  const request = ++requestGeneration;
+  const controller = new AbortController();
+  inflight?.abort();
+  inflight = controller;
   loading.value = true;
+  error.value = "";
+  announce("Searching…");
   try {
-    const res = await api.GET("/api/v1/search", { params: { query: { q: term } } });
+    const res = await api.GET("/api/v1/search", {
+      params: { query: { q: term } },
+      signal: controller.signal,
+    });
+    if (res.error || (res.response && !res.response.ok)) throw new Error("Search request failed");
+    if (!isCurrent(mine, request)) return;
     hits.value = res.data?.hits ?? [];
-  } catch {
+    announce(
+      hits.value.length
+        ? `${hits.value.length} ${hits.value.length === 1 ? "match" : "matches"}`
+        : `No matches for “${term}”.`,
+    );
+  } catch (cause) {
+    if (!isCurrent(mine, request) || isAbort(cause)) return;
     hits.value = [];
+    error.value = "Search failed. Please try again.";
+    announce(error.value);
   } finally {
-    loading.value = false;
+    if (isCurrent(mine, request)) {
+      loading.value = false;
+      inflight = undefined;
+    }
   }
 }
 
 function close() {
   open.value = false;
   active.value = -1;
+  if (resultListRef.value) resultListRef.value.scrollTop = 0;
 }
+
 function reset() {
   q.value = "";
   hits.value = [];
+  loading.value = false;
+  error.value = "";
+  announce("");
   close();
+}
+
+function focusInput() {
+  suppressFocusOpen = true;
+  inputRef.value?.focus();
+  queueMicrotask(() => {
+    suppressFocusOpen = false;
+  });
+}
+
+function restoreInputIfCurrent(mine: number) {
+  if (mine === inputGeneration) focusInput();
+}
+
+function onFocus() {
+  if (suppressFocusOpen) return;
+  if (q.value.trim().length >= 2) open.value = true;
+}
+
+function onEscape() {
+  if (open.value) {
+    close();
+    focusInput();
+    return;
+  }
+  cancelPending();
+  ++inputGeneration;
+  reset();
+  focusInput();
 }
 
 // Every hit carries its own org and project, so EVERY hit switches the workspace to them before
@@ -64,9 +158,23 @@ function reset() {
 // resolve and postmortem disappear. Both entrances were the same defect and are fixed in one place
 // rather than per detail view.
 async function go(hit: Hit) {
+  const mine = ++inputGeneration;
+  cancelPending();
   reset();
-  if (hit.org_id && hit.org_id !== ws.orgId) await ws.selectOrg(hit.org_id);
-  if (hit.project_id && hit.project_id !== ws.projectId) ws.selectProject(hit.project_id);
+  if (hit.org_id && hit.org_id !== ws.orgId) {
+    const selected = await ws.selectOrg(hit.org_id);
+    if (!selected || mine !== inputGeneration) {
+      restoreInputIfCurrent(mine);
+      return;
+    }
+  }
+  if (hit.project_id && hit.project_id !== ws.projectId) {
+    if (mine !== inputGeneration || !ws.selectProject(hit.project_id)) {
+      restoreInputIfCurrent(mine);
+      return;
+    }
+  }
+  if (mine !== inputGeneration) return;
   if (hit.type === "monitor") {
     router.push({ name: "monitor", params: { id: hit.id } });
   } else if (hit.type === "incident") {
@@ -83,16 +191,34 @@ function onKeydown(e: KeyboardEvent) {
     active.value = (active.value + 1) % hits.value.length;
   } else if (e.key === "ArrowUp") {
     e.preventDefault();
-    active.value = (active.value - 1 + hits.value.length) % hits.value.length;
+    active.value = active.value < 0 ? hits.value.length - 1 : (active.value - 1 + hits.value.length) % hits.value.length;
   } else if (e.key === "Enter" && active.value >= 0) {
     e.preventDefault();
-    go(hits.value[active.value]);
+    void go(hits.value[active.value]);
   }
 }
 
+function sanitizeId(value: string) {
+  return value.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "result";
+}
+
+function optionId(hit: Hit, index: number) {
+  const type = sanitizeId(hit.type || "result");
+  const identity = sanitizeId(hit.id || String(index));
+  return `search-option-${type}-${identity}-${index}`;
+}
+
+const activeOptionId = computed(() => {
+  const hit = hits.value[active.value];
+  return hit ? optionId(hit, active.value) : undefined;
+});
+
 const typeLabel: Record<string, string> = { monitor: "Monitor", project: "Project", incident: "Incident" };
 
-onBeforeUnmount(() => timer && clearTimeout(timer));
+onBeforeUnmount(() => {
+  ++inputGeneration;
+  cancelPending();
+});
 </script>
 
 <template>
@@ -100,27 +226,46 @@ onBeforeUnmount(() => timer && clearTimeout(timer));
     <div class="flex h-[34px] w-[240px] items-center gap-2 rounded-sm border border-border bg-surface px-[10px] text-ink-3 focus-within:border-accent max-[1100px]:w-[150px]">
       <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>
       <input
+        ref="inputRef"
         v-model="q"
         type="text"
+        role="combobox"
+        aria-label="Search"
+        aria-autocomplete="list"
+        aria-controls="search-results"
+        :aria-expanded="open ? 'true' : 'false'"
+        :aria-activedescendant="activeOptionId"
         placeholder="Search…"
         class="w-full bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-3"
         @input="onInput"
-        @focus="q.trim().length >= 2 && (open = true)"
+        @focus="onFocus"
         @keydown="onKeydown"
-        @keydown.esc="close"
+        @keydown.esc="onEscape"
       />
       <kbd v-if="!q" class="rounded-[3px] border border-border px-[4px] font-mono text-[10px] text-ink-3 max-[1100px]:hidden">/</kbd>
     </div>
 
+    <p ref="liveStatusRef" class="sr-only" role="status" aria-live="polite" aria-atomic="true">{{ liveMessage }}</p>
+
     <template v-if="open">
       <div class="fixed inset-0 z-30" @click="close"></div>
-      <div class="absolute right-0 top-[calc(100%+6px)] z-40 max-h-[70vh] w-[340px] overflow-y-auto rounded border border-border-strong bg-surface p-1 shadow-lg">
-        <p v-if="loading" class="px-3 py-3 text-[12.5px] text-ink-3">Searching…</p>
-        <p v-else-if="!hits.length" class="px-3 py-3 text-[12.5px] text-ink-3">No matches for “{{ q.trim() }}”.</p>
+      <div
+        id="search-results"
+        ref="resultListRef"
+        role="listbox"
+        class="absolute right-0 top-[calc(100%+6px)] z-40 max-h-[70vh] w-[340px] overflow-y-auto rounded border border-border-strong bg-surface p-1 shadow-lg"
+      >
+        <p v-if="loading" class="px-3 py-3 text-[12.5px] text-ink-2">Searching…</p>
+        <p v-else-if="error" class="px-3 py-3 text-[12.5px] text-ink-2">{{ error }}</p>
+        <p v-else-if="!hits.length" class="px-3 py-3 text-[12.5px] text-ink-2">No matches for “{{ q.trim() }}”.</p>
         <button
           v-for="(h, i) in hits"
-          :key="i"
+          :id="optionId(h, i)"
+          :key="optionId(h, i)"
           type="button"
+          role="option"
+          tabindex="-1"
+          :aria-selected="i === active ? 'true' : 'false'"
           class="flex w-full items-center gap-[10px] rounded-sm px-[9px] py-[7px] text-left"
           :class="i === active ? 'bg-surface-2' : 'hover:bg-surface-2'"
           @click="go(h)"

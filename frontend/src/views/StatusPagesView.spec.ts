@@ -17,7 +17,21 @@ import StatusPagesView from "@/views/StatusPagesView.vue";
 const apiMock = vi.hoisted(() => ({ GET: vi.fn(), POST: vi.fn(), PATCH: vi.fn(), DELETE: vi.fn() }));
 vi.mock("@/api/client", () => ({ api: apiMock }));
 vi.mock("@/components/AppShell.vue", () => ({
-  default: { name: "AppShell", template: "<div><slot name='actions' /><slot /></div>" },
+  default: {
+    name: "AppShell",
+    props: { crumbs: { type: Array, default: () => [] } },
+    template: `
+      <div>
+        <nav data-testid="breadcrumbs">
+          <template v-for="crumb in crumbs" :key="crumb.label">
+            <a v-if="crumb.to" :data-route="crumb.to.name">{{ crumb.label }}</a>
+            <span v-else>{{ crumb.label }}</span>
+          </template>
+        </nav>
+        <slot name="actions" /><slot />
+      </div>
+    `,
+  },
 }));
 vi.mock("@/stores/session", () => ({ useSession: () => ({ isOrgAdmin: () => true }) }));
 vi.mock("@/stores/workspace", () => ({
@@ -87,6 +101,17 @@ beforeEach(() => {
 });
 
 describe("StatusPagesView conversion", () => {
+  it("keeps the breadcrumb organization-scoped because status pages are not project-scoped", async () => {
+    mockLoads();
+    const wrapper = await mountAndSelect();
+    const breadcrumbs = wrapper.get("[data-testid='breadcrumbs']");
+
+    expect(breadcrumbs.text()).toContain("Acme");
+    expect(breadcrumbs.text()).toContain("Status pages");
+    expect(breadcrumbs.text()).not.toContain("Payments");
+    expect(breadcrumbs.find("[data-route='dashboard']").exists()).toBe(false);
+  });
+
   it("shows the active source and labels the dormant binding as kept for revert", async () => {
     mockLoads();
     const wrapper = await mountAndSelect();

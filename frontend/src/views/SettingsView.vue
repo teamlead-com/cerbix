@@ -877,7 +877,7 @@ watch(tab, loadActive);
 </script>
 
 <template>
-  <AppShell active="settings" :crumbs="[ws.orgName || 'cerbix', 'Settings']">
+  <AppShell active="settings" :crumbs="[{ label: ws.orgName || 'cerbix' }, { label: ws.projectName || '…', to: { name: 'dashboard' } }, { label: 'Settings' }]">
     <div class="mx-auto max-w-[1180px] px-[22px] pb-16 pt-[26px]">
       <div class="mb-5">
         <h1 class="text-[21px] font-semibold tracking-tight">Settings</h1>

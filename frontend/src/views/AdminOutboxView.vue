@@ -63,7 +63,7 @@ onMounted(load);
 </script>
 
 <template>
-  <AppShell active="admin-outbox" :crumbs="['cerbix', 'Admin', 'Dead-letter queue']">
+  <AppShell active="admin-outbox" :crumbs="[{ label: 'cerbix' }, { label: 'Admin' }, { label: 'Dead-letter queue' }]">
     <div class="mx-auto max-w-[1180px] px-[22px] pb-16 pt-[26px]">
       <div class="mb-5 flex items-end justify-between gap-4">
         <div>

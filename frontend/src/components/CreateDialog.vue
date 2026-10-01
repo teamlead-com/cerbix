@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import OverlaySurface from "@/components/OverlaySurface.vue";
 import { useUi } from "@/stores/ui";
 import { useWorkspace } from "@/stores/workspace";
 
@@ -61,16 +62,21 @@ async function submit() {
 </script>
 
 <template>
-  <div
-    v-if="ui.createKind"
+  <OverlaySurface
+    :open="!!ui.createKind"
+    role="dialog"
+    :modal="true"
+    :close-on-outside="true"
+    labelledby="create-dialog-title"
+    describedby="create-dialog-description"
+    initial-focus="#create-dialog-name"
     class="fixed inset-0 z-50 grid place-items-center bg-[rgba(10,10,20,0.42)] p-5"
-    @click.self="ui.closeCreate()"
-    @keydown.esc="ui.closeCreate()"
+    @close="ui.closeCreate()"
   >
-    <div class="w-full max-w-[460px] rounded border border-border-strong bg-surface shadow-lg" role="dialog" aria-modal="true">
+    <div class="w-full max-w-[460px] rounded border border-border-strong bg-surface shadow-lg">
       <div class="px-5 pb-1 pt-[18px]">
-        <h3 class="text-[16px] font-semibold tracking-tight">{{ isOrg ? "New organization" : "New project" }}</h3>
-        <p class="mt-1 text-[12.5px] text-ink-3">
+        <h3 id="create-dialog-title" class="text-[16px] font-semibold tracking-tight">{{ isOrg ? "New organization" : "New project" }}</h3>
+        <p id="create-dialog-description" class="mt-1 text-[12.5px] text-ink-2">
           {{ isOrg
             ? "The top-level tenant. You become its first admin."
             : `A team or app inside ${ws.orgName || "the organization"} — holds its own monitors, channels and members.` }}
@@ -79,28 +85,29 @@ async function submit() {
 
       <div class="flex flex-col gap-[14px] px-5 pb-1 pt-[14px]">
         <div v-if="!isOrg" class="flex flex-col gap-[6px]">
-          <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Organization</span>
-          <input :value="ws.orgName" disabled class="rounded-sm border border-border bg-surface-2 px-3 py-[9px] text-[13.5px] text-ink-3" />
+          <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-2">Organization</span>
+          <input :value="ws.orgName" disabled class="rounded-sm border border-border bg-surface-2 px-3 py-[9px] text-[13.5px] text-ink-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent" />
         </div>
         <label class="flex flex-col gap-[6px]">
-          <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Name</span>
+          <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-2">Name</span>
           <input
+            id="create-dialog-name"
             v-model="form.name"
             :placeholder="isOrg ? 'Acme' : 'API'"
             autocomplete="off"
-            class="rounded-sm border border-border bg-surface-2 px-3 py-[9px] text-[13.5px] outline-none focus:border-accent"
+            class="rounded-sm border border-border bg-surface-2 px-3 py-[9px] text-[13.5px] outline-none focus:border-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             @keydown.enter="submit"
           />
         </label>
         <label class="flex flex-col gap-[6px]">
-          <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">
-            Slug <span class="font-normal normal-case tracking-normal text-ink-3">— used in URLs, lowercase</span>
+          <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-2">
+            Slug <span class="font-normal normal-case tracking-normal text-ink-2">— used in URLs, lowercase</span>
           </span>
           <input
             :value="form.slug"
             :placeholder="isOrg ? 'acme' : 'api'"
             autocomplete="off"
-            class="rounded-sm border border-border bg-surface-2 px-3 py-[9px] font-mono text-[12.5px] outline-none focus:border-accent"
+            class="rounded-sm border border-border bg-surface-2 px-3 py-[9px] font-mono text-[12.5px] outline-none focus:border-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             @input="onSlug"
             @keydown.enter="submit"
           />
@@ -110,16 +117,16 @@ async function submit() {
 
       <div class="flex items-center gap-2 px-5 pb-[18px] pt-4">
         <span class="flex-1"></span>
-        <button type="button" class="h-9 rounded-sm border border-border px-4 text-[13px] text-ink-2 hover:border-border-strong" @click="ui.closeCreate()">Cancel</button>
+        <button type="button" class="h-9 rounded-sm border border-border px-4 text-[13px] text-ink-2 hover:border-border-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent" @click="ui.closeCreate()">Cancel</button>
         <button
           type="button"
           :disabled="!canCreate"
-          class="h-9 rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50"
+          class="h-9 rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50"
           @click="submit"
         >
           {{ busy ? "Creating…" : isOrg ? "Create organization" : "Create project" }}
         </button>
       </div>
     </div>
-  </div>
+  </OverlaySurface>
 </template>

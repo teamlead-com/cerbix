@@ -12,7 +12,7 @@
 [![OpenAPI 3.0](https://img.shields.io/badge/OpenAPI-3.0.3-green.svg)](openapi.yaml)
 [![Security Policy](https://img.shields.io/badge/security-policy-informational.svg)](SECURITY.md)
 
-**Define what reliable means for a service — then measure it and run the response.**
+**Reliability you can prove.**
 
 Self-hosted, multi-tenant service reliability platform. A **Service** declares what its
 reliability *is* — which checks are its SLI, how regions aggregate, what counts as

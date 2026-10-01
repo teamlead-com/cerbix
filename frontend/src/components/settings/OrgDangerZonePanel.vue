@@ -30,14 +30,19 @@ async function confirmDelete() {
   if (!canDelete.value || !org.value) return;
   busy.value = true;
   error.value = "";
-  const err = await ws.deleteOrg(org.value.id!);
-  busy.value = false;
-  if (err) {
-    error.value = err; // 409 managed-by-file message, or 403/other
-    return;
+  try {
+    const err = await ws.deleteOrg(org.value.id!);
+    if (err) {
+      error.value = err; // 409 managed-by-file message, or 403/other
+      return;
+    }
+    open.value = false;
+    router.push({ name: "dashboard" });
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "Could not delete the organization.";
+  } finally {
+    busy.value = false;
   }
-  open.value = false;
-  router.push({ name: "dashboard" });
 }
 </script>
 

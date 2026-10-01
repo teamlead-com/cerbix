@@ -457,6 +457,43 @@ The reference point is company conventions (Go services `example-svc`), plus les
 | **OpenAPI → `openapi-typescript`** | A single contract, a generated type-safe client. | Frontend/backend synchronization. |
 | **nginx (unprivileged) / `embed.FS`** | Two ways to serve the SPA: an nginx layer or the same Go binary. | Static serving + proxying `/api`,`/auth`. |
 
+## 1.5 Supported toolchain, shell UX and operator recovery
+
+The repository proves several toolchain contexts; it does not currently prove that their differences
+are intentional policy:
+
+| Context | Verified source and pin |
+|---|---|
+| Go module/source floor and CI binaries | [`go.mod`](../go.mod) declares Go 1.25.13; the build, test and security workflows use `go-version-file: go.mod`. |
+| Local/CI SPA snapshot and frontend tooling | [`Makefile`](../Makefile) and [`frontend/Makefile`](../frontend/Makefile) run Node 22 in Docker locally; the frontend/security CI jobs use Node 22 through `actions/setup-node` on hosted runners. |
+| Docker release image | [`docker/Dockerfile`](../docker/Dockerfile) uses `node:26-alpine` for the SPA and `golang:1.27.0-bookworm` for the backend stage; [`image.yml`](../.github/workflows/image.yml) builds that root-context file. |
+| Canonical supported workflow | Run `make spa-snapshot` after frontend changes, then `make build` or an image target. Host Node.js is not required. |
+
+Formal alignment of the Go 1.25.13/1.27 and Node 22/26 pins is a documented follow-up, not an
+assumption about intent.
+
+The shipped shell and branding contract uses **Sealed C** by default, gives a configured custom logo
+priority over the fallback mark, and chooses contrast-safe custom-accent ink without changing status
+colors. A responsive navigation drawer preserves access at narrow widths; workspace transitions fence
+late organization/project responses; overlays keep accessible focus behavior; SearchBox is a combobox
+with stale-response fencing; and Dashboard, breadcrumbs, theme control and announcements distinguish
+loading/no-data/error and context states. This is presentation-only: the shell does not change the API
+or data model, and status semantics and reliability formulas remain unchanged. See
+[`docs/brand-guidelines.md`](brand-guidelines.md) and
+[`docs/specs/cross-brand-identity.md`](specs/cross-brand-identity.md).
+
+Operator recovery is deliberately separate from the normal CLI quickstart:
+
+| Command | Required flags and purpose | Operational boundary |
+|---|---|---|
+| `cerbix adopt-fact-month` | `--config <path> --month YYYY-MM [--timeout 10m]`; moves one month of service-reliability facts out of the `service_reliability_buckets_default` partition through the shipped copy-authoritative adoption path. | Operator/admin maintenance tool; no dry-run or confirmation; idempotent for an attached month; use a maintenance window because the fenced cutover holds the parent through commit. |
+| `cerbix enqueue-service-repair` | `--config <path> --project <id> --service <id> --from RFC3339 --to RFC3339`; queues an admin repair after flooring/ceiling to canonical buckets. | Operator/admin maintenance tool; no dry-run or confirmation; invocation only enqueues, while the scheduler recomputes through normal repair machinery; when a recompute changes a sealed bucket, that transaction records before/after audit evidence; it can affect sealed service-reliability facts and derived buckets. |
+
+See the [runbook recovery procedures](runbook.md#service-reliability-operations-fr-021) and the
+[partial current-domain ERDs](architecture.md#8-current-domain-partial-erd-views). The catalog excludes
+`migrate`, `reencrypt`, `gate check` and `change record`: they are migration, key-rotation or pipeline
+operations rather than recovery commands.
+
 ---
 
 # Part 2 — Map of the preferred deployment

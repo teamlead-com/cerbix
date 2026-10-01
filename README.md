@@ -104,6 +104,22 @@ ingestion anywhere in it, and no automatic root-cause analysis: what it offers i
 correlation candidates and a heuristic context note over a dependency graph **you**
 declared.
 
+## Shell and instance branding
+
+The shipped SPA uses **Sealed C** as its default identity, keeps a configured custom logo ahead of the
+fallback mark, and selects contrast-safe ink for a custom accent without changing operational status
+colors. The responsive shell keeps navigation reachable through a focus-managed drawer; workspace
+changes are fenced so stale organization/project responses cannot overwrite the current context; menus
+and dialogs share accessible overlay/focus behavior; and SearchBox exposes combobox semantics with
+stale-response fencing. Dashboard loading, no-data and error states remain explicit, while breadcrumbs,
+theme state and announcements expose their context and live-region semantics. See
+[`docs/brand-guidelines.md`](docs/brand-guidelines.md) and
+[`docs/specs/cross-brand-identity.md`](docs/specs/cross-brand-identity.md) for the current contract.
+
+This is shell and presentation work only: cerbix still does not execute deploys or manage infrastructure,
+the shell does not change the API or data model, and status semantics and reliability formulas are
+unchanged.
+
 ## Where it fits
 
 | Alongside | The honest relationship |
@@ -228,7 +244,37 @@ compatibility policy:
 | Docker image SPA stage | `node:26-alpine`. |
 
 The repository does not currently state that the Go 1.25.13/1.27 or Node 22/26 differences are
-intentional policy; aligning or formalizing those pins is a separate follow-up.
+intentional policy; aligning or formalizing those pins is a separate follow-up. The supported repository
+workflow does not require host Node.js: use `make spa-snapshot` for the committed SPA and then `make build`.
+
+### Operator-only recovery commands
+
+These commands are **admin/operator maintenance tools**, not ordinary user-facing quickstart commands.
+They operate on persisted reliability evidence and should be run with the instance's normal database
+backup and maintenance-window discipline.
+
+- `cerbix adopt-fact-month --config <path> --month YYYY-MM [--timeout 10m]` adopts one month of
+  service-reliability facts stranded in `service_reliability_buckets_default` into its monthly partition.
+  `--config` and `--month` are required; `--timeout` is a positive budget for the fenced cutover and
+  defaults to 10 minutes. Use it when automatic adoption reports an oversize month or continues to
+  time out after writers are quiesced. There is no dry-run or confirmation prompt. The copy-authoritative
+  path is idempotent: an already-attached month is a no-op success. It changes physical partition
+  placement, not the values or parent-table visibility of existing service reliability facts; run it in
+  a maintenance window because the cutover takes a parent lock through commit. See the
+  [fact-partition recovery section](docs/runbook.md#fact-partitions).
+- `cerbix enqueue-service-repair --config <path> --project <id> --service <id> --from RFC3339 --to RFC3339`
+  enqueues an audited `admin` repair for a service-reliability range. All flags are required; `from` and
+  `to` are parsed as RFC3339, `to` must be later, and the store floors/ceils the range to canonical
+  buckets. There is no dry-run or confirmation prompt. The command only queues durable work; the
+  scheduler leader performs the recompute through normal repair machinery, with same-reason overlap
+  coalescing. When a recompute changes a sealed bucket, the materialization transaction records
+  before/after audit evidence. It can restate sealed service facts and derived reliability buckets, so
+  selecting the range is an operator decision and must respect raw-evidence retention. See
+  [restating pre-fix history](docs/runbook.md#restating-pre-fix-history-iter-0139-carry-in-defect).
+
+The recovery catalog is intentionally limited to these two shipped recovery paths. `migrate`,
+`reencrypt`, `gate check`, and `change record` are operational or pipeline commands, not recovery
+commands in this catalog.
 
 CLI:
 

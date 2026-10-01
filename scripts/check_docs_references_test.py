@@ -1658,5 +1658,58 @@ class EveryGuardIsActuallyReached(unittest.TestCase):
         )
 
 
+class ArchitectureSemanticGuards(unittest.TestCase):
+    """The architecture claims that drifted in Wave 1 are checked as claim shapes, not prose style."""
+
+    def test_every_bare_agent_route_is_rejected(self):
+        for suffix in cdr.ARCHITECTURE_AGENT_ROUTES:
+            found = cdr.architecture_route_findings(f"/agent/{suffix}")
+            self.assertEqual(len(found), 1, (suffix, found))
+            self.assertIn(f"/agent/{suffix}", found[0])
+
+    def test_versioned_agent_routes_are_accepted(self):
+        text = (
+            "GET /api/v1/agent/jobs, POST /api/v1/agent/results, "
+            "POST /api/v1/agent/backfill, POST /api/v1/agent/heartbeat"
+        )
+        self.assertEqual(cdr.architecture_route_findings(text), [])
+
+    def test_universal_daily_partition_claim_is_rejected(self):
+        old = "Table `heartbeats` is daily RANGE-partitioned by ts."
+        found = cdr.architecture_storage_findings(old)
+        self.assertTrue(any("universal" in message for message in found), found)
+
+    def test_adaptive_storage_vocabulary_is_required(self):
+        current = (
+            "TimescaleDB hypertable uses chunks and drop_chunks; plain PostgreSQL uses "
+            "daily partitions and a DEFAULT partition with manual retention."
+        )
+        self.assertEqual(cdr.architecture_storage_findings(current), [])
+
+    def test_retired_heartbeat_erd_fields_are_rejected(self):
+        old = """heartbeats {\n  timestamptz ts PK\n  bigint up_count\n  bigint total_count\n}"""
+        found = cdr.architecture_erd_findings(old)
+        self.assertEqual(len(found), 3, found)
+
+    def test_simplified_queue_diagram_must_not_be_called_exact(self):
+        old = "The exact queue topology is checks.jobs.core and checks.results."
+        found = cdr.architecture_queue_findings(old)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("checks.jobs.<region>", found[0])
+
+    def test_exact_queue_claim_requires_every_current_family(self):
+        names = cdr.ARCHITECTURE_QUEUE_NAMES
+        incomplete = "exact queue topology: " + " ".join(name for name in names if name != "checks.canary.v3.<kind>@<version>.<region>")
+        found = cdr.architecture_queue_findings(incomplete)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("checks.canary.v3", found[0])
+        complete = "exact queue topology: " + " ".join(names)
+        self.assertEqual(cdr.architecture_queue_findings(complete), [])
+
+    def test_current_architecture_claims_pass_all_semantic_guards(self):
+        with open("docs/architecture.md", encoding="utf-8") as fh:
+            self.assertEqual(cdr.architecture_semantic_findings(fh.read()), [])
+
+
 if __name__ == "__main__":
     unittest.main()

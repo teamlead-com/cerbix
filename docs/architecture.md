@@ -314,7 +314,7 @@ sequenceDiagram
 
 ## 🗄️ 7. Database Entity-Relationship Diagram & Partitioning
 
-* **Adaptive raw storage**: when TimescaleDB is installed, `heartbeats` is a hypertable with one-day chunks created on demand, native compression after seven days, and retention through `drop_chunks`. On plain PostgreSQL it uses declarative daily `RANGE (ts)` partitions plus `heartbeats_default`; the leader creates dated partitions, drops fully expired ones, and deletes expired rows stranded in the DEFAULT partition.
+* **Adaptive raw storage**: when TimescaleDB is installed, `heartbeats` is a hypertable with one-day chunks created on demand, native compression after seven days, and retention through `drop_chunks`. On plain PostgreSQL it uses declarative daily `RANGE (ts)` partitions plus `heartbeats_default`; the leader creates dated partitions and performs manual retention/default cleanup by dropping expired partitions and deleting expired rows stranded in the DEFAULT partition.
 * **Heartbeat identity**: raw rows are idempotent under `UNIQUE (monitor_id, ts)`; `ts` is not a standalone primary key. `observed_at` keeps the raw probe/client observation time separately from the effective ordering timestamp `ts`.
 * **Daily Rollup**: the scheduler leader maintains `heartbeats_daily` with `up` and `total` counts. The rollup schema and query semantics are the same in both raw-storage modes.
 
@@ -365,3 +365,381 @@ erDiagram
         timestamptz next_retry_at
     }
 ```
+
+## 8. Current-domain partial ERD views
+
+The diagrams below are **partial domain views**, not a complete database ERD. They document the
+persisted relationships of the reliability subsystems that are easy to misread from the older core
+ERD. `PK`, `UNIQUE`, `FK`, and nullable references are called out from the migrations; a logical
+relationship is not presented as a foreign key when the schema deliberately does not have one.
+
+### 8.1 Service reliability — partial domain view
+
+Source of truth: [`00064_service_reliability.sql`](../internal/store/migrations/00064_service_reliability.sql),
+[`00066_managed_services.sql`](../internal/store/migrations/00066_managed_services.sql),
+[`00067_service_materialization_driver.sql`](../internal/store/migrations/00067_service_materialization_driver.sql),
+[`00069_service_owner_tenancy.sql`](../internal/store/migrations/00069_service_owner_tenancy.sql),
+[`00070_owner_fk_and_maintenance_provenance.sql`](../internal/store/migrations/00070_owner_fk_and_maintenance_provenance.sql),
+[`00071_materialization_era.sql`](../internal/store/migrations/00071_materialization_era.sql),
+[`00080_service_impact.sql`](../internal/store/migrations/00080_service_impact.sql),
+[`00081_status_projection.sql`](../internal/store/migrations/00081_status_projection.sql),
+[`00082_alerting_ownership.sql`](../internal/store/migrations/00082_alerting_ownership.sql),
+[`00084_service_incidents.sql`](../internal/store/migrations/00084_service_incidents.sql),
+[`00091_service_renotify.sql`](../internal/store/migrations/00091_service_renotify.sql),
+the API wiring [`api.go`](../internal/api/api.go), and the service-reliability specification
+[`func-service-reliability.md`](specs/func-service-reliability.md).
+
+```mermaid
+erDiagram
+    projects ||--o{ services : owns
+    services ||--o{ service_definition_revisions : versions
+    service_definition_revisions ||--o{ service_definition_members : snapshots
+    services ||--o{ service_member_refs : current_membership
+    monitors ||--o{ service_member_refs : declared_monitor
+    services ||--o{ service_evaluation_epochs : evaluates
+    service_definition_revisions ||--o{ service_evaluation_epochs : governs
+    service_evaluation_epochs ||--o{ service_reliability_buckets : computes
+    services ||--o{ service_reliability_buckets : stores
+    services ||--o| service_materialization : optional_watermark
+    services ||--o{ service_bucket_ingest : handshakes
+    services ||--o{ service_late_arrivals : records
+    services ||--o{ service_repair_ranges : repairs
+    services ||--o{ service_dependencies : child
+    services ||--o{ service_dependencies : parent
+    services o|--o{ incidents : optional_anchor
+    incidents ||--o| incident_member_snapshots : optional_snapshot
+    incidents ||--o{ incident_service_impacts : impact
+    services ||--o{ incident_service_impacts : affected_service
+    status_pages ||--o{ components : projects
+    services o|--o{ components : optional_service_binding
+
+    services {
+        uuid id PK
+        uuid project_id FK
+        text slug UK_project_slug
+        uuid escalation_policy_id FK_nullable
+        uuid oncall_schedule_id FK_nullable
+        bigint graph_generation
+        boolean owns_paging
+        bigint alert_config_generation
+    }
+    service_definition_revisions {
+        uuid id PK
+        uuid service_id FK
+        uuid project_id
+        bigint revision UK_service_revision
+        timestamptz effective_at
+        text state
+        jsonb policies
+    }
+    service_definition_members {
+        uuid revision_id FK
+        uuid project_id
+        uuid monitor_id "historical; no FK by design"
+        text role
+        PK revision_id_monitor_id_role
+    }
+    service_member_refs {
+        uuid service_id FK
+        uuid project_id
+        uuid monitor_id FK
+        text role
+        PK service_id_monitor_id_role
+    }
+    service_evaluation_epochs {
+        uuid id PK
+        uuid service_id FK
+        uuid project_id
+        uuid revision_id FK
+        bigint epoch_seq UK_service_epoch
+        timestamptz effective_at
+        jsonb snapshot
+    }
+    service_reliability_buckets {
+        uuid service_id FK
+        uuid project_id
+        uuid epoch_id FK
+        timestamptz bucket_start
+        bigint good_us
+        bigint bad_us
+        bigint unknown_us
+        bigint excluded_us
+        bigint healthy_us
+        bigint degraded_us
+        bigint down_us
+        text state
+        PK service_id_bucket_start
+    }
+    service_materialization {
+        uuid service_id PK_FK
+        uuid project_id
+        timestamptz materialization_start
+        timestamptz era_start
+        timestamptz sealed_through_nullable
+        timestamptz materialized_through_nullable
+    }
+    service_bucket_ingest {
+        uuid service_id FK
+        uuid project_id
+        timestamptz bucket_start
+        bigint ingest_generation
+        PK service_id_bucket_start
+    }
+    service_late_arrivals {
+        uuid service_id FK
+        uuid project_id
+        timestamptz bucket_start
+        uuid monitor_id
+        bigint arrivals
+        PK service_id_bucket_start_monitor_id
+    }
+    service_repair_ranges {
+        uuid id PK
+        uuid service_id FK
+        uuid project_id
+        timestamptz range_start
+        timestamptz range_end
+        text reason
+        text state
+        timestamptz lease_expires_at_nullable
+    }
+    service_dependencies {
+        uuid service_id FK
+        uuid depends_on_id FK
+        uuid project_id
+        PK service_id_depends_on_id
+    }
+    incidents {
+        uuid id PK
+        uuid project_id FK
+        uuid service_id FK_nullable
+        uuid monitor_id FK_nullable
+        text source
+        text status
+        CHECK at_most_one_anchor
+    }
+    incident_member_snapshots {
+        uuid incident_id PK_FK
+        uuid project_id
+        jsonb members
+    }
+    incident_service_impacts {
+        uuid incident_id FK
+        uuid service_id FK
+        uuid project_id
+        text role
+        text_array path
+        PK incident_id_service_id_role
+    }
+    components {
+        uuid status_page_id FK
+        uuid org_id FK
+        uuid source_project FK_nullable
+        uuid service_id FK_nullable
+        text source
+        bigint revision
+    }
+```
+
+The raw reliability facts are not a second heartbeat table: `service_reliability_buckets` is a
+monthly `RANGE (bucket_start)` table with a DEFAULT partition, with a composite primary key
+`(service_id, bucket_start)` and a composite epoch FK. Historical definition members intentionally
+retain `monitor_id` without a monitor FK; current `service_member_refs` is the live delete guard.
+`service_materialization` owns the watermark/progress state, while `service_repair_ranges` owns durable
+repair work. Status-page `components.service_id` is nullable and is active only when `source =
+service`; the source project and page-scope constraints are separate persisted rules.
+
+### 8.2 Reliability gate — partial domain view
+
+Source of truth: [`00093_reliability_gate.sql`](../internal/store/migrations/00093_reliability_gate.sql),
+[`00108_project_gate_policies.sql`](../internal/store/migrations/00108_project_gate_policies.sql),
+[`00109_gate_policy_all_windows.sql`](../internal/store/migrations/00109_gate_policy_all_windows.sql),
+and [`func-reliability-gate.md`](specs/func-reliability-gate.md),
+[`func-project-gate-policy.md`](specs/func-project-gate-policy.md), and
+[`func-reliability-gate-all-windows.md`](specs/func-reliability-gate-all-windows.md).
+
+```mermaid
+erDiagram
+    projects ||--o{ project_gate_policies : owns
+    services ||--o| service_gate_policies : configures
+    services ||--o{ service_gate_overrides : receives
+    projects ||--o{ service_gate_decisions : scopes
+    services o|--o{ service_gate_decisions : nullable_subject
+
+    project_gate_policies {
+        uuid project_id PK_FK
+        text window_name_nullable
+        text window_mode
+        int schema_version
+        jsonb clauses
+        int budget_consumed_percent
+        int max_seal_lag_seconds
+        text unknown_behavior
+        bigint revision
+        timestamptz deleted_at_nullable
+    }
+    service_gate_policies {
+        uuid service_id PK_FK
+        uuid project_id
+        text window_name_nullable
+        text window_mode
+        int schema_version
+        jsonb clauses
+        bigint revision
+        timestamptz deleted_at_nullable
+    }
+    service_gate_overrides {
+        uuid id PK
+        uuid service_id FK
+        uuid project_id
+        bigint policy_revision
+        uuid actor_user_id FK_nullable
+        boolean via_token
+        uuid revoked_by_user_id FK_nullable
+        text revoked_reason_nullable
+    }
+    service_gate_decisions {
+        uuid id UNIQUE_per_partition
+        timestamptz evaluated_at PK_part
+        uuid project_id FK
+        uuid service_id FK_nullable
+        text policy_source_nullable
+        uuid policy_owner_id_nullable
+        text state
+        text action_nullable
+        jsonb reasons
+        jsonb evidence
+        jsonb evaluated_windows
+        uuid override_id_nullable "no FK; decision outlives override/service"
+    }
+    service_gate_decision_partitions {
+        date day PK
+        text relname UK
+        uuid owner_token UK
+        oid relid
+        text state
+    }
+```
+
+Policy revisions are generation columns on the service/project policy rows, not rows in a separate
+revision table. The effective source (`service` or `project`) and owner are persisted on overrides and
+non-`NOT_CONFIGURED` decisions; evaluated windows and evidence are JSONB on the immutable decision
+row, not separate child tables. `service_gate_decisions` is partitioned by `evaluated_at`, has the
+primary key `(evaluated_at, id)`, a per-partition `UNIQUE (id)`, and no DEFAULT partition. The
+partition registry is the persisted ownership marker used by retention; `override_id`, `policy_owner_id`,
+and `decision_id`-style historical references are deliberately not all foreign keys because the evidence
+must remain readable after referenced policy/service/partition history changes.
+
+### 8.3 Change intelligence — partial domain view
+
+Source of truth: [`00094_change_intelligence.sql`](../internal/store/migrations/00094_change_intelligence.sql),
+[`func-change-intelligence.md`](specs/func-change-intelligence.md), and the CLI implementation
+[`change.go`](../internal/cli/change.go).
+
+```mermaid
+erDiagram
+    services ||--o{ service_changes : records
+    incidents ||--o{ incident_changes : precedes
+    service_changes ||--o{ incident_changes : linked_change
+
+    service_changes {
+        uuid id PK
+        uuid project_id
+        uuid service_id FK
+        text source
+        text external_id
+        text kind
+        text phase
+        timestamptz occurred_at
+        uuid decision_id_nullable "validated reference; no FK"
+        UNIQUE service_source_external_phase
+        UNIQUE id_project_id
+    }
+    incident_changes {
+        uuid incident_id FK
+        uuid change_id FK
+        uuid project_id
+        text role
+        timestamptz occurred_at
+        int lag_seconds
+        PK incident_id_change_id
+    }
+```
+
+A change group is a logical identity `(service_id, source, external_id)`, not a persisted table. Each
+phase is append-only and is protected by `UNIQUE (service_id, source, external_id, phase)`. The optional
+gate decision reference is validated by the store but has no FK because gate partitions age out; incident
+links copy the anchored phase time and lag and use composite tenant FKs to both endpoints.
+
+### 8.4 Expected-run ledger — partial domain view
+
+Source of truth: [`00102_expected_run_ledger.sql`](../internal/store/migrations/00102_expected_run_ledger.sql),
+[`00103_expected_run_reservation.sql`](../internal/store/migrations/00103_expected_run_reservation.sql),
+and [`func-expected-run-ledger.md`](specs/func-expected-run-ledger.md).
+
+```mermaid
+erDiagram
+    monitors ||--o| monitor_schedule : participating_schedule
+    monitors ||--o{ expected_runs : expected_window
+
+    monitor_schedule {
+        uuid monitor_id PK_FK
+        uuid project_id
+        timestamptz next_due_at
+        int interval_in_force
+        boolean confirm_phase
+        bigint execution_revision
+        timestamptz gap_truncated_before_nullable
+    }
+    expected_runs {
+        uuid monitor_id PK_part
+        uuid project_id
+        timestamptz due_at PK_part
+        uuid job_id_nullable
+        int carrier_generation_nullable
+        timestamptz reserved_at_nullable
+        timestamptz issued_at_nullable
+        timestamptz claimed_at_nullable
+        timestamptz terminal_at_nullable
+        text outcome_nullable
+        text skip_reason_nullable
+        text withheld_reason
+    }
+```
+
+`expected_runs` is partitioned by `due_at` and has `expected_runs_default`; its identity is
+`(monitor_id, due_at)`. `monitor_schedule` and `expected_runs` use composite monitor/project FKs and
+there is no persisted FK or direct schema relation from the ledger to `heartbeats` or service reliability
+facts: the ledger records expectation and execution state independently, while result correlation is
+owned by the store/runtime paths. Retention creates/drops partitions and purges the DEFAULT partition;
+there is no separate partition-ownership registry for this ledger.
+
+### 8.5 Audit log — partial domain view
+
+Source of truth: [`00018_audit_logs.sql`](../internal/store/migrations/00018_audit_logs.sql),
+[`00047_admin_users.sql`](../internal/store/migrations/00047_admin_users.sql),
+[`00107_audit_logs_retention_index.sql`](../internal/store/migrations/00107_audit_logs_retention_index.sql),
+[`audit.go`](../internal/store/audit.go), and [`auditretention.go`](../internal/store/auditretention.go).
+
+```mermaid
+erDiagram
+    organizations o|--o{ audit_logs : optional_owner
+    users o|--o{ audit_logs : nullable_actor
+
+    audit_logs {
+        uuid id PK
+        uuid org_id FK_nullable
+        uuid actor_user_id FK_nullable
+        boolean via_token
+        text action
+        text target
+        timestamptz created_at
+    }
+```
+
+`audit_logs.org_id` is nullable: organization-scoped entries cascade with their organization, while
+instance-level global-admin entries have no organization parent. `actor_user_id` is nullable and uses
+`ON DELETE SET NULL`, so the actor label is not a hard historical dependency. Gate policy/override,
+incident, monitor, and other principal writes use this same organization-or-instance audit log; the
+target is text rather than a foreign-key graph. Migration `00107` adds the retention index only; it does
+not add another audit entity or a persisted relation to the audited object.

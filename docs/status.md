@@ -3,6 +3,13 @@
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. `DEFERRED` is not permitted. Every `DONE` links to code,
 tests, and metrics.
 
+## Latest closed iteration (iter-0195 — OPENED AND CLOSED 2026-10-01 BY THE OWNER. Scope: Wave 2 architecture and operator documentation refresh; documentation/tooling only.)
+
+| ID | Acceptance criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| DOC-0195 | Current-domain partial ERDs, operator recovery CLI coverage, cross-brand/shell overview, toolchain contexts, and architecture semantic guards are tied to shipped source. | DONE | [`iter-0195-wave-2-documentation-refresh.md`](iterations/iter-0195-wave-2-documentation-refresh.md) records the source map, final ERDs, recovery catalog, shell/toolchain wording, and the owner closure; the independent docs-only review is APPROVED with no findings. |
+| DoD-0195 | Authorized documentation/tooling scope passes targeted tests, `make docs-check`, and `git diff --check`, then receives independent docs-only review and owner approval before one local commit. | DONE | 192 checker tests, 8 focused architecture tests, the living-document gate, scope inspection and `git diff --check` pass; the owner authorized one local commit and push remains unauthorized. |
+
 ## Latest closed iteration (iter-0194 — OPENED AND CLOSED 2026-10-01 BY THE OWNER. Scope: Wave 1 factual reconciliation of architecture and operator documentation; no product decision, code, API, or schema change.)
 
 | ID | Acceptance criterion | Status | Evidence |

@@ -982,6 +982,12 @@ Prometheus rules are in `docker/alerts/secret-inventory.rules.yml`. The live smo
 
 ## Service reliability operations (FR-021)
 
+The persisted relationships for this subsystem are summarized in the
+[service-reliability partial ERD](architecture.md#81-service-reliability--partial-domain-view). The two
+operator-only recovery commands documented below are also listed in the
+[operator recovery catalog](overview.md#15-supported-toolchain-shell-ux-and-operator-recovery); they
+are maintenance tools, not ordinary user-facing commands.
+
 The service-reliability subsystem (declared services, duration-weighted facts, durable repair
 ranges) exports its operational surface only from the ACTIVE scheduler leader; a deposed
 leader clears its gauges on step-down, so exactly one process describes the cluster.

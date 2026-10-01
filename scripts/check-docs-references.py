@@ -54,7 +54,7 @@ def read(path, **kw):
 # stopped being true. Found while mutation-testing the checker — an injected broken citation there
 # was not caught, because the file was never read.
 LIVING = ['docs/status.md', 'docs/traceability.md', 'docs/overview.md', 'docs/runbook.md',
-          'docs/project-description.md', 'docs/roadmap.md', 'README.md', 'CLAUDE.md',
+          'docs/architecture.md', 'docs/project-description.md', 'docs/roadmap.md', 'README.md', 'CLAUDE.md',
           'CHANGELOG.md',
           # The other READMEs joined on 2026-09-04 (owner: "bring the READMEs 1:1 with the code").
           # Nothing had ever read them, and it showed: `frontend/README.md` described a "planned"
@@ -1789,8 +1789,93 @@ def check_fr032_carrier_gate_contract(body, spec='docs/specs/func-expected-run-l
     return out
 
 
+ARCHITECTURE_DOC = 'docs/architecture.md'
+ARCHITECTURE_AGENT_ROUTES = (
+    'jobs', 'results', 'backfill', 'tests', 'test-results', 'heartbeat',
+)
+ARCHITECTURE_STORAGE_TERMS = (
+    'timescaledb', 'hypertable', 'chunk', 'plain postgresql', 'default',
+    'drop_chunks', 'manual',
+)
+ARCHITECTURE_QUEUE_NAMES = (
+    'checks.jobs.<region>', 'checks.jobs.v2.<region>', 'checks.jobs.v3.<region>',
+    'checks.jobs.v4.<region>', 'checks.canary.<kind>@<version>.<region>',
+    'checks.canary.v3.<kind>@<version>.<region>', 'checks.tests.<region>',
+    'checks.tests.v2.<region>', 'checks.tests.v3.<region>', 'checks.results', 'checks.dead',
+)
+
+
+def architecture_route_findings(text):
+    """Reject bare agent routes while allowing the current /api/v1/agent surface."""
+    bad = []
+    for suffix in ARCHITECTURE_AGENT_ROUTES:
+        bare = re.compile(r'(?<!/api/v1)/agent/' + re.escape(suffix) + r'\b')
+        if bare.search(text):
+            bad.append(f'architecture documents bare /agent/{suffix}; use /api/v1/agent/{suffix}')
+    return bad
+
+
+def architecture_storage_findings(text):
+    """Require adaptive heartbeat vocabulary and reject the old universal partition claim."""
+    bad = []
+    stale = (
+        re.compile(r'\btable\s+[`"]?heartbeats[`"]?\s+is\s+(?:daily\s+)?range', re.I),
+        re.compile(r'\bheartbeats\b[^.\n]{0,120}\b(?:always|universally|only)\b[^.\n]{0,120}\b(?:range|partition)', re.I),
+    )
+    for rx in stale:
+        if rx.search(text):
+            bad.append('architecture presents daily RANGE partitions as the universal heartbeats storage model')
+            break
+    lowered = text.lower()
+    for term in ARCHITECTURE_STORAGE_TERMS:
+        if term not in lowered:
+            bad.append(f'architecture heartbeat storage is missing truthful vocabulary: {term}')
+    return bad
+
+
+def architecture_erd_findings(text):
+    """Reject the heartbeat ERD fields retired by the current schema."""
+    bad = []
+    for token in ('up_count', 'total_count'):
+        if re.search(r'\b' + re.escape(token) + r'\b', text):
+            bad.append(f'architecture ERD still names retired heartbeat field {token}')
+    if re.search(r'(?m)^\s*timestamptz\s+ts\s+PK\b', text):
+        bad.append('architecture ERD still presents ts as a standalone heartbeat primary key')
+    return bad
+
+
+def architecture_queue_findings(text):
+    """Keep a diagram labelled exact only when it enumerates the current queue topology."""
+    if not re.search(r'\bexact\s+(?:rabbitmq\s+)?queue\s+topology\b', text, re.I):
+        return []
+    missing = [name for name in ARCHITECTURE_QUEUE_NAMES if name not in text]
+    if not missing:
+        return []
+    return [
+        'architecture calls a queue diagram exact but omits current queue families: ' + ', '.join(missing)
+    ]
+
+
+def architecture_semantic_findings(text):
+    """Run the small, claim-focused semantic guards for the architecture document."""
+    return (
+        architecture_route_findings(text)
+        + architecture_storage_findings(text)
+        + architecture_erd_findings(text)
+        + architecture_queue_findings(text)
+    )
+
+
+def check_architecture_semantics():
+    if not os.path.exists(ARCHITECTURE_DOC):
+        return []
+    return [(ARCHITECTURE_DOC, 1, 'architecture', message)
+            for message in architecture_semantic_findings(read(ARCHITECTURE_DOC))]
+
+
 def check_enumerations():
     bad = []
+    bad += check_architecture_semantics()
 
     # 1. README's check-type highlight vs the constants — the COUNT and the SET.
     doc = read('README.md')

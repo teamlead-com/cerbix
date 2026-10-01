@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### 🩹 Fixed
 
+- **Architecture and operator documentation now follows the current runtime.** HTTP-pull diagrams use the real `/api/v1/agent/*` routes; heartbeat storage is described as adaptive and the PostgreSQL 15+ floor is separated from the repository's PostgreSQL 16 images; README build and deploy/change boundaries match the supported workflow; and the top-level configuration table includes the current service, audit, and expected-run ledger sections.
+
 - **Instance branding and detail reads are fenced.** Custom accents choose readable `--accent-ink` values and clear all inline accent properties when removed. Incident Detail rejects stale-generation and
   foreign-project responses before publishing incident data or actions.
 

@@ -58,7 +58,7 @@ flowchart TB
     end
 
     subgraph InfraTier["Storage & Bus Infrastructure"]
-        MQ[("RabbitMQ 4.3 Cluster<br/>(Exchanges & Queues)")]
+        MQ[("RabbitMQ 4.3 Cluster<br/>(Named queues via default exchange)")]
         PG[("PostgreSQL 16<br/>(Heartbeats, Rollups, Outbox, Settings)")]
     end
 
@@ -72,10 +72,10 @@ flowchart TB
     SCH1 ---|Advisory Lock Leader Election| PG
     SCH1 & SCH2 --- MQ
 
-    W1 & W2 ---|AMQP checks.jobs / checks.results| MQ
+    W1 & W2 ---|AMQP job/test/result queue families| MQ
 
-    AGT1 -->|"Outbound HTTPS GET /agent/jobs (Long-Polling)"| API1
-    AGT1 -->|Outbound HTTPS POST /agent/results| API1
+    AGT1 -->|"Outbound HTTPS GET /api/v1/agent/v4/jobs (Long-Polling)"| API1
+    AGT1 -->|Outbound HTTPS POST /api/v1/agent/results| API1
 ```
 
 ---
@@ -107,7 +107,7 @@ sequenceDiagram
     W->>MQ: Publish Result (checks.results)
     MQ->>I: Deliver Result (Heartbeat)
     
-    I->>DB: Insert Heartbeat (Daily Partition)
+    I->>DB: Insert Heartbeat (Hypertable Chunk or RANGE Partition)
     I->>DB: SetMonitorStatus (Update status)
     
     alt Status Changed (UP -> DOWN)
@@ -137,44 +137,55 @@ sequenceDiagram
     participant GW as Geo-Worker (--region us-east)
     participant Target as Local Intranet Service
 
-    S->>MQ: Publish Job -> Exchange (Routing Key: checks.jobs.us-east)
+    S->>MQ: Publish to the selected named jobs queue via the default exchange
     MQ->>GW: Deliver Job via AMQP
     GW->>Target: Probe Intranet Target (SSRF Guarded)
     Target-->>GW: Result
-    GW->>MQ: Publish Result -> Queue: checks.results
+    GW->>MQ: Publish to named queue checks.results via the default exchange
 ```
 
-### 💡 4.2 Data Flow via RabbitMQ Queues
+### 💡 4.2 RabbitMQ Queue Families (Simplified)
 
-The diagram below details the exact queue topology and data flow across RabbitMQ in AMQP mode:
+cerbix publishes directly to named queues through RabbitMQ's default exchange (`exchange=""`,
+the queue name as the routing key). It does not declare an application topic exchange or a
+routing-key binding contract. The diagram is intentionally family-level; the canonical and
+versioned queue names live in [`internal/dispatch/amqp.go`](../internal/dispatch/amqp.go).
 
 ```mermaid
-flowchart TD
+flowchart LR
     SCHED["Scheduler (Leader)"]
-    
-    Q_CORE["Queue: checks.jobs.core"]
-    Q_GEO1["Queue: checks.jobs.geo1"]
-    
-    W_CORE["Worker Pool (Core)"]
-    W_GEO1["Worker Pool (Geo-1)"]
-    
-    Q_RES["Queue: checks.results"]
-    
-    INGEST["API / Ingest Service"]
+    API["API / Ingest"]
+    WORKER["Regional Worker Pool"]
+
+    JOBS["Durable regional job queues<br/>checks.jobs.*"]
+    CANARY["Durable capability queues<br/>checks.canary.*"]
+    TESTS["Durable auto-delete test queues<br/>checks.tests.*"]
+    REPLY["Server-named exclusive reply queue"]
+    RESULTS["Durable shared queue<br/>checks.results"]
+    DEAD["Durable inspection queue<br/>checks.dead"]
     PG[("PostgreSQL")]
 
-    SCHED -->|publish CheckJob| Q_CORE
-    SCHED -->|publish CheckJob| Q_GEO1
-
-    Q_CORE -->|consume| W_CORE
-    Q_GEO1 -->|consume| W_GEO1
-
-    W_CORE -->|publish Result| Q_RES
-    W_GEO1 -->|publish Result| Q_RES
-
-    Q_RES -->|consume| INGEST
-    INGEST -->|write heartbeats| PG
+    SCHED -->|jobs; per-message TTL about one interval| JOBS
+    SCHED -->|canary jobs; same TTL rule| CANARY
+    API -->|test RPC; bounded request TTL| TESTS
+    JOBS & CANARY -->|consume| WORKER
+    TESTS -->|consume| WORKER
+    WORKER -->|test reply| REPLY
+    REPLY --> API
+    WORKER -->|results; no TTL| RESULTS
+    RESULTS -->|consume| API
+    API -->|write heartbeats| PG
+    JOBS & CANARY & RESULTS -. poison bodies forwarded explicitly .-> DEAD
+    TESTS -. refused envelope-carrier bodies forwarded explicitly .-> DEAD
 ```
+
+| Family | Current named queues | Lifecycle and routing fact |
+| --- | --- | --- |
+| Scheduled jobs | `checks.jobs.<region>`, `checks.jobs.v2.<region>`, `checks.jobs.v3.<region>`, `checks.jobs.v4.<region>` | Durable regional queues. The selected carrier generation follows executor capability; each job has a per-message TTL of approximately its monitor interval. |
+| Async canary jobs | `checks.canary.<kind>@<version>.<region>`, `checks.canary.v3.<kind>@<version>.<region>` | Durable regional capability queues. An executor announces support by consuming the queue; jobs use the same interval-based TTL rule. |
+| Test Connection | `checks.tests.<region>`, `checks.tests.v2.<region>`, `checks.tests.v3.<region>` | Durable, auto-delete regional request queues. Each RPC request has a bounded TTL and replies through a server-named, non-durable, exclusive, auto-delete queue. |
+| Results | `checks.results` | Durable shared queue with no result TTL; slow ingest must not discard valid results. |
+| Dead letter inspection | `checks.dead` | Durable shared queue. cerbix explicitly forwards poison job/result bodies and refused envelope-carrier test bodies; this is not a broker exchange/DLX contract. |
 
 ### 4.3 Mode B: HTTP Pull-Agent (Outbound HTTPS Only)
 
@@ -183,15 +194,15 @@ sequenceDiagram
     autonumber
     participant S as Central Scheduler
     participant DB as PostgreSQL (pull_jobs)
-    participant API as Central API (/agent/*)
+    participant API as Central API (/api/v1/agent/*)
     participant AG as HTTP Agent (--role agent)
     participant Target as Target Service
 
     S->>DB: Insert Job into pull_jobs table
     DB-->>API: NOTIFY 'pull_jobs', 'asia-south' (LISTEN/NOTIFY)
     
-    Note over AG: Long-Polling Request
-    AG->>API: GET /agent/jobs?region=asia-south
+    Note over AG: Generation-specific long-poll claim
+    AG->>API: GET /api/v1/agent/v4/jobs?region=asia-south
     Note over API: Hold Request (Up to 20s or until NOTIFY)
     API->>DB: Claim Job (FOR UPDATE SKIP LOCKED RETURNING)
     API-->>AG: Deliver Jobs Payload
@@ -200,17 +211,29 @@ sequenceDiagram
     Target-->>AG: Response
     
     alt Network Available (Live Ingestion)
-        AG->>API: POST /agent/results?region=asia-south
+        AG->>API: POST /api/v1/agent/results?region=asia-south
         Note over API: Region Scoping Check (monitor.region == region)
         API->>DB: Ingest Heartbeat & Reconcile Live Incident
     else Network Interrupted (Edge Buffering)
         Note over AG: Save Result to In-Memory Ring Buffer (cap=10000)
         Note over AG: Network Restored
-        AG->>API: POST /agent/backfill?region=asia-south
-        API->>DB: InsertHeartbeatsBulk (SLA-only, Bypass Live Reconcile)
+        AG->>API: POST /api/v1/agent/backfill?region=asia-south
+        API->>DB: Record Historical Results (SLA-only, Bypass Live Reconcile)
         Note over DB: ON CONFLICT DO NOTHING (Historical SLA, No False Alerts)
     end
 ```
+
+The sequence shows the generation-4 job claim used by a ledger-capable current agent. The agent
+selects the highest route it can consume and falls back across compatible generations during a
+rolling upgrade. The complete HTTP-pull surface registered by `AgentRouter` is:
+
+| Purpose | Method and route |
+| --- | --- |
+| Job claims, carrier generations 1–4 | `GET /api/v1/agent/jobs`, `GET /api/v1/agent/v2/jobs`, `GET /api/v1/agent/v3/jobs`, `GET /api/v1/agent/v4/jobs` |
+| Live results and historical edge-buffer replay | `POST /api/v1/agent/results`, `POST /api/v1/agent/backfill` |
+| Test Connection claims, carrier generations 1–3 | `GET /api/v1/agent/tests`, `GET /api/v1/agent/v2/tests`, `GET /api/v1/agent/v3/tests` |
+| Test Connection result | `POST /api/v1/agent/test-results` |
+| Liveness and capability announcement | `POST /api/v1/agent/heartbeat` |
 
 ---
 
@@ -291,8 +314,9 @@ sequenceDiagram
 
 ## 🗄️ 7. Database Entity-Relationship Diagram & Partitioning
 
-* **Partitioning**: Table `heartbeats` is daily RANGE-partitioned (`RANGE PARTITION BY (ts)`). The leader scheduler automatically creates upcoming partitions and drops old ones according to `retention_days`.
-* **Daily Rollup**: Aggregates in `heartbeats_daily` are calculated in the background by the scheduler leader to serve instantaneous 90+ day SLA/SLI reports.
+* **Adaptive raw storage**: when TimescaleDB is installed, `heartbeats` is a hypertable with one-day chunks created on demand, native compression after seven days, and retention through `drop_chunks`. On plain PostgreSQL it uses declarative daily `RANGE (ts)` partitions plus `heartbeats_default`; the leader creates dated partitions, drops fully expired ones, and deletes expired rows stranded in the DEFAULT partition.
+* **Heartbeat identity**: raw rows are idempotent under `UNIQUE (monitor_id, ts)`; `ts` is not a standalone primary key. `observed_at` keeps the raw probe/client observation time separately from the effective ordering timestamp `ts`.
+* **Daily Rollup**: the scheduler leader maintains `heartbeats_daily` with `up` and `total` counts. The rollup schema and query semantics are the same in both raw-storage modes.
 
 ```mermaid
 erDiagram
@@ -316,8 +340,9 @@ erDiagram
     organizations ||--o{ webhooks : registers
 
     heartbeats {
-        uuid monitor_id FK
-        timestamptz ts PK
+        uuid monitor_id FK "part of UNIQUE(monitor_id, ts)"
+        timestamptz ts "part of UNIQUE(monitor_id, ts)"
+        timestamptz observed_at "nullable raw observation time"
         boolean up
         bigint latency_ms
         int code
@@ -327,8 +352,8 @@ erDiagram
     heartbeats_daily {
         uuid monitor_id PK
         date day PK
-        bigint up_count
-        bigint total_count
+        bigint up
+        bigint total
     }
 
     outbox {

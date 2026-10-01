@@ -39,9 +39,11 @@ database migrations are all embedded, so there is **no separate web server, no f
 bundle, and no migration scripts** to deploy. Point it at a Postgres, give it a config,
 run it.
 
-cerbix is a control plane for **reliability definitions and operational response** — not
-for your traffic, deploys or infrastructure. It sits out of band and acts on nothing but
-its own alerts, incidents and pages.
+cerbix is a control plane for **reliability definitions and operational response**. It stays
+out of band: it does not carry traffic, execute deploys, or manage infrastructure. Pipelines
+can record change facts and ask for a gate decision; cerbix stores those facts and relates
+them to subsequent reliability facts, while CI/CD chooses and performs the external action.
+cerbix itself acts only on its own alerts, incidents, escalations, and status pages.
 
 ### Highlights
 
@@ -124,17 +126,17 @@ distributed deployment:
 | `worker` | Stateless prober pool (AMQP). | RabbitMQ |
 | `agent` | HTTP-pull prober for a geo with no broker access (outbound HTTPS only). | — (DB-less/broker-less) |
 
-Stack: Go 1.25, Vue 3 + Vite + TypeScript (embedded via `go:embed`), PostgreSQL (pgx +
-embedded goose migrations), RabbitMQ (distributed roles only). No nginx — the binary
-serves the SPA; put Traefik / your ingress in front for TLS.
+Stack: Go (module floor 1.25.13), Vue 3 + Vite + TypeScript (embedded via `go:embed`),
+PostgreSQL (pgx + embedded goose migrations), RabbitMQ (distributed roles only). No nginx —
+the binary serves the SPA; put Traefik / your ingress in front for TLS.
 
 ## Quickstart
 
-Everything app-side is in the binary. The only external dependency is **PostgreSQL 15 or newer**
-(16 is what every image, compose file and CI job here uses). The schema itself needs 15: six
-migrations use the column-list `ON DELETE SET NULL (col)` form introduced in that release, and on 14
-they are a syntax error. `cerbix migrate` checks the server version before applying anything and
-refuses with that explanation rather than dying halfway through.
+Everything app-side is in the binary. **PostgreSQL 15+ is required. Repository images use
+PostgreSQL 16.** The schema itself needs 15: six migrations use the column-list
+`ON DELETE SET NULL (col)` form introduced in that release, and on 14 they are a syntax error.
+`cerbix migrate` checks the server version before applying anything and refuses with that
+explanation rather than dying halfway through.
 
 Migrations apply themselves on startup and a bootstrap admin is created from config.
 Full step-by-step production guides (Docker Compose and bare binary + systemd) live in
@@ -196,18 +198,37 @@ notes. The API contract lives in [`openapi.yaml`](openapi.yaml).
 
 ## Building
 
-```bash
-# Native (no Docker): frontend → embedded assets, then the Go binary.
-cd frontend && npm install && npm run build
-rm -rf ../internal/web/dist && cp -r dist ../internal/web/dist
-cd .. && go build -o cerbix ./cmd/cerbix
+Host Node.js is not required: repository frontend tooling runs in containers.
 
-# Or build the non-production images (multi-stage: SPA + binary → distroless).
-# Each build requires its initialized env file with the image pin matching that
-# topology's retained RabbitMQ volume:
+```bash
+# Backend-only build from the committed SPA snapshot.
+make build                    # writes bin/cerbix
+
+# After any frontend change, refresh the committed snapshot before building the binary.
+make spa-snapshot             # Node 22 container: npm ci + type-check + Vite build
+make build
+
+# Self-contained non-production images (SPA + binary → distroless).
+# Initialize the matching retained-broker env file first when required.
 make dev-build
 make geo-build
+
+# Direct release-style image build from the repository root.
+docker build -f docker/Dockerfile -t cerbix:local .
 ```
+
+Current repository toolchain pins are deliberately listed as facts rather than presented as a
+compatibility policy:
+
+| Path | Toolchain used |
+| --- | --- |
+| Go module and CI release binaries | Go 1.25.13 from `go.mod`; CI reads `go-version-file: go.mod`. |
+| Docker image backend stage | `golang:1.27.0-bookworm`. |
+| `make spa-snapshot`, `frontend/Makefile`, and CI frontend/security jobs | Node 22. |
+| Docker image SPA stage | `node:26-alpine`. |
+
+The repository does not currently state that the Go 1.25.13/1.27 or Node 22/26 differences are
+intentional policy; aligning or formalizing those pins is a separate follow-up.
 
 CLI:
 

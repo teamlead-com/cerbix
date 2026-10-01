@@ -53,10 +53,10 @@ exists in the product. They diverge in both directions — an area can ship on t
 | `func-secret-inventory.md` | Project-scoped write-only secrets, typed refs, encrypted dispatch (FR-020/NFR-015, D-0155) | full | shipped |
 | `func-monitoring-as-code.md` | Hot-reconciled, tenant-scoped Monitoring-as-Code file provider (FR-017, D-0145) | full | shipped |
 | `func-result-protocol.md` | Result ingest: typed origins, timestamp hygiene, `execution_revision` (D-0142) | full | shipped |
-| `func-oncall-synthetic-pull.md` | On-call/escalations, synthetic checks, HTTP-pull agent | full | shipped |
+| `func-oncall-synthetic-pull.md` | On-call/escalations, synthetic checks, HTTP-pull agent | full | shipped; current `/api/v1/agent/*` claim/result/test/heartbeat routes re-verified in documentation-only iter-0194 |
 | `func-project-deletion.md` | Delete a project (FR-018) | full | shipped |
 | `func-org-deletion.md` | Delete an organization (FR-019) | full | shipped |
-| `func-geo-worker-pools.md` | Geo-distributed probers, region-aware worker pools | written | shipped |
+| `func-geo-worker-pools.md` | Geo-distributed probers, region-aware worker pools | written | shipped; current AMQP queue-family/default-exchange topology re-verified in documentation-only iter-0194 |
 | `func-admin-users.md` | Instance-wide Users administration for the Global Admin | written | shipped |
 | `func-settings-members.md` | Members moved into Settings, the Administration group | written | shipped |
 | `func-hardening.md` | Hardening package from the 2026-08 deep audit | written | shipped |

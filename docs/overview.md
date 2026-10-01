@@ -69,9 +69,12 @@ Top-level `Config` sections (`internal/config`):
 | `prober` | `allow_private_ips`, `allow_metadata_ips` | SSRF guard: what workers are allowed to resolve. |
 | `notification_egress` | `allow_private_ips`, `allow_metadata_ips` | SSRF guard for **alert delivery** (webhook/notify/SMTP), independent of `prober`; defaults **deny-private** (D-0141/iter-0084). |
 | `result` | `allowed_skew`, `revision_mode` | Result-ingest contract: future-clock skew bound + `execution_revision` gate policy (`enforce`\|`observe`; default `enforce`) — D-0142 (`specs/func-result-protocol.md`). |
-| `heartbeats` | `retention_days` | Retention period for raw heartbeats (partitions are dropped by the leader). |
+| `heartbeats` | `retention_days` | Retention period for raw heartbeats: the leader drops TimescaleDB chunks or plain-PostgreSQL dated partitions and purges the plain DEFAULT partition. |
+| `services` | `max_services_per_project`, `max_members_per_revision`, `max_services_per_monitor` | Fail-fast fan-out caps for service declarations, revision membership, and the number of services one monitor may feed (`func-service-reliability` §10.10). |
 | `gate` | `evaluate_inflight_process`, `evaluate_inflight_principal`, `evaluate_rate_principal_per_minute`, `evaluate_rate_process_per_minute`, `evaluate_tx_budget_ms`, `decision_retention_days`, `decision_partition_lead_days`, `decision_partition_create_max`, `decision_purge_every`, `decision_purge_max_partitions` | Reliability-gate bounds (FR-024, spec `func-reliability-gate` §5a): process-local concurrency and rate caps on decisions, the decision transaction's budget, and the decision ledger's daily-partition retention and maintenance. All ten range-validated at load; the runbook has the table. |
+| `audit` | `retention_days`, `purge_every`, `purge_batch_rows` | Instance-wide audit-evidence retention and the cadence/batch bound of its fenced purge (`ops-audit-log-retention`). |
 | `change` | `record_rate_process_per_minute`, `record_rate_principal_per_minute`, `record_inflight_process`, `read_inflight_process`, `max_past`, `max_future`, `correlation_window`, `correlation_note_max`, `retention_days`, `retention_groups_per_batch` | Change-intelligence bounds (FR-025, spec `func-change-intelligence` §5a): process-local concurrency and rate caps on the record route and permits on its reads, the `occurred_at` clock window, the incident-correlation window and note size, and retention of change groups by age. Every key refused outside its range at boot, naming the key. |
+| `ledger` | `carrier_enabled`, `expected_run_retention_days`, `expected_run_gap_windows_max` | Expected-run ledger carrier selection plus the retention horizon and per-monitor gap-materialization safety bound (FR-032, `func-expected-run-ledger`). |
 | `security` | `encryption_key`, `previous_keys`, `admin_email`, `admin_password` | AES-256-GCM keyring for at-rest secrets + rotation; global-admin bootstrap on an empty system. |
 | `mail` | `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `from`, `public_base_url` | Bootstrap SMTP (overridable from the UI). |
 | `pull` | `regions`, `token`, `agents`, `server_url` | HTTP-pull transport: broker-less regions (server side) and agent credentials (agent side). |
@@ -522,9 +525,11 @@ flowchart TB
   takes over when the leader fails. Not scaled by count (there is one leader).
 - **worker-tier** — M stateless replicas, **grow horizontally with load**; prefetch on the queue
   provides backpressure and even distribution. No DB required.
-- **PostgreSQL 15+ required, 16 used everywhere here** — the schema uses the column-list `ON DELETE SET NULL (col)` form from PG15 in six migrations; `Migrate` refuses an older server before applying anything.
-- **Postgres 16 (TimescaleDB image)** — primary + streaming replica; time series on regular
-  RANGE partitions + the `heartbeats_daily` rollup, retention drops old partitions (leader).
+- **PostgreSQL 15+ is required. Repository images use PostgreSQL 16.** The schema uses the column-list `ON DELETE SET NULL (col)` form from PG15 in six migrations; `Migrate` refuses an older server before applying anything.
+- **Postgres 16 (TimescaleDB image)** — primary + streaming replica. With the extension present,
+  raw `heartbeats` use a hypertable with one-day chunks, native compression, and leader-driven
+  retention through `drop_chunks`; plain PostgreSQL instead uses daily RANGE partitions plus a
+  DEFAULT partition with manual maintenance. The `heartbeats_daily` rollup is identical in both.
   `expected_runs` (FR-032) is declaratively partitioned by `due_at` in BOTH storage modes —
   TimescaleDB never owns it — plus a DEFAULT partition, so an insert is never lost to a missing
   partition: a row there is evidence that a run did not complete, and losing it would erase exactly
@@ -684,10 +689,10 @@ with a password-protected target inside each region.
 - **Test connection** in the monitor form (`POST …/monitors/test`) — a single probe run before creation
   **in the spec's region**, so that a geo target is tested **from its own region**, not from core. The test route
   **mirrors the transport of the region's production jobs**:
-  - **AMQP region** — an RPC request (RabbitMQ direct reply-to) to a worker (`checks.tests.<region>`);
+  - **AMQP region** — an RPC request to a worker queue (`checks.tests.<region>`) with a temporary server-named, exclusive reply queue;
   - **pull region** (a geo without a broker, HTTP agent only) — the test travels via the **pull queue** `pull_tests`:
-    the API enqueues a one-off test, the region's agent picks it up in a separate loop (`GET /agent/tests`), probes it with the same
-    logic as a production job, and posts the heartbeat back (`POST /agent/test-results`); the API polls for the
+    the API enqueues a one-off test, the region's agent picks it up in a separate loop (`GET /api/v1/agent/tests`), probes it with the same
+    logic as a production job, and posts the heartbeat back (`POST /api/v1/agent/test-results`); the API polls for the
     result until TTL. This way a pull region is tested by the same agent of the same region (otherwise — historically a 502,
     since there is no RPC subscriber in a pull region).
 
@@ -709,18 +714,19 @@ Do not expose the broker to the public internet without TLS/segmentation.
 **The broker-less alternative in a geo — the HTTP pull agent.** If exposing RabbitMQ to another geo is not an option, the region
 is declared pull-served in the central config (`pull.regions`), and its jobs go into the DB queue
 `pull_jobs` instead of AMQP. In the geo you run `cerbix serve --role agent --region <r> --config agent.yaml` (DB-less, broker-less): it
-uses **only outbound HTTPS** to the center to fetch jobs (`GET /agent/jobs`, atomic claim `FOR UPDATE SKIP
-LOCKED`), runs them through its prober, and posts heartbeats (`POST /agent/results`, the same ingest). Authentication — a bearer token:
+uses **only outbound HTTPS** to the center to fetch jobs (`GET /api/v1/agent/jobs` or the versioned
+`/api/v1/agent/v2/jobs`, `/api/v1/agent/v3/jobs`, `/api/v1/agent/v4/jobs` carriers; atomic claim `FOR UPDATE SKIP
+LOCKED`), runs them through its prober, and posts heartbeats (`POST /api/v1/agent/results`, the same ingest). Authentication — a bearer token:
 a shared `pull.token` (catch-all), a per-region token (`pull.agents: [{region, token}]`, an agent sees only its own
 region), **or** a DB token (issue/revoke without redeploy via `POST/DELETE /api/v1/agent-tokens`, global-admin). Liveness
 of a pull region (for the picker and the "region without a worker" alert) — via agent heartbeat. Example: `docker/config.agent.yaml`.
 
 **Production-grade properties of the pull transport:**
-- **Long-poll (LISTEN/NOTIFY):** `GET /agent/jobs` holds the request until a job appears (or 20s max-hold) instead of
+- **Long-poll (LISTEN/NOTIFY):** `GET /api/v1/agent/jobs` holds the request until a job appears (or 20s max-hold) instead of
   frequent polling — near-instant delivery, Postgres load → nearly zero, the transport stays plain HTTP
   (gRPC/SSE are deliberately not pulled in: they are justified only at thousands of agents/sub-second delivery).
 - **Edge buffer:** on a connectivity outage the agent keeps results in a bounded in-memory ring and on reconnect
-  re-sends them as a **historical backfill** (`POST /agent/backfill`) — filling the SLA gap **without** running old
+  re-sends them as a **historical backfill** (`POST /api/v1/agent/backfill`) — filling the SLA gap **without** running old
   events through alerting (no incident storm after the fact). Idempotent (unique `monitor_id, ts`).
 - **Result scoping:** an agent cannot post another region's results (403).
 - **Capability, declared per claim:** an agent declares what it can OPEN (`X-Cerbix-Credential-Envelope`) and

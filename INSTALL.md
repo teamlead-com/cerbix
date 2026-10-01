@@ -6,9 +6,9 @@ Two supported single-node paths — pick one:
 - **[Option B — bare binary + systemd](#option-b--bare-binary--systemd)**: one static binary against your own PostgreSQL.
 
 Either way the app side is a single process: the binary embeds the web UI, the REST API,
-and the database migrations (they apply themselves on startup). The only hard external
-dependency is **PostgreSQL 16+** (the `timescale/timescaledb` image is preferred — cerbix
-then stores heartbeats as compressed hypertables automatically; plain PostgreSQL works too).
+and the database migrations (they apply themselves on startup). **PostgreSQL 15+ is required.
+Repository images use PostgreSQL 16.** The `timescale/timescaledb` image is preferred — cerbix
+then stores heartbeats as a compressed hypertable automatically; plain PostgreSQL works too.
 
 ---
 
@@ -47,7 +47,7 @@ version via `CERBIX_IMAGE` in `docker/.env`) and starts `postgres`, `rabbitmq`, 
 the first start against an empty database.
 
 > To build the image from source instead of pulling it:
-> `docker build -t ghcr.io/teamlead-com/cerbix:latest .` at the repo root.
+> `docker build -f docker/Dockerfile -t ghcr.io/teamlead-com/cerbix:latest .` at the repo root.
 
 Verify:
 
@@ -99,7 +99,8 @@ cerbix version
 > `gh release download vX.Y.Z -R teamlead-com/cerbix` fetches the same assets if you
 > prefer the GitHub CLI to curl.
 > Or build from source at the repo root: `make build` (binary lands in `bin/cerbix`;
-> requires Go 1.25+ and an already-built SPA in `internal/web/dist`).
+> requires Go 1.25.13+ and the committed SPA snapshot in `internal/web/dist`; after a
+> frontend change, refresh it first with `make spa-snapshot`, which needs Docker but no host Node.js).
 
 ### 2. Prepare PostgreSQL
 
@@ -114,7 +115,8 @@ CREATE DATABASE cerbix OWNER cerbix;
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 ```
 
-Without the extension cerbix falls back to plain daily partitions automatically.
+Without the extension cerbix falls back to declarative daily RANGE partitions plus a DEFAULT
+partition; the scheduler leader creates dated partitions and removes expired partition/default data.
 
 ### 3. System user, directories, config
 

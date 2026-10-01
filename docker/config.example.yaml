@@ -91,11 +91,13 @@ result:
   allowed_skew: 5m          # > 0 and <= 1h
   revision_mode: enforce    # enforce | observe
 
-# Raw heartbeat retention. Heartbeats are stored in daily range partitions; the
-# scheduler leader pre-creates upcoming partitions and drops those older than the
-# window (a cheap DROP, not a big DELETE). retention_days also bounds the
+# Raw heartbeat retention uses the storage mode detected at startup. With TimescaleDB,
+# `heartbeats` is a hypertable with one-day chunks created on demand and native
+# compression; the leader enforces this window with drop_chunks. On plain PostgreSQL,
+# it pre-creates declarative daily RANGE partitions, drops fully expired partitions,
+# and purges expired rows from the DEFAULT partition. retention_days also bounds the
 # daily-availability rollup's recompute window, so long-range availability (kept in
-# the rollup) is never wiped when old raw data is dropped. Minimum 2.
+# the rollup) is never wiped when old raw data is removed. Minimum 2.
 heartbeats:
   retention_days: 30
 

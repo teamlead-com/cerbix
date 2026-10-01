@@ -1,6 +1,6 @@
 # cerbix Brand Guidelines v1.0
 
-Status: approved brand design. The production assets and UI changes described here are OWNER-APPROVED in iter-0193 as of 2026-10-01, with documented skips; the iteration remains open with commit pending.
+Status: approved brand design. The production assets and UI changes described here are OWNER-APPROVED and integrated in implementation commit `6ab380397a96b388308bdf25f1e88eeebeb76d57`; iter-0193 is CLOSED with documented skips.
 
 Date: 2026-09-27
 

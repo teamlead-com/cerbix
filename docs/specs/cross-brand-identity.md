@@ -1,6 +1,6 @@
 # cross-brand-identity — Sealed C and instance-brand consistency
 
-> **Revision 2 — identity OWNER-APPROVED 2026-09-27; shell UX extension added 2026-09-30; implementation OWNER-APPROVED 2026-10-01 with documented skips; iter-0193 remains OPEN with commit pending.**
+> **Revision 2 — identity OWNER-APPROVED 2026-09-27; shell UX extension added 2026-09-30; implementation OWNER-APPROVED and CLOSED 2026-10-01 in commit `6ab380397a96b388308bdf25f1e88eeebeb76d57`; documented live-E2E/manual-AT/production-browser skips.**
 > This specification turns the approved identity in [`docs/brand-guidelines.md`](../brand-guidelines.md)
 > into a runtime, asset, accessibility, responsive-shell, and truthful-rendering contract. The deployed
 > SPA remains the visual baseline. Existing instance branding from D-0083 and D-0110 stays compatible:

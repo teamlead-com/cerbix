@@ -6,7 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [v0.3.5] - Unreleased
 
+### ✨ Added
+
+- **Cross-brand identity and shell UX.** cerbix now uses the Sealed C default mark with custom-logo priority and contrast-safe instance accents. The SPA adds responsive navigation access, accessible overlay
+  and focus behavior, atomic organization/project transitions, a stale-response-safe SearchBox, truthful Dashboard loading/no-data/error states, and explicit breadcrumb, theme and announcement semantics. Desktop
+  layout, status colors, reliability formulas and backend/API contracts remain unchanged.
+
 ### 🩹 Fixed
+
+- **Instance branding and detail reads are fenced.** Custom accents choose readable `--accent-ink` values and clear all inline accent properties when removed. Incident Detail rejects stale-generation and
+  foreign-project responses before publishing incident data or actions.
 
 - **Service reliability materialization no longer globally sorts retained heartbeat history for
   carry-in.** The historical sample-and-hold lookup now performs one bounded, index-backed latest

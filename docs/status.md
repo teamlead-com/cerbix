@@ -3,13 +3,13 @@
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. `DEFERRED` is not permitted. Every `DONE` links to code,
 tests, and metrics.
 
-## Current open iteration (iter-0193 — OPENED 2026-09-30; CONTINUED 2026-10-01; OWNER-APPROVED 2026-10-01. Scope: cross-brand identity implementation and evidence; commit pending; see D-0264.)
+## Latest closed iteration (iter-0193 — OPENED 2026-09-30; CONTINUED 2026-10-01; CLOSED 2026-10-01 BY THE OWNER. Scope: cross-brand identity implementation and evidence; see D-0264.)
 
 | ID | Acceptance criterion | Status | Evidence |
 | --- | --- | --- | --- |
-| cross-brand-identity | Sealed C identity, custom-logo priority, contrast-selected custom-accent ink, shared public/static assets, responsive access, atomic workspace transitions, overlay/search semantics, truthful Dashboard states, and reviewed token roles across the runtime and embedded SPA. | IN_PROGRESS | Technical code review and post-verdict docs review are APPROVED; owner visual/keyboard sign-off completed 2026-10-01 with documented skips. Live E2E, production-browser responsive pass and manual screen-reader session remain skipped. Iteration stays OPEN until commit/explicit closure; no production/deploy/restart/DNS/data action occurred. |
+| cross-brand-identity | Sealed C identity, custom-logo priority, contrast-selected custom-accent ink, shared public/static assets, responsive access, atomic workspace transitions, overlay/search semantics, truthful Dashboard states, and reviewed token roles across the runtime and embedded SPA. | DONE | [`iter-0193.md`](iterations/iter-0193.md); implementation commit `6ab380397a96b388308bdf25f1e88eeebeb76d57`; technical code review and post-verdict docs-only review are APPROVED; owner visual/keyboard sign-off completed 2026-10-01; live E2E, manual screen-reader/AT and production-browser responsive pass are documented skips; no backend/API/data change and no production/deploy/restart/DNS/data action occurred. |
 
-## Latest closed iteration (iter-0192 — OPENED AND CLOSED 2026-09-21. Scope: post-close
+## Previous closed iteration (iter-0192 — OPENED AND CLOSED 2026-09-21. Scope: post-close
 overall-status state-authority and immutable-report remediation; see D-0263.)
 
 | ID | Acceptance criterion | Status | Evidence |

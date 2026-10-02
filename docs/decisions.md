@@ -8651,7 +8651,7 @@ Examples use shell-safe concrete UUIDs rather than `<...>` tokens; serve help st
 worker and agent; adoption rejects a timeout whose context margin would overflow before config/DB access.
 The only new direct module is Cobra; pflag remains transitive and Viper is absent. There is no API/OpenAPI, config schema,
 database schema/migration, runtime-role, frontend, generated-SPA, metric, alert, or deployment change.
-Implementation evidence belongs to open iter-0196. The third independent review was APPROVED, but a newer
+Implementation evidence is recorded in closed iter-0196. The third independent review was APPROVED, but a newer
 owner high-effort review superseded it; its fixes passed full gates. The following review found parsed-help
 value handling, assignment writer errors, catalogue-test reachability, lifecycle wording, and README timeout
 residuals; those are fixed and fresh full gates/rebuilt-binary matrices are green. The next re-review found

@@ -23,7 +23,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/teamlead-com/cerbix/internal/buildinfo"
 )
 
@@ -44,8 +44,6 @@ const (
 	changeExitOK      = 0 // 201 recorded or 200 replayed
 	changeExitError   = 1 // transport, timeout, TLS, auth (401/403), 429, 5xx, malformed response
 	changeExitRefused = 2 // 400/404/409 — refused by the contract (and usage errors)
-
-	changeUsage = "usage: cerbix change record --project <id> --service <id> --kind deploy|rollback|flag --phase started|succeeded|failed|cancelled --source <slug> --external-id <id> [--ref <label>] [--url <https url>] [--decision <id>] [--at <RFC3339>] [--json] [--timeout 10s]"
 )
 
 // changeRecordBody is the POST …/changes body (D2), field for field. `ref`, `url` and
@@ -73,118 +71,137 @@ type changeRecorded struct {
 	} `json:"change"`
 }
 
-// runChange dispatches `cerbix change <subcommand>`; `record` is the only subcommand in v1.
-func runChange(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "record" {
-		if len(args) > 0 {
-			_, _ = fmt.Fprintf(stderr, "change: unknown subcommand %q\n", args[0])
-		}
-		_, _ = fmt.Fprintln(stderr, changeUsage)
-		return changeExitRefused
-	}
-	return runChangeRecord(args[1:], stdout, stderr)
+type changeRecordOptions struct {
+	ProjectID   string
+	ServiceID   string
+	Kind        string
+	Phase       string
+	Source      string
+	ExternalID  string
+	Ref         string
+	URL         string
+	Decision    string
+	At          string
+	JSON        bool
+	Timeout     time.Duration
+	DecisionSet bool
+	AtSet       bool
 }
 
-// runChangeRecord implements `cerbix change record`. Flags are parsed first (a usage error is 2),
-// then the environment (a missing variable is 1 and names the variable, as the gate verb), then
-// ONE request.
-func runChangeRecord(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("change record", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	project := fs.String("project", "", "project id (required)")
-	service := fs.String("service", "", "service id (required)")
-	kind := fs.String("kind", "", "deploy|rollback|flag (required)")
-	phase := fs.String("phase", "", "started|succeeded|failed|cancelled (required)")
-	source := fs.String("source", "", "the reporting system's slug, e.g. github-actions (required)")
-	externalID := fs.String("external-id", "", "the change's id at the source, e.g. the run id (required)")
-	ref := fs.String("ref", "", "a label for the change, e.g. the version or commit")
-	link := fs.String("url", "", "an https:// link to the change")
-	decision := fs.String("decision", "", "the gate decision_id the release rested on")
-	at := fs.String("at", "", "when the phase occurred, RFC3339 (default: the invocation instant)")
-	asJSON := fs.Bool("json", false, "print the API response verbatim instead of the one-line summary")
-	timeout := fs.Duration("timeout", changeDefaultTimeout, "overall request deadline")
-	if err := fs.Parse(args); err != nil {
-		return changeExitRefused
-	}
-	if fs.NArg() > 0 {
-		_, _ = fmt.Fprintf(stderr, "change record: unexpected argument %q\n", fs.Arg(0))
-		return changeExitRefused
-	}
-	var missing []string
-	for _, f := range []struct{ name, value string }{
-		{"--project", *project}, {"--service", *service}, {"--kind", *kind}, {"--phase", *phase},
-		{"--source", *source}, {"--external-id", *externalID},
-	} {
-		if f.value == "" {
-			missing = append(missing, f.name)
-		}
-	}
-	if len(missing) > 0 {
-		verb := "is"
-		if len(missing) > 1 {
-			verb = "are"
-		}
-		_, _ = fmt.Fprintf(stderr, "change record: %s %s required\n", strings.Join(missing, ", "), verb)
-		_, _ = fmt.Fprintln(stderr, changeUsage)
-		return changeExitRefused
-	}
-	if *timeout <= 0 {
-		_, _ = fmt.Fprintln(stderr, "change record: --timeout must be positive")
-		return changeExitRefused
-	}
-	// A flag EXPLICITLY given travels as given, even empty (review [52]): `--at ""` must not
-	// silently become the invocation instant, and `--decision ""` must not silently vanish
-	// through omitempty — the server is the authority on both refusals.
-	seen := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { seen[f.Name] = true })
+type changeRecordExecutor func(changeRecordOptions, io.Writer, io.Writer) error
 
-	target, err := serviceRouteTarget(os.Getenv("CERBIX_URL"), *project, *service, "changes")
+func newChangeCommand(execute changeRecordExecutor) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:                   "change",
+		Short:                 "Record service changes.",
+		Long:                  "Record and inspect CI/CD change commands.",
+		Example:               "cerbix change record --help",
+		GroupID:               rootGroupCICD,
+		Args:                  unknownSubcommandArgs,
+		DisableFlagsInUseLine: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_ = writeCommandHelp(cmd, cmd.ErrOrStderr())
+			return printedExit(changeExitRefused)
+		},
+	}
+	cmd.CompletionOptions.DisableDefaultCmd = true
+	addOrderedCommands(cmd, newChangeRecordCommand(execute))
+	return cmd
+}
+
+func newChangeRecordCommand(execute changeRecordExecutor) *cobra.Command {
+	opts := changeRecordOptions{Timeout: changeDefaultTimeout}
+	cmd := &cobra.Command{
+		Use:   "record",
+		Short: "Record a deploy, rollback or flag change.",
+		Long: "Record one append-only change phase through the remote API. A successful identical replay exits " +
+			"zero and is reported as replayed. Credentials are environment-only, TLS verification has no bypass, " +
+			"and the command performs one request without retries.",
+		Example: "CERBIX_URL=https://cerbix.example.com CERBIX_TOKEN=\"$CERBIX_TOKEN\" cerbix change record " +
+			"--project 00000000-0000-4000-8000-000000000001 --service 00000000-0000-4000-8000-000000000002 " +
+			"--kind deploy --phase succeeded --source github-actions --external-id 123456 --ref v1.2.3",
+		Args:                  noArgs,
+		DisableFlagsInUseLine: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			missing := missingRequiredFlags(cmd)
+			if len(missing) > 0 {
+				verb := "is"
+				if len(missing) > 1 {
+					verb = "are"
+				}
+				return usageExit(fmt.Errorf("change record: %s %s required", strings.Join(missing, ", "), verb))
+			}
+			if opts.Timeout <= 0 {
+				return usageExit(fmt.Errorf("change record: --timeout must be positive"))
+			}
+			opts.DecisionSet = cmd.Flags().Changed("decision")
+			opts.AtSet = cmd.Flags().Changed("at")
+			return execute(opts, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		},
+	}
+	cmd.Flags().SortFlags = false
+	addStringFlag(cmd, &opts.ProjectID, "project", "", "id", "project id", true)
+	addStringFlag(cmd, &opts.ServiceID, "service", "", "id", "service id", true)
+	addStringFlag(cmd, &opts.Kind, "kind", "", "deploy|rollback|flag", "change kind", true)
+	addStringFlag(cmd, &opts.Phase, "phase", "", "started|succeeded|failed|cancelled", "change phase", true)
+	addStringFlag(cmd, &opts.Source, "source", "", "slug", "the reporting system's slug, e.g. github-actions", true)
+	addStringFlag(cmd, &opts.ExternalID, "external-id", "", "id", "the change's id at the source, e.g. the run id", true)
+	addStringFlag(cmd, &opts.Ref, "ref", "", "label", "a label for the change, e.g. the version or commit", false)
+	addStringFlag(cmd, &opts.URL, "url", "", "https-url", "an https:// link to the change", false)
+	addStringFlag(cmd, &opts.Decision, "decision", "", "id", "the gate decision_id the release rested on", false)
+	addStringFlag(cmd, &opts.At, "at", "", "RFC3339", "when the phase occurred (default: the invocation instant)", false)
+	addBoolFlag(cmd, &opts.JSON, "json", false, "print the API response verbatim instead of the one-line summary")
+	addDurationFlag(cmd, &opts.Timeout, "timeout", changeDefaultTimeout, "overall request deadline")
+	setHelpSection(cmd, helpAnnotationEnvironment, "CERBIX_URL      Server base URL.\nCERBIX_TOKEN    API bearer token; environment only, never a flag.\nCERBIX_CA_FILE  Optional PEM CA file added to system roots.")
+	setHelpSection(cmd, helpAnnotationExitCodes, "0  Recorded or replayed.\n1  Transport, timeout, TLS, authentication, 429, server, or malformed-response error.\n2  Contract refusal (400, 404, or 409) or CLI usage error.")
+	return cmd
+}
+
+func executeChangeRecord(opts changeRecordOptions, stdout, stderr io.Writer) error {
+	target, err := serviceRouteTarget(os.Getenv("CERBIX_URL"), opts.ProjectID, opts.ServiceID, "changes")
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "cerbix: change: %v\n", err)
-		return changeExitError
+		return printedExit(changeExitError)
 	}
 	token := strings.TrimSpace(os.Getenv("CERBIX_TOKEN"))
 	if token == "" {
 		_, _ = fmt.Fprintln(stderr, "cerbix: change: CERBIX_TOKEN is not set (the API token that authenticates to the server; environment only, never a flag)")
-		return changeExitError
+		return printedExit(changeExitError)
 	}
 	client, err := gateHTTPClient(os.Getenv("CERBIX_CA_FILE"))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "cerbix: change: %v\n", err)
-		return changeExitError
+		return printedExit(changeExitError)
 	}
 
-	// D2: what was given travels as given — no local enum, slug, URL or timestamp check; the
-	// server is the authority and its refusal is printed verbatim. Only the default for --at is
-	// the CLI's own: the invocation instant (D13), RFC3339 in UTC.
 	body := changeRecordBody{
-		Kind: *kind, Phase: *phase, Source: *source, ExternalID: *externalID,
-		Ref: *ref, URL: *link, OccurredAt: *at,
+		Kind: opts.Kind, Phase: opts.Phase, Source: opts.Source, ExternalID: opts.ExternalID,
+		Ref: opts.Ref, URL: opts.URL, OccurredAt: opts.At,
 	}
-	if *decision != "" || seen["decision"] {
-		body.DecisionID = decision
+	if opts.Decision != "" || opts.DecisionSet {
+		body.DecisionID = &opts.Decision
 	}
-	if !seen["at"] {
+	if !opts.AtSet {
 		body.OccurredAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "cerbix: change: encode request: %v\n", err)
-		return changeExitError
+		return printedExit(changeExitError)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
 	defer cancel()
 	res, err := changeRequest(ctx, client, target, token, payload)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			_, _ = fmt.Fprintf(stderr, "cerbix: change: request timed out after %s (--timeout)\n", *timeout)
+			_, _ = fmt.Fprintf(stderr, "cerbix: change: request timed out after %s (--timeout)\n", opts.Timeout)
 		} else {
 			_, _ = fmt.Fprintf(stderr, "cerbix: change: request failed: %v\n", err)
 		}
-		return changeExitError
+		return printedExit(changeExitError)
 	}
-	return changeOutcome(res, *asJSON, stdout, stderr)
+	return exitFromCode(changeOutcome(res, opts.JSON, stdout, stderr))
 }
 
 // changeRequest performs exactly one POST and returns what came back. It never retries: a 429 is

@@ -336,6 +336,40 @@ func TestGateCheckMalformedResponsesExitOne(t *testing.T) {
 	}
 }
 
+func TestRemoteCommandsNeverPrintCredentialsEmbeddedInCERBIXURL(t *testing.T) {
+	const secret = "embedded-url-password-9f7d"
+	for _, badURL := range []string{
+		"ftp://user:" + secret + "@example.com",
+		"https://user:" + secret + "@example.com",
+		"https://example.com/?credential=" + secret,
+	} {
+		t.Run(badURL[:strings.Index(badURL, ":")], func(t *testing.T) {
+			t.Setenv("CERBIX_URL", badURL)
+			t.Setenv("CERBIX_TOKEN", gateTestToken)
+			t.Setenv("CERBIX_CA_FILE", "")
+
+			var gateOut, gateErr bytes.Buffer
+			if code := runGate([]string{"check", "--project", "p", "--service", "s"}, &gateOut, &gateErr); code != 1 {
+				t.Fatalf("gate exit = %d, want 1", code)
+			}
+			if strings.Contains(gateOut.String(), secret) || strings.Contains(gateErr.String(), secret) {
+				t.Fatalf("gate leaked embedded URL credential; stdout=%q stderr=%q", gateOut.String(), gateErr.String())
+			}
+
+			var changeOut, changeErr bytes.Buffer
+			if code := runChange([]string{
+				"record", "--project", "p", "--service", "s", "--kind", "deploy", "--phase", "started",
+				"--source", "ci", "--external-id", "1",
+			}, &changeOut, &changeErr); code != 1 {
+				t.Fatalf("change exit = %d, want 1", code)
+			}
+			if strings.Contains(changeOut.String(), secret) || strings.Contains(changeErr.String(), secret) {
+				t.Fatalf("change leaked embedded URL credential; stdout=%q stderr=%q", changeOut.String(), changeErr.String())
+			}
+		})
+	}
+}
+
 func TestGateCheckRequiresEnvironment(t *testing.T) {
 	srv, fake := newGateServer(t, http.StatusOK, gateBodyAllow, nil)
 	var stdout, stderr bytes.Buffer
@@ -385,14 +419,14 @@ func TestGateCheckRejectsTokenAndURLFlags(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("--token: exit = %d, want 2", code)
 	}
-	if !strings.Contains(stderr, "flag provided but not defined: -token") {
+	if !strings.Contains(stderr, "unknown flag: --token") {
 		t.Fatalf("--token: stderr = %q, want the flag error", stderr)
 	}
 	code, _, stderr = runGateCheckWith(t, srv.URL, "--url", "http://x")
 	if code != 2 {
 		t.Fatalf("--url: exit = %d, want 2", code)
 	}
-	if !strings.Contains(stderr, "flag provided but not defined: -url") {
+	if !strings.Contains(stderr, "unknown flag: --url") {
 		t.Fatalf("--url: stderr = %q", stderr)
 	}
 	if n := fake.hits.Load(); n != 0 {

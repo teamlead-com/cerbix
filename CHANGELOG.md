@@ -8,9 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### ✨ Added
 
+- **Structured Cobra CLI.** The command tree now provides grouped top-level help and detailed command-specific help. Documented commands, flags, defaults, environment variables and semantic exit codes remain unchanged. Leaf commands now reject previously ignored positional arguments with usage exit code 2 before loading configuration or performing side effects. Viper is not used.
+
 - **Cross-brand identity and shell UX.** cerbix now uses the Sealed C default mark with custom-logo priority and contrast-safe instance accents. The SPA adds responsive navigation access, accessible overlay
   and focus behavior, atomic organization/project transitions, a stale-response-safe SearchBox, truthful Dashboard loading/no-data/error states, and explicit breadcrumb, theme and announcement semantics. Desktop
   layout, status colors, reliability formulas and backend/API contracts remain unchanged.
+
+### 🔒 Security
+
+- **Remote CLI URL errors redact credentials.** `gate check` and `change record` no longer echo a rejected `CERBIX_URL` value or parser detail that could contain embedded userinfo or query credentials.
 
 ### 🩹 Fixed
 

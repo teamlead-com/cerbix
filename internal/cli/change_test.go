@@ -532,7 +532,7 @@ func TestChangeRecordRejectsTokenFlagAndKeepsURLInTheBody(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("--token: exit = %d, want 2", code)
 	}
-	if !strings.Contains(stderr, "flag provided but not defined: -token") {
+	if !strings.Contains(stderr, "unknown flag: --token") {
 		t.Fatalf("--token: stderr = %q, want the flag error", stderr)
 	}
 	if n := fake.hits.Load(); n != 0 {
@@ -571,7 +571,7 @@ func TestChangeRecordUsageErrors(t *testing.T) {
 		args []string
 		want string
 	}{
-		"no subcommand":       {nil, "usage: cerbix change record"},
+		"no subcommand":       {nil, "change <command>"},
 		"unknown sub":         {[]string{"frob"}, `unknown subcommand "frob"`},
 		"missing project":     {without("--project"), "--project is required"},
 		"missing service":     {without("--service"), "--service is required"},
@@ -581,9 +581,9 @@ func TestChangeRecordUsageErrors(t *testing.T) {
 		"missing external-id": {without("--external-id"), "--external-id is required"},
 		"only record":         {[]string{"record"}, "--project, --service, --kind, --phase, --source, --external-id are required"},
 		"zero timeout":        {append(without(""), "--timeout", "0"), "--timeout must be positive"},
-		"bad timeout value":   {append(without(""), "--timeout", "soon"), "invalid value"},
+		"bad timeout value":   {append(without(""), "--timeout", "soon"), "invalid duration"},
 		"positional extra":    {append(without(""), "extra"), `unexpected argument "extra"`},
-		"undefined flag":      {append(without(""), "--actor", "me"), "flag provided but not defined: -actor"},
+		"undefined flag":      {append(without(""), "--actor", "me"), "unknown flag: --actor"},
 	} {
 		stderr.Reset()
 		if code := runChange(tc.args, &stdout, &stderr); code != 2 {
@@ -695,10 +695,10 @@ func TestMainDispatchesChange(t *testing.T) {
 	if code := Main([]string{"change"}); code != 2 {
 		t.Fatalf("Main(change) = %d, want 2", code)
 	}
-	var u bytes.Buffer
-	usage(&u)
-	if !strings.Contains(u.String(), "cerbix change record --project <id> --service <id> --kind deploy|rollback|flag") {
-		t.Fatalf("usage lacks the change verb: %q", u.String())
+	root := newRootCommand(io.Discard, io.Discard)
+	cmd, _, err := root.Find([]string{"change", "record"})
+	if err != nil || cmd.CommandPath() != "cerbix change record" {
+		t.Fatalf("command tree lookup = %q, %v", cmd.CommandPath(), err)
 	}
 }
 

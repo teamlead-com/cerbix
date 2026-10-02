@@ -8603,3 +8603,59 @@ The current static/component evidence includes keyboard-oriented focus and ARIA 
 responsive harness checks at 320/375/768/900, and the reviewed contrast matrix. No live disposable-stack
 E2E or 16/24/32/128px visual review was run; those remain explicit gaps in iter-0193. The iteration
 remains `OPEN — owner review pending`.
+
+## D-0265 — Cobra owns the CLI tree and help; configuration and exit semantics remain application-owned (2026-10-02)
+
+**Context.** At `f6320fc`, the CLI split one public interface across a manual top-level switch,
+command-local standard-library `flag.FlagSet` parsers, manual nested dispatchers, and duplicated usage
+strings. Root help was a flat synopsis, `help <command>` ignored its argument, most leaf help paths exited
+`2`, group help was treated as an unknown subcommand, and `version --help` executed the version command.
+The owner approved [`cross-cli-command-tree.md`](specs/cross-cli-command-tree.md) before production code
+changed. The approved compatibility boundary preserves documented paths, flags, defaults, environment
+variables, stdout/stderr contracts, and semantic exit codes while intentionally rejecting previously
+ignored positional arguments before side effects.
+
+**Decision.** Cobra v1.10.2 is the sole owner of the command tree, subcommand lookup, arguments, flags,
+required metadata, and root/group/leaf help. `Main(args []string) int` constructs that tree, supplies
+explicit stdout/stderr writers, executes it, and maps a typed application error to an exit code;
+`cmd/cerbix/main.go` remains the only `os.Exit` site. Cobra runs with `SilenceUsage`, `SilenceErrors`,
+command suggestions, the default completion command, and an implicit version flag disabled. Root help is
+a deterministic catalogue derived from Cobra metadata, including flattened `gate check` and
+`change record` leaves; detailed synopsis/sections derive order, placeholders, requiredness, and defaults
+from the same registered flag metadata. Local command-order metadata keeps output deterministic without
+mutating Cobra's process-global sorting setting, and hidden/unavailable commands never enter the catalogue.
+The application-owned help execution parses the target's registered flags, validates nested commands and
+positionals before rendering, and derives help intent from Cobra's boolean flag so string values equal to
+`-h`/`--help` still travel normally; a raw `--` candidate is never classified before the target FlagSet
+has decided whether it is a string value or an end-of-options marker. It refuses unknown or extra path segments instead of falling through
+to Cobra's default inventory, and maps writer failures identically for exact/assignment help flags and
+`help`.
+
+`internal/config` remains the sole YAML/configuration owner and is loaded only inside commands that need
+it. Viper is excluded. There is no global config registry or persistent pre-run hook. `gate check` and
+`change record` keep `CERBIX_URL`, `CERBIX_TOKEN`, and optional `CERBIX_CA_FILE` as environment-only
+inputs; no credential flag, remote-server `--url`, insecure mode, redirect following, retry, or TLS bypass
+is added. Rejected `CERBIX_URL` diagnostics never echo the raw value or parser detail that could contain
+userinfo/query credentials. Gate exit `0/1/2/4`, change exit `0/1/2`, and the existing runtime/recovery `0/1/2` classes remain
+application-owned rather than Cobra-owned.
+
+**Consequences.** `cerbix --help` is a grouped catalogue; every group and leaf has side-effect-free
+command help; exact valid help succeeds without config, credentials, PostgreSQL, RabbitMQ, or an API
+server, while unknown/extra help paths fail with usage exit `2`. Root end-of-options paths are evaluated
+by the Cobra root after parsing, so `cerbix -- gate …` cannot become a successful no-command help path. The six
+leaves that previously ignored positional tokens (`serve`, `migrate`, `reencrypt`, `adopt-fact-month`,
+`enqueue-service-repair`, and `version`) now reject them with usage exit `2`, an `unexpected argument`
+diagnostic, empty stdout, and no executor call. `gate check` and `change record` retain that existing
+behavior; unknown flags on `version` keep their legacy JSON/exit-0 behavior while positional tokens do not.
+Examples use shell-safe concrete UUIDs rather than `<...>` tokens; serve help states that region applies to
+worker and agent; adoption rejects a timeout whose context margin would overflow before config/DB access.
+The only new direct module is Cobra; pflag remains transitive and Viper is absent. There is no API/OpenAPI, config schema,
+database schema/migration, runtime-role, frontend, generated-SPA, metric, alert, or deployment change.
+Implementation evidence belongs to open iter-0196. The third independent review was APPROVED, but a newer
+owner high-effort review superseded it; its fixes passed full gates. The following review found parsed-help
+value handling, assignment writer errors, catalogue-test reachability, lifecycle wording, and README timeout
+residuals; those are fixed and fresh full gates/rebuilt-binary matrices are green. The next re-review found
+one raw-`--` string-value/help writer residual; it is fixed, `/dev/full` exact/assignment probes return
+exit `1`, and fresh full gates pass. The final independent re-review is APPROVED with no findings. The owner
+approved the implementation, closed iter-0196, and authorized one local commit on 2026-10-02; push remains
+unauthorized.

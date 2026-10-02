@@ -79,7 +79,7 @@ choosing a future architecture or toolchain policy.
 
 ## Review and closure
 
-- **APPROVED** — independent read-only docs-only review of the final current tree on `gpt-5.6-sol`;
+- **APPROVED** — independent read-only docs-only review of the final current tree;
   no Critical, Important, or Minor findings remain after the correction round.
 - **Owner approval:** the owner approved closure and the one local commit on 2026-10-01.
 - Iter-0195 is **CLOSED BY THE OWNER**. The authorized commit is documentation/tooling only;

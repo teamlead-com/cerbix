@@ -5,7 +5,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -140,61 +139,12 @@ const (
 
 // Main runs the CLI and returns a process exit code.
 func Main(args []string) int {
-	if len(args) == 0 {
-		usage(os.Stderr)
-		return 2
-	}
-	switch args[0] {
-	case "version":
-		return runVersion()
-	case "serve":
-		return runServe(args[1:])
-	case "migrate":
-		return runMigrate(args[1:])
-	case "reencrypt":
-		return runReencrypt(args[1:])
-	case "adopt-fact-month":
-		return runAdoptFactMonth(args[1:])
-	case "enqueue-service-repair":
-		return runEnqueueServiceRepair(args[1:])
-	case "gate":
-		return runGate(args[1:], os.Stdout, os.Stderr)
-	case "change":
-		return runChange(args[1:], os.Stdout, os.Stderr)
-	case "-h", "--help", "help":
-		usage(os.Stdout)
-		return 0
-	default:
-		_, _ = fmt.Fprintf(os.Stderr, "unknown command %q\n", args[0])
-		usage(os.Stderr)
-		return 2
-	}
+	return mainWithWriters(args, os.Stdout, os.Stderr)
 }
 
-func usage(w io.Writer) {
-	for _, line := range []string{
-		"cerbix — self-hosted service reliability platform",
-		"usage:",
-		"  cerbix serve --config <path> [--role all|api|scheduler|worker|agent] [--region <name>]",
-		"  cerbix migrate --config <path>",
-		"  cerbix reencrypt --config <path>",
-		"  cerbix adopt-fact-month --config <path> --month YYYY-MM [--timeout 10m]",
-		"  cerbix enqueue-service-repair --config <path> --project <id> --service <id> --from RFC3339 --to RFC3339",
-		"  cerbix gate check --project <id> --service <id> [--json] [--timeout 10s]   (env: CERBIX_URL, CERBIX_TOKEN, [CERBIX_CA_FILE])",
-		"  cerbix change record --project <id> --service <id> --kind deploy|rollback|flag --phase started|succeeded|failed|cancelled --source <slug> --external-id <id> [--ref <label>] [--url <https url>] [--decision <id>] [--at <RFC3339>] [--json] [--timeout 10s]   (env: CERBIX_URL, CERBIX_TOKEN, [CERBIX_CA_FILE])",
-		"  cerbix version",
-	} {
-		if _, err := fmt.Fprintln(w, line); err != nil {
-			return
-		}
-	}
-}
-
-func runVersion() int {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(buildinfo.Current())
-	return 0
+func mainWithWriters(args []string, stdout, stderr io.Writer) int {
+	root := newRootCommand(stdout, stderr)
+	return executeCommand(root, args, stderr)
 }
 
 // loadConfig loads and validates the config, logging a CRITICAL line and
@@ -401,214 +351,6 @@ func (t materializingTester) RunTest(ctx context.Context, m domain.Monitor) (dom
 	return t.routes.RunJobTest(ctx, item.Job)
 }
 
-func loadConfig(path string) *config.Config {
-	cfg, err := config.Load(path)
-	if err != nil {
-		logging.Critical(logging.New(config.LogConfig{Level: "info", Format: "json"}, os.Stderr),
-			"config_load_failed", "path", path, "error", err.Error())
-		return nil
-	}
-	return cfg
-}
-
-func runMigrate(args []string) int {
-	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
-	configPath := fs.String("config", "", "path to config YAML (required)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *configPath == "" {
-		_, _ = fmt.Fprintln(os.Stderr, "migrate: --config is required")
-		return 2
-	}
-	cfg := loadConfig(*configPath)
-	if cfg == nil {
-		return 1
-	}
-	logger := logging.New(cfg.Log, os.Stdout)
-	if cfg.Database.DSN == "" {
-		logging.Critical(logger, "migrate_requires_database", "hint", "set database.dsn")
-		return 1
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	if err := store.Migrate(ctx, cfg.Database.DSN); err != nil {
-		logging.Critical(logger, "db_migrate_failed", "error", err.Error())
-		return 1
-	}
-	logger.Info("migrations_applied")
-	return 0
-}
-
-// runReencrypt rewrites every stored secret under the current primary encryption
-// key, using the full keyring (previous_keys) to read data still under an old key.
-// Run it after rotating: set the new key as encryption_key, move the old to
-// previous_keys, run this, then drop the old key.
-func runReencrypt(args []string) int {
-	fs := flag.NewFlagSet("reencrypt", flag.ContinueOnError)
-	configPath := fs.String("config", "", "path to config YAML (required)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *configPath == "" {
-		_, _ = fmt.Fprintln(os.Stderr, "reencrypt: --config is required")
-		return 2
-	}
-	cfg := loadConfig(*configPath)
-	if cfg == nil {
-		return 1
-	}
-	logger := logging.New(cfg.Log, os.Stdout)
-	if cfg.Database.DSN == "" {
-		logging.Critical(logger, "reencrypt_requires_database", "hint", "set database.dsn")
-		return 1
-	}
-	keys, err := cfg.Security.Keys()
-	if err != nil {
-		logging.Critical(logger, "encryption_key_invalid", "error", err.Error())
-		return 1
-	}
-	if keys == nil {
-		logging.Critical(logger, "reencrypt_requires_key", "hint", "set security.encryption_key")
-		return 1
-	}
-	cipher, err := secret.New(keys...)
-	if err != nil {
-		logging.Critical(logger, "cipher_init_failed", "error", err.Error())
-		return 1
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	st, err := store.Open(ctx, cfg.Database.DSN)
-	if err != nil {
-		logging.Critical(logger, "db_connect_failed", "error", err.Error())
-		return 1
-	}
-	defer st.Close()
-	st.WithCipher(cipher)
-	webhooks, channels, err := st.ReencryptSecrets(ctx)
-	if err != nil {
-		logging.Critical(logger, "reencrypt_failed", "error", err.Error())
-		return 1
-	}
-	logger.Info("reencrypt_complete", "webhooks", webhooks, "channels", channels)
-	return 0
-}
-
-// runAdoptFactMonth is the operator recovery path of D-0161 (spec §10.11): adopt one month
-// of service reliability facts stranded in the DEFAULT partition, using the SAME
-// copy-authoritative code path as the automatic cadence but with an operator-chosen fence
-// budget and the automatic row gate off. Run it in a maintenance window when the automatic
-// adoption reports an oversize month, or keeps timing out after quiescence. Idempotent: an
-// already-attached month is a no-op success.
-func runAdoptFactMonth(args []string) int {
-	fs := flag.NewFlagSet("adopt-fact-month", flag.ContinueOnError)
-	configPath := fs.String("config", "", "path to config YAML (required)")
-	monthFlag := fs.String("month", "", "month to adopt, YYYY-MM (required)")
-	timeout := fs.Duration("timeout", 10*time.Minute, "total budget for the fenced cutover (parent lock through commit)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *configPath == "" || *monthFlag == "" {
-		_, _ = fmt.Fprintln(os.Stderr, "adopt-fact-month: --config and --month are required")
-		return 2
-	}
-	month, err := time.ParseInLocation("2006-01", *monthFlag, time.UTC)
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "adopt-fact-month: --month must be YYYY-MM: %v\n", err)
-		return 2
-	}
-	if *timeout <= 0 {
-		_, _ = fmt.Fprintln(os.Stderr, "adopt-fact-month: --timeout must be positive")
-		return 2
-	}
-	cfg := loadConfig(*configPath)
-	if cfg == nil {
-		return 1
-	}
-	logger := logging.New(cfg.Log, os.Stdout)
-	if cfg.Database.DSN == "" {
-		logging.Critical(logger, "adopt_fact_month_requires_database", "hint", "set database.dsn")
-		return 1
-	}
-	// The copy phase is unbounded by design (it holds no parent lock); the context leaves
-	// generous room around the fenced budget so a long copy never truncates the fence.
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout+30*time.Minute)
-	defer cancel()
-	st, err := store.Open(ctx, cfg.Database.DSN)
-	if err != nil {
-		logging.Critical(logger, "db_connect_failed", "error", err.Error())
-		return 1
-	}
-	defer st.Close()
-	if err := st.AdoptServiceFactMonthOperator(ctx, month, *timeout); err != nil {
-		logging.Critical(logger, "adopt_fact_month_failed", "month", *monthFlag, "error", err.Error())
-		return 1
-	}
-	logger.Info("adopt_fact_month_complete", "month", *monthFlag)
-	return 0
-}
-
-// runEnqueueServiceRepair is the operator entrypoint for an audited admin recompute
-// (iter-0139): it enqueues a durable repair range through the SAME store path every product
-// enqueue uses — pending same-reason union coalescing, bucket flooring/ceiling, the
-// whitelist reason 'admin' — so the runbook's "restate a range" instruction is an actual
-// command instead of an internal Go method. The range is only ENQUEUED here; the scheduler
-// leader executes it under the normal audited repair machinery (§10.6 before/after record).
-func runEnqueueServiceRepair(args []string) int {
-	fs := flag.NewFlagSet("enqueue-service-repair", flag.ContinueOnError)
-	configPath := fs.String("config", "", "path to config YAML (required)")
-	projectID := fs.String("project", "", "project id (required)")
-	serviceID := fs.String("service", "", "service id (required)")
-	fromFlag := fs.String("from", "", "range start, RFC3339 (required; floored to the bucket)")
-	toFlag := fs.String("to", "", "range end, RFC3339 (required; ceiled to the bucket)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *configPath == "" || *projectID == "" || *serviceID == "" || *fromFlag == "" || *toFlag == "" {
-		_, _ = fmt.Fprintln(os.Stderr, "enqueue-service-repair: --config, --project, --service, --from and --to are required")
-		return 2
-	}
-	from, err := time.Parse(time.RFC3339, *fromFlag)
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "enqueue-service-repair: --from must be RFC3339: %v\n", err)
-		return 2
-	}
-	to, err := time.Parse(time.RFC3339, *toFlag)
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "enqueue-service-repair: --to must be RFC3339: %v\n", err)
-		return 2
-	}
-	if !to.After(from) {
-		_, _ = fmt.Fprintln(os.Stderr, "enqueue-service-repair: --to must be after --from")
-		return 2
-	}
-	cfg := loadConfig(*configPath)
-	if cfg == nil {
-		return 1
-	}
-	logger := logging.New(cfg.Log, os.Stdout)
-	if cfg.Database.DSN == "" {
-		logging.Critical(logger, "enqueue_service_repair_requires_database", "hint", "set database.dsn")
-		return 1
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	st, err := store.Open(ctx, cfg.Database.DSN)
-	if err != nil {
-		logging.Critical(logger, "db_connect_failed", "error", err.Error())
-		return 1
-	}
-	defer st.Close()
-	if err := st.EnqueueRepairRange(ctx, *projectID, *serviceID, from, to, store.ReasonAdmin); err != nil {
-		logging.Critical(logger, "enqueue_service_repair_failed", "error", err.Error())
-		return 1
-	}
-	logger.Info("service_repair_enqueued", "project", *projectID, "service", *serviceID,
-		"from", from.UTC().Format(time.RFC3339), "to", to.UTC().Format(time.RFC3339))
-	return 0
-}
-
 // notificationEgressGuard builds the SSRF guard for OUTBOUND alert delivery
 // (webhook/Slack/notify HTTP + SMTP) from the notification_egress policy — which
 // defaults to deny-private — NOT the prober policy (which allows private for
@@ -618,35 +360,19 @@ func notificationEgressGuard(cfg *config.Config) prober.Guard {
 	return prober.NewGuard(cfg.NotificationEgress.AllowPrivateIPs, cfg.NotificationEgress.AllowMetadataIPs)
 }
 
-func runServe(args []string) int {
-	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	configPath := fs.String("config", "", "path to config YAML (required)")
-	role := fs.String("role", "all", "process role: all|api|scheduler|worker|agent")
-	region := fs.String("region", "", "worker pool region (worker role); empty = core")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *configPath == "" {
-		_, _ = fmt.Fprintln(os.Stderr, "serve: --config is required")
-		return 2
-	}
-	if !validRoles[*role] {
-		_, _ = fmt.Fprintf(os.Stderr, "serve: invalid --role %q\n", *role)
-		return 2
-	}
-
-	cfg := loadConfig(*configPath)
+func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
+	cfg := loadConfigTo(opts.ConfigPath, stderr)
 	if cfg == nil {
 		return 1
 	}
 
-	logger := logging.New(cfg.Log, os.Stdout)
+	logger := logging.New(cfg.Log, stdout)
 	// Role-dependent secret-inventory key presence/absence (spec func-secret-inventory
 	// §4.1/§4.7): structural keyring validity is checked in config.Validate; which keys
 	// this role must (or must NOT) hold is a pure config-owned rule — fail-fast here,
 	// before any runtime wiring, for every role including the DB-less agent.
-	if err := cfg.ValidateSecretsForRole(*role, *region); err != nil {
-		logging.Critical(logger, "secrets_role_config_invalid", "role", *role, "error", err.Error())
+	if err := cfg.ValidateSecretsForRole(opts.Role, opts.Region); err != nil {
+		logging.Critical(logger, "secrets_role_config_invalid", "role", opts.Role, "error", err.Error())
 		return 1
 	}
 	credentialRings, err := buildCredentialKeyrings(cfg.Security.Dispatch)
@@ -655,14 +381,14 @@ func runServe(args []string) int {
 		return 1
 	}
 	info := buildinfo.Current()
-	registry := metrics.New(info, *role)
+	registry := metrics.New(info, opts.Role)
 	registry.SetDispatchSharedTrust(cfg.Security.Dispatch.SharedTrustAcknowledged)
 	// In-process realtime bus: ingest publishes status changes, the SSE handler
 	// streams them. Single-process (front with Redis pub/sub for multi-replica).
 	broker := events.NewBroker()
 
 	logger.Info("starting",
-		"role", *role,
+		"role", opts.Role,
 		"version", info.Version,
 		"commit", info.Commit,
 		"listen", cfg.Server.Listen)
@@ -701,10 +427,10 @@ func runServe(args []string) int {
 
 	// The HTTP-pull agent is DB-less and broker-less: it only needs the prober and
 	// outbound HTTPS to the central API. Handle it before any DB/auth/dispatcher setup.
-	if *role == "agent" {
-		return runAgent(ctx, cfg, *region, credentialRings, registry, logger)
+	if opts.Role == "agent" {
+		return runAgent(ctx, cfg, opts.Region, credentialRings, registry, logger)
 	}
-	owned := servicesForRole(*role)
+	owned := servicesForRole(opts.Role)
 
 	// Database wiring. Configured DB → migrate + connect (fail-fast, no
 	// self-healing); readiness then tracks live connectivity. No DB → scaffold
@@ -717,7 +443,7 @@ func runServe(args []string) int {
 		// Only api/all actually spawn file-provider leaders (see startFileProviders), so only
 		// those roles need the pool sized for the leader pins; other roles stay at the floor.
 		fpCount := 0
-		if *role == "all" || *role == "api" {
+		if opts.Role == "all" || opts.Role == "api" {
 			fpCount = len(cfg.Providers.File)
 		}
 		opened, err := store.Open(ctx, cfg.Database.DSN, store.WithFileProviderPool(fpCount, maxConcurrentReconciles))
@@ -950,7 +676,7 @@ func runServe(args []string) int {
 
 	// Monitoring as Code file providers (FR-017): owned only by api/all (spec §12). Startup
 	// is fail-fast — a configured provider needs a DB and a readable directory here.
-	if err := startFileProviders(ctx, cfg, *role, st, registry, apiHandler, logger, spawn); err != nil {
+	if err := startFileProviders(ctx, cfg, opts.Role, st, registry, apiHandler, logger, spawn); err != nil {
 		logging.Critical(logger, "file_provider_startup_failed", "error", err.Error())
 		return 1
 	}
@@ -959,11 +685,11 @@ func runServe(args []string) int {
 	// in-process dispatcher; distributed roles (api|scheduler|worker) use the
 	// RabbitMQ dispatcher and each run only their part.
 	switch {
-	case *role == "all" && st != nil:
+	case opts.Role == "all" && st != nil:
 		disp = dispatch.NewInProc(0)
-	case *role == "api" || *role == "scheduler" || *role == "worker":
+	case opts.Role == "api" || opts.Role == "scheduler" || opts.Role == "worker":
 		if cfg.RabbitMQ.URL == "" {
-			logging.Critical(logger, "rabbitmq_required", "role", *role,
+			logging.Critical(logger, "rabbitmq_required", "role", opts.Role,
 				"hint", "set rabbitmq.url for distributed roles")
 			return 1
 		}
@@ -978,11 +704,11 @@ func runServe(args []string) int {
 		// open, and it decides which carrier queues it consumes. Emission of the newer
 		// carrier is gated separately, on the region's existential readiness.
 		capability := 0
-		if *role == "worker" && cfg.Secrets.EnvelopeEnforced() {
+		if opts.Role == "worker" && cfg.Secrets.EnvelopeEnforced() {
 			capability = dispatch.EnvelopeV2
 		}
-		amqpd.WithJobRegion(*region).WithCredentialCapability(capability).
-			WithLedgerCapability(executorLedgerCapability(*role))
+		amqpd.WithJobRegion(opts.Region).WithCredentialCapability(capability).
+			WithLedgerCapability(executorLedgerCapability(opts.Role))
 		amqpd.WithBrokerState(registry.SetBrokerUp) // cerbix_broker_up gauge
 		disp = amqpd
 	}
@@ -1002,7 +728,7 @@ func runServe(args []string) int {
 		if runner.Supports(domain.MonitorAsyncCanary) {
 			canaryToken = domain.CanaryCapabilityOfThisBinary()
 		}
-		if amqpd, ok := disp.(*dispatch.AMQP); ok && *role == "worker" {
+		if amqpd, ok := disp.(*dispatch.AMQP); ok && opts.Role == "worker" {
 			amqpd.WithCanaryCapability(canaryToken)
 		}
 		if apiHandler != nil {
@@ -1088,7 +814,7 @@ func runServe(args []string) int {
 		if canaryToken != "" {
 			localCanaryRegions = append(localCanaryRegions, domain.DefaultRegion)
 		}
-		switch *role {
+		switch opts.Role {
 		case "all":
 			sch := scheduler.New(scheduler.NewStoreAdapter(st), disp, logger).WithLedgerCarrier(cfg.Ledger.CarrierEnabled).WithRetentionDays(cfg.Heartbeats.RetentionDays).
 				WithChangeRetention(cfg.Change.RetentionDays, cfg.Change.RetentionGroupsPerBatch). // FR-025 D9: change groups removed whole by age, daily
@@ -1173,7 +899,7 @@ func runServe(args []string) int {
 			workerCredentialHealth := &dispatch.CredentialHealth{}
 			// Answer region-scoped "Test connection" RPCs for this worker's region.
 			if amqpd, ok := disp.(*dispatch.AMQP); ok {
-				workerRegion := *region
+				workerRegion := opts.Region
 				if workerRegion == "" {
 					workerRegion = domain.DefaultRegion
 				}
@@ -1225,7 +951,7 @@ func runServe(args []string) int {
 				}
 			}
 			wk := worker.New(disp, runner, workerPoolSize, logger)
-			workerRegion := *region
+			workerRegion := opts.Region
 			if workerRegion == "" {
 				workerRegion = domain.DefaultRegion
 			}
@@ -1241,11 +967,11 @@ func runServe(args []string) int {
 			}
 			startIngest()
 		}
-		workerRegion := *region
+		workerRegion := opts.Region
 		if workerRegion == "" {
 			workerRegion = domain.DefaultRegion
 		}
-		logger.Info("checking_pipeline_started", "role", *role, "workers", workerPoolSize, "region", workerRegion)
+		logger.Info("checking_pipeline_started", "role", opts.Role, "workers", workerPoolSize, "region", workerRegion)
 	}
 
 	srv := httpsrv.New(cfg.Server, registry, app)

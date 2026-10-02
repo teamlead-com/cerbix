@@ -32,6 +32,7 @@ exists in the product. They diverge in both directions — an area can ship on t
 
 | File | Area | Spec | Feature |
 | --- | --- | --- | --- |
+| `cross-cli-command-tree.md` | Cobra-only ownership of the CLI command tree, flags, arguments, structured help, output streams and application exit mapping | design owner-approved 2026-10-02; Cobra v1.10.2, transitive pflag, no Viper, 20 acceptance invariants | IMPLEMENTED; iter-0196 CLOSED BY THE OWNER 2026-10-02 / D-0265; final independent review APPROVED with no findings; one local commit authorized, push unauthorized |
 | `cross-contract-conformance.md` | Mechanical parity across transport/OpenAPI/generated clients, API fakes/real stores, and tenant-reference owners (iter-0183, D-0251) | revision 1; seven acceptance invariants | IMPLEMENTED in iter-0183, strengthened in iter-0188, owner-closed 2026-09-21 |
 | `ops-audit-log-retention.md` | Bounded instance-wide retention for organization and global audit rows (FR-033/NFR-027) | revision 1 APPROVED; strict config, fenced bounded purge, observability and recovery contract | DONE in iter-0184; destructive PostgreSQL and alert evidence strengthened in iter-0188 |
 | `func-project-gate-policy.md` | One project reliability-gate policy inherited by services without an explicit override (FR-034/NFR-028) | revision 1 APPROVED; effective source tuple, CAS, override revocation, API/UI and tenancy contract | DONE in iter-0185; one-snapshot and CLI evidence strengthened in iter-0188 |

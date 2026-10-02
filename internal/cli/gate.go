@@ -16,7 +16,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -26,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/teamlead-com/cerbix/internal/buildinfo"
 )
 
@@ -94,71 +94,94 @@ type gateHTTPResult struct {
 	Body       []byte
 }
 
-// runGate dispatches `cerbix gate <subcommand>`; `check` is the only subcommand in v1.
-func runGate(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "check" {
-		if len(args) > 0 {
-			_, _ = fmt.Fprintf(stderr, "gate: unknown subcommand %q\n", args[0])
-		}
-		_, _ = fmt.Fprintln(stderr, "usage: cerbix gate check --project <id> --service <id> [--json] [--timeout 10s]")
-		return gateExitBlock
-	}
-	return runGateCheck(args[1:], stdout, stderr)
+type gateCheckOptions struct {
+	ProjectID string
+	ServiceID string
+	JSON      bool
+	Timeout   time.Duration
 }
 
-// runGateCheck implements `cerbix gate check`. Flags are parsed first (a usage error is 2),
-// then the environment (a missing variable is 1 and names the variable), then ONE request.
-func runGateCheck(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("gate check", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	project := fs.String("project", "", "project id (required)")
-	service := fs.String("service", "", "service id (required)")
-	asJSON := fs.Bool("json", false, "print the API response verbatim instead of the one-line summary")
-	timeout := fs.Duration("timeout", gateDefaultTimeout, "overall request deadline")
-	if err := fs.Parse(args); err != nil {
-		return gateExitBlock
-	}
-	if fs.NArg() > 0 {
-		_, _ = fmt.Fprintf(stderr, "gate check: unexpected argument %q\n", fs.Arg(0))
-		return gateExitBlock
-	}
-	if *project == "" || *service == "" {
-		_, _ = fmt.Fprintln(stderr, "gate check: --project and --service are required")
-		return gateExitBlock
-	}
-	if *timeout <= 0 {
-		_, _ = fmt.Fprintln(stderr, "gate check: --timeout must be positive")
-		return gateExitBlock
-	}
+type gateCheckExecutor func(gateCheckOptions, io.Writer, io.Writer) error
 
-	target, err := gateTarget(os.Getenv("CERBIX_URL"), *project, *service)
+func newGateCommand(execute gateCheckExecutor) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:                   "gate",
+		Short:                 "Evaluate release reliability gates.",
+		Long:                  "Evaluate and inspect release reliability gate commands.",
+		Example:               "cerbix gate check --help",
+		GroupID:               rootGroupCICD,
+		Args:                  unknownSubcommandArgs,
+		DisableFlagsInUseLine: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_ = writeCommandHelp(cmd, cmd.ErrOrStderr())
+			return printedExit(gateExitBlock)
+		},
+	}
+	cmd.CompletionOptions.DisableDefaultCmd = true
+	addOrderedCommands(cmd, newGateCheckCommand(execute))
+	return cmd
+}
+
+func newGateCheckCommand(execute gateCheckExecutor) *cobra.Command {
+	opts := gateCheckOptions{Timeout: gateDefaultTimeout}
+	cmd := &cobra.Command{
+		Use:   "check",
+		Short: "Evaluate whether a release may proceed.",
+		Long: "Evaluate the service reliability gate over the remote API. Credentials are environment-only, " +
+			"TLS verification has no bypass, and the command performs one request without retries.",
+		Example: "CERBIX_URL=https://cerbix.example.com CERBIX_TOKEN=\"$CERBIX_TOKEN\" cerbix gate check " +
+			"--project 00000000-0000-4000-8000-000000000001 --service 00000000-0000-4000-8000-000000000002",
+		Args:                  noArgs,
+		DisableFlagsInUseLine: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateRequiredFlagsWithMessage(cmd, "gate check: --project and --service are required"); err != nil {
+				return err
+			}
+			if opts.Timeout <= 0 {
+				return usageExit(fmt.Errorf("gate check: --timeout must be positive"))
+			}
+			return execute(opts, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		},
+	}
+	cmd.Flags().SortFlags = false
+	addStringFlag(cmd, &opts.ProjectID, "project", "", "id", "project id", true)
+	addStringFlag(cmd, &opts.ServiceID, "service", "", "id", "service id", true)
+	addBoolFlag(cmd, &opts.JSON, "json", false, "print the API response verbatim instead of the one-line summary")
+	addDurationFlag(cmd, &opts.Timeout, "timeout", gateDefaultTimeout, "overall request deadline")
+	setHelpSection(cmd, helpAnnotationEnvironment, "CERBIX_URL      Server base URL.\nCERBIX_TOKEN    API bearer token; environment only, never a flag.\nCERBIX_CA_FILE  Optional PEM CA file added to system roots.")
+	setHelpSection(cmd, helpAnnotationExitCodes, "0  ALLOW or WARN.\n1  Transport, timeout, TLS, authentication, server, or malformed-response error.\n2  BLOCK or CLI usage error.\n4  NOT_CONFIGURED.")
+	return cmd
+}
+
+func executeGateCheck(opts gateCheckOptions, stdout, stderr io.Writer) error {
+	target, err := gateTarget(os.Getenv("CERBIX_URL"), opts.ProjectID, opts.ServiceID)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "cerbix: gate: %v\n", err)
-		return gateExitError
+		return printedExit(gateExitError)
 	}
 	token := strings.TrimSpace(os.Getenv("CERBIX_TOKEN"))
 	if token == "" {
 		_, _ = fmt.Fprintln(stderr, "cerbix: gate: CERBIX_TOKEN is not set (the API token that authenticates to the server; environment only, never a flag)")
-		return gateExitError
+		return printedExit(gateExitError)
 	}
 	client, err := gateHTTPClient(os.Getenv("CERBIX_CA_FILE"))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "cerbix: gate: %v\n", err)
-		return gateExitError
+		return printedExit(gateExitError)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
 	defer cancel()
 	res, err := gateRequest(ctx, client, target, token)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			_, _ = fmt.Fprintf(stderr, "cerbix: gate: request timed out after %s (--timeout)\n", *timeout)
+			_, _ = fmt.Fprintf(stderr, "cerbix: gate: request timed out after %s (--timeout)\n", opts.Timeout)
 		} else {
 			_, _ = fmt.Fprintf(stderr, "cerbix: gate: request failed: %v\n", err)
 		}
-		return gateExitError
+		return printedExit(gateExitError)
 	}
-	return gateOutcome(res, *asJSON, stdout, stderr)
+	return exitFromCode(gateOutcome(res, opts.JSON, stdout, stderr))
 }
 
 // gateTarget resolves CERBIX_URL into the decision endpoint.
@@ -179,13 +202,13 @@ func serviceRouteTarget(base, project, service, leaf string) (string, error) {
 	}
 	u, err := url.Parse(base)
 	if err != nil {
-		return "", fmt.Errorf("CERBIX_URL is not a valid URL: %w", err)
-	}
-	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", fmt.Errorf("CERBIX_URL must be an http:// or https:// base URL, got %q", base)
+		return "", errors.New("CERBIX_URL is not a valid URL")
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return "", errors.New("CERBIX_URL must be a plain base URL without credentials, query or fragment (the credential is CERBIX_TOKEN)")
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", errors.New("CERBIX_URL must be an http:// or https:// base URL")
 	}
 	// JoinPath takes already-escaped elements and cleans doubled slashes, so an id holding a
 	// '/' or '..' cannot change the route.

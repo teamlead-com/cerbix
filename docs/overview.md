@@ -26,16 +26,24 @@ A single binary; behavior is selected by subcommand and flags.
 | `cerbix serve` | Start the operational server in the selected role. | `--config <path>` (required), `--role all\|api\|scheduler\|worker\|agent` (default `all`), `--region <name>` (worker/agent pool, default `core`) |
 | `cerbix migrate` | Apply DB migrations (goose, embedded) and exit. | `--config <path>` (required; needs `database.dsn`) |
 | `cerbix reencrypt` | Re-encrypt all at-rest secrets under the current primary key (after key rotation). | `--config <path>` (required; needs `security.encryption_key` and `database.dsn`) |
+| `cerbix adopt-fact-month` | Adopt one retained service-fact month from the DEFAULT partition through the copy-authoritative operator path. | `--config <path>`, `--month YYYY-MM` (required), `--timeout 10m`; no dry-run or confirmation; maintenance-window operation |
+| `cerbix enqueue-service-repair` | Queue a durable audited admin repair; the scheduler leader performs the later recomputation. | `--config <path>`, `--project <id>`, `--service <id>`, `--from RFC3339`, `--to RFC3339` (all required) |
 | `cerbix gate check` | Ask the reliability gate (FR-024) whether the error budget allows a release; the exit code follows `action` — `0` ALLOW/WARN, `2` BLOCK, `4` NOT_CONFIGURED, `1` transport/auth/429. | `--project <id>`, `--service <id>` (required), `--json`, `--timeout 10s`; the server is `CERBIX_URL` and the credential `CERBIX_TOKEN` (environment only, never a flag), `CERBIX_CA_FILE` adds a CA |
 | `cerbix change record` | Record a change event for a service (FR-025) — a deploy, rollback or flag flip in one of its phases — so the service's facts can say what followed; exit `0` recorded or replayed, `2` refused by the contract (400/404/409, printed verbatim), `1` transport/auth/429. | `--project <id>`, `--service <id>`, `--kind deploy\|rollback\|flag`, `--phase started\|succeeded\|failed\|cancelled`, `--source <slug>`, `--external-id <id>` (required), `[--ref <label>] [--url <https url>] [--decision <id>] [--at <RFC3339>] [--json] [--timeout 10s]`; the same `CERBIX_URL` / `CERBIX_TOKEN` / `CERBIX_CA_FILE` environment contract as the gate verb, never a flag. |
 | `cerbix version` | Print build info (version, commit) as JSON and exit. | — |
-| `cerbix help` / `-h` / `--help` | Usage. | — |
+| `cerbix help` / `-h` / `--help` | Show the grouped command catalogue; `cerbix help <path>` and `<path> --help` show command-specific flags, defaults, environment variables, exit codes, and examples. | Help exits `0` and does not load config or contact runtime dependencies. |
+
+Cobra is the sole owner of this tree, its arguments, flags, and help; Viper is not used. Documented
+command paths, flags, defaults, environment variables, stdout/stderr contracts, and semantic exit codes
+remain unchanged. Leaf commands reject previously ignored positional arguments with usage exit code `2`
+before config loading or other side effects.
 
 **Flags in detail:**
 
 - `--config <path>` — path to the strict YAML config. The config is **fail-fast**: unknown keys
-  and invalid values abort startup (no self-healing). Required by all commands
-  except `version`/`help`.
+  and invalid values abort startup (no self-healing). Required by `serve`, `migrate`, `reencrypt`,
+  `adopt-fact-month`, and `enqueue-service-repair`; remote CI/CD commands use their documented
+  environment-only connection and credential contract instead.
 - `--role` (only `serve`) — process role. The same binary executes different parts of
   the system; in production, roles are separate deployments scaled independently.
 
@@ -118,7 +126,7 @@ flowchart LR
 
 | Package | Role |
 |---|---|
-| `cli` | Entry point, command/flag parsing, role wiring, graceful shutdown. |
+| `cli` | Cobra-owned command tree, structured help, application exit mapping, role wiring, and graceful shutdown; the existing config package remains separate and Viper is not used. |
 | `config` | Strict YAML, `Validate()`, single snapshot. |
 | `httpsrv` | Operational server `/healthz` `/readyz` `/metrics`. |
 | `api` | REST handlers (orgs/projects/monitors/incidents/sla/status-pages/settings…), SSE, secret redaction, SPA serving; global-admin surface `/api/v1/admin/*` (users, outbox dead-letter). |

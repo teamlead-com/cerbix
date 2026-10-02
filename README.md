@@ -276,18 +276,35 @@ The recovery catalog is intentionally limited to these two shipped recovery path
 `reencrypt`, `gate check`, and `change record` are operational or pipeline commands, not recovery
 commands in this catalog.
 
-CLI:
+### CLI and structured help
+
+Cobra owns the public command tree, argument and flag parsing, and help; Viper is not used. Run
+`cerbix --help` for the grouped command catalogue or `cerbix <command> --help` for required and optional
+flags, defaults, environment variables, exit codes, and examples. Help does not load configuration or
+contact runtime dependencies.
+
+```bash
+cerbix --help
+cerbix gate check --help
+cerbix change record --help
+```
+
+Documented command paths, flags, defaults, environment variables, stdout/stderr contracts, and semantic
+exit codes remain unchanged. Leaf commands now reject previously ignored positional arguments with usage
+exit code 2 before loading configuration or performing side effects.
 
 ```text
 cerbix serve --config <path> [--role all|api|scheduler|worker|agent] [--region <name>]
 cerbix migrate --config <path>     # apply DB migrations and exit
 cerbix reencrypt --config <path>   # rotate the secrets-at-rest key
+cerbix adopt-fact-month --config <path> --month YYYY-MM [--timeout 10m]
+cerbix enqueue-service-repair --config <path> --project <id> --service <id> --from RFC3339 --to RFC3339
 cerbix gate check --project <id> --service <id> [--json] [--timeout 10s]
                                    # reliability gate; CERBIX_URL + CERBIX_TOKEN from the environment,
                                    # exit 0 ALLOW/WARN, 2 BLOCK, 4 NOT_CONFIGURED, 1 error (no retry on 429)
 cerbix change record --project <id> --service <id> --kind deploy|rollback|flag \
                      --phase started|succeeded|failed|cancelled --source <slug> --external-id <id> \
-                     [--ref <label>] [--url <https url>] [--decision <id>] [--at <RFC3339>] [--json]
+                     [--ref <label>] [--url <https url>] [--decision <id>] [--at <RFC3339>] [--json] [--timeout 10s]
                                    # change intelligence; same environment contract; exit 0 recorded or
                                    # replayed, 2 refused by the contract (400/404/409), 1 transport/auth/429
 cerbix version

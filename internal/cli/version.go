@@ -19,6 +19,7 @@ func newVersionCommand(execute versionExecutor) *cobra.Command {
 		Long:                  "Print version, commit, and Go toolchain information as indented JSON, then exit.",
 		Example:               "cerbix version",
 		GroupID:               rootGroupOther,
+		Annotations:           map[string]string{allowExplicitFalseHelpAnnotation: "true"},
 		Args:                  noArgs,
 		DisableFlagsInUseLine: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -26,12 +27,18 @@ func newVersionCommand(execute versionExecutor) *cobra.Command {
 		},
 	}
 	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		if positional := firstVersionPositional(rawCLIArgs(cmd)); positional != "" {
+			return usageExit(fmt.Errorf("version: unexpected argument %q", positional))
+		}
 		message := err.Error()
 		if !strings.HasPrefix(message, "unknown flag:") && !strings.HasPrefix(message, "unknown shorthand flag:") {
 			return err
 		}
-		if positional := firstVersionPositional(rawCLIArgs(cmd)); positional != "" {
-			return usageExit(fmt.Errorf("version: unexpected argument %q", positional))
+		if ctx := cmd.Context(); ctx != nil {
+			boundary, _ := ctx.Value(parserBoundaryContextKey{}).(parserBoundary)
+			if boundary.helpIntent.sawTrue || boundary.helpIntent.sawInvalid {
+				return err
+			}
 		}
 		return runVersionExecutor(cmd, execute)
 	})

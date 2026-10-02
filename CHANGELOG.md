@@ -20,6 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### 🩹 Fixed
 
+- **Cobra parser boundaries fail closed.** Commands must occupy their canonical raw positions; any parsed false-help assignment wins for ordinary commands regardless of repeated flag order; help-looking string values remain literal; `version` keeps false-help as a compatibility no-op while any parseable true-help wins; compound help is idempotent; hidden completion protocols are unreachable; and the Windows mousetrap is disabled.
+
 - **Architecture and operator documentation now follows the current runtime.** HTTP-pull diagrams use the real `/api/v1/agent/*` routes; heartbeat storage is described as adaptive and the PostgreSQL 15+ floor is separated from the repository's PostgreSQL 16 images; README build and deploy/change boundaries match the supported workflow; and the top-level configuration table includes the current service, audit, and expected-run ledger sections.
 
 - **Wave 2 documentation closes the remaining domain and operator gaps.** Architecture/overview/README now cover the current-domain partial ERDs, operator recovery CLI, build/toolchain contexts, and shipped shell/brand behavior; docs-check adds guards against stale routes, queues, storage and heartbeat-ERD claims.

@@ -95,20 +95,7 @@ func newHelpCommand(root *cobra.Command) *cobra.Command {
 		Hidden:                true,
 		DisableFlagsInUseLine: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				if err := writeRootHelp(root, cmd.OutOrStdout()); err != nil {
-					return runtimeExit(fmt.Errorf("help: %w", err))
-				}
-				return nil
-			}
-			target, remaining, err := root.Find(args)
-			if err != nil || target == root || len(remaining) != 0 || target.Name() == "help" {
-				return usageExit(fmt.Errorf("help: unknown command path %q", strings.Join(args, " ")))
-			}
-			if err := writeCommandHelp(target, cmd.OutOrStdout()); err != nil {
-				return runtimeExit(fmt.Errorf("help: %w", err))
-			}
-			return nil
+			return renderHelpPath(root, args, cmd.OutOrStdout())
 		},
 	}
 }

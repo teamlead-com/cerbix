@@ -8624,12 +8624,24 @@ a deterministic catalogue derived from Cobra metadata, including flattened `gate
 `change record` leaves; detailed synopsis/sections derive order, placeholders, requiredness, and defaults
 from the same registered flag metadata. Local command-order metadata keeps output deterministic without
 mutating Cobra's process-global sorting setting, and hidden/unavailable commands never enter the catalogue.
-The application-owned help execution parses the target's registered flags, validates nested commands and
-positionals before rendering, and derives help intent from Cobra's boolean flag so string values equal to
-`-h`/`--help` still travel normally; a raw `--` candidate is never classified before the target FlagSet
-has decided whether it is a string value or an end-of-options marker. It refuses unknown or extra path segments instead of falling through
-to Cobra's default inventory, and maps writer failures identically for exact/assignment help flags and
-`help`.
+A single application parser boundary runs before Cobra `Execute`: it validates exact public command names
+in canonical raw position, blocks hidden completion protocol command positions, and determines whether an
+exact help token is a flag or a registered string-flag value. Root flags before top-level commands and
+leaf flags before `gate check` / `change record` fail as usage before executors. The custom help command is
+inserted into the searchable Cobra tree during construction rather than waiting for `ExecuteC` runtime
+initialization. Preflight flag errors flow through the target command's `FlagErrorFunc`, preserving the
+version compatibility seam instead of replacing it with a generic error.
+
+Application-owned help execution parses the target's registered flags, validates nested commands and
+positionals before rendering, and derives help intent from registered Cobra flag arity so string values
+identical to `-h`, `-h=false`, `--help`, `--help=false`, or `--` travel normally. The classifier retains
+independent true, false, and invalid facts rather than pflag last-value semantics. On every ordinary public
+command, any parsed false-help assignment wins regardless of order or repetition and returns usage exit `2`
+before a writer or executor. `version` alone treats false-help as a compatibility no-op; any parseable
+true-help wins regardless of order, unknown+true-help remains usage exit `2`, and positional validation
+outranks help/JSON. True exact/assignment/shorthand help forms share typed writer exit `1`. Compound
+`help --help` and `help <path> --help` are idempotent. Unknown or extra path segments never fall through to
+Cobra's default inventory.
 
 `internal/config` remains the sole YAML/configuration owner and is loaded only inside commands that need
 it. Viper is excluded. There is no global config registry or persistent pre-run hook. `gate check` and
@@ -8641,8 +8653,13 @@ application-owned rather than Cobra-owned.
 
 **Consequences.** `cerbix --help` is a grouped catalogue; every group and leaf has side-effect-free
 command help; exact valid help succeeds without config, credentials, PostgreSQL, RabbitMQ, or an API
-server, while unknown/extra help paths fail with usage exit `2`. Root end-of-options paths are evaluated
-by the Cobra root after parsing, so `cerbix -- gate …` cannot become a successful no-command help path. The six
+server, while unknown/extra/false help paths fail with usage exit `2` except for the documented version
+seam. Root end-of-options paths are evaluated by the Cobra root after parsing, so `cerbix -- gate …` cannot
+become a successful no-command help path. `__complete` and `__completeNoDesc` are unreachable in command
+position without banning them as string values. One intentional process-global package-initialization
+assignment sets `cobra.MousetrapHelpText = ""` before Cobra's Windows `preExecHook`, so Cobra cannot terminate
+a Windows Explorer launch outside `Main(args) int`; it is not per-command configuration, and
+`cobra.EnableCommandSorting` remains unmodified. The six
 leaves that previously ignored positional tokens (`serve`, `migrate`, `reencrypt`, `adopt-fact-month`,
 `enqueue-service-repair`, and `version`) now reject them with usage exit `2`, an `unexpected argument`
 diagnostic, empty stdout, and no executor call. `gate check` and `change record` retain that existing
@@ -8651,11 +8668,16 @@ Examples use shell-safe concrete UUIDs rather than `<...>` tokens; serve help st
 worker and agent; adoption rejects a timeout whose context margin would overflow before config/DB access.
 The only new direct module is Cobra; pflag remains transitive and Viper is absent. There is no API/OpenAPI, config schema,
 database schema/migration, runtime-role, frontend, generated-SPA, metric, alert, or deployment change.
-Implementation evidence is recorded in closed iter-0196. The third independent review was APPROVED, but a newer
-owner high-effort review superseded it; its fixes passed full gates. The following review found parsed-help
-value handling, assignment writer errors, catalogue-test reachability, lifecycle wording, and README timeout
-residuals; those are fixed and fresh full gates/rebuilt-binary matrices are green. The next re-review found
-one raw-`--` string-value/help writer residual; it is fixed, `/dev/full` exact/assignment probes return
-exit `1`, and fresh full gates pass. The final independent re-review is APPROVED with no findings. The owner
-approved the implementation, closed iter-0196, and authorized one local commit on 2026-10-02; push remains
-unauthorized.
+Implementation and review history is recorded in iter-0196. The original migration received independent
+approval, owner closure, and a local implementation commit on 2026-10-02. Confirmed later defects in Cobra
+runtime initialization and parser-boundary ownership supersede those closure claims for the current tree.
+The corrective implementation is present on a separate uncommitted branch. Its first high-effort review
+findings are addressed under TDD. The targeted re-review then found one remaining Important blocker:
+non-unknown help parse errors returned before version positional validation. The version-local policy now
+checks raw positional input before classifying any parse error, with permanent invalid/unknown/end-of-options
+regressions and encoder zero-call assertions. Fresh focused/full/race/build/vet/Windows/docs/module/diff/scope
+and 17-case rebuilt-binary version gates are green. The final targeted independent review is APPROVED with
+Critical `0`, Important `0`, and Minor `0`. The owner approved the complete 12-file corrective diff, closed
+the corrective cycle on 2026-10-02, and authorized exact staging plus one local corrective commit. This commit
+records the approved implementation and closure. Push remains unauthorized; no PR, merge, deploy, or restart
+was performed.

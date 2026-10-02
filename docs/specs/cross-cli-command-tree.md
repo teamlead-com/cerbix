@@ -1,14 +1,19 @@
 # cross-cli-command-tree — Cobra ownership and structured help
 
-> **Lifecycle: IMPLEMENTED / OWNER-APPROVED 2026-10-02 — iter-0196 CLOSED BY THE OWNER, D-0265;
-> one local commit authorized, push unauthorized.** The owner approved this design before production code
-> changed and approved the final implementation after verification and review. The implementation is based
-> on local `main` at `f6320fc1777e3ecd7201b06c21df64f2df936a12`: Cobra v1.10.2 owns the tree/parser/help,
-> pflag is transitive, and Viper is absent. Earlier approvals were superseded by newer high-effort findings;
-> every resulting help-precedence, classification, shell-safety, region, overflow, ordering/catalogue,
-> writer-error, parsed-value, documentation, and guard residual is fixed. Fresh focused/full/build/vet/race/
-> docs/diff/help/module/scope gates and rebuilt-binary matrices are green. The final independent review is
-> APPROVED with no Critical, Important, or Minor findings.
+> **Lifecycle: IMPLEMENTED / OWNER-APPROVED — CORRECTIVE CYCLE CLI-0196 CLOSED BY THE OWNER ON
+> 2026-10-02, D-0265; one local corrective commit authorized, push unauthorized.** The original design and
+> implementation were approved and committed locally on 2026-10-02, but later verification confirmed six
+> parser-boundary defect classes. The corrective implementation fixed command position, explicit false help,
+> hidden completion protocol reachability, Windows mousetrap lifecycle, version flag-error compatibility, and
+> compound help. The first corrective high-effort review returned `CHANGES REQUIRED` for repeated-help policy
+> and global-mutation wording; both were fixed. Its targeted re-review returned `CHANGES REQUIRED` for version
+> invalid-help/positional precedence; that version-local fix and permanent regression matrix were added. The
+> final targeted independent review is **APPROVED** with Critical `0`, Important `0`, and Minor `0`.
+> The corrective implementation is based on `c810b65901446de37221f0b7f747ef9ed6e8f607`; Cobra remains at
+> v1.10.2, pflag remains transitive, and Viper remains absent. Fresh targeted/full/race/build/vet/Windows/docs/
+> module/diff/scope and rebuilt-binary gates are green. The owner approved and closed the corrective cycle on
+> 2026-10-02. One local corrective commit was authorized, and this commit records the approved implementation
+> and closure. Push remains unauthorized; no PR, merge, deploy, or restart was performed.
 >
 > The design changes command parsing and help ownership only. Documented command paths, canonical long
 > flag names, flag types, defaults, required/optional meaning, environment variables, stdout/stderr
@@ -169,7 +174,30 @@ cmd.SetErr(stderr)
 
 Cobra's automatic completion command is disabled. The root has no `Version` field, so Cobra cannot add
 an implicit `--version` flag. Suggestions are disabled so an unknown command does not gain a new
-Levenshtein-dependent stderr suffix.
+Levenshtein-dependent stderr suffix. Before any `Execute`, cerbix also rejects Cobra's hidden
+`__complete` and `__completeNoDesc` protocol names when they occupy command position; the strings remain
+valid values of ordinary string flags. Cobra's documented Windows mousetrap is disabled by the intentional
+process-global package-initialization assignment `cobra.MousetrapHelpText = ""`. Package initialization runs
+before Cobra's Windows `preExecHook`, so `Main(args) int` remains the lifecycle and exit owner even when a
+Windows binary is launched from Explorer. This is not per-command configuration and is the one intentional
+process-global Cobra write; `cobra.EnableCommandSorting` remains untouched.
+
+A single parser-boundary inspection runs before `Execute`. Its responsibility is deliberately narrow:
+
+- enforce the public raw grammar `cerbix <command> [flags]`, with `check` immediately after `gate` and
+  `record` immediately after `change`;
+- reject root flags before a top-level command and group/leaf flags before a nested command with usage exit
+  `2`, before any executor, config loader, HTTP client, database, or broker access;
+- preserve positional and unknown-nested-command precedence over true help;
+- classify help only when an exact help token occupies a flag position according to the selected command's
+  registered flag arity; string values equal to `-h`, `--help`, `--help=false`, `--`, `__complete`, or
+  `__completeNoDesc` are not reclassified;
+- route flag parse failures through the target command's Cobra `FlagErrorFunc` instead of replacing
+  command-specific compatibility policy with a generic usage error.
+
+The custom `help` command is inserted into Cobra's searchable tree during root construction, before that
+inspection. Cobra still owns the registered commands, flags, flag parsing, and command execution; the
+boundary does not execute runtime work or maintain a second public command inventory.
 
 ### 5.2 Typed options separate parsing from execution
 
@@ -269,17 +297,36 @@ golden tests. Every exact valid help invocation exits `0`, writes help to stdout
 stderr, and performs no config, file, network, database, RabbitMQ, or runtime-service access. Argument and
 nested-command validation precede help rendering: a positional before `--help`, or a misspelled nested
 command followed by help/leaf flags, exits `2` with the usage diagnostic and empty stdout. Help intent is
-the parsed Cobra `help=true` flag, not a raw argv string: `--help`/`-h`/`--` remain valid values of string
-flags, while later exact or assignment help tokens are interpreted only after the target FlagSet parses
-those values. `--help=true`/`-h=true` are supported help forms. Output-writer failures on all public help forms share
-one typed exit-`1` contract.
+derived from the selected command's registered Cobra flags rather than raw substring matching:
+`--help`/`-h`/`--help=false`/`--` remain valid values of string flags, while a later exact or assignment help
+token is interpreted only after those values are accounted for. `--help`, `--help=true`, `-h`, and
+`-h=true` are supported true-help forms. For root, groups, all side-effect leaves, and the `help` command,
+help policy is **any-false-wins**: the presence of any parsed `--help=false` or `-h=false` assignment is a
+deterministic usage error with exit `2`, empty stdout, and zero executor calls, regardless of ordering,
+repetition, a preceding true-help, or a later true-help. This is deliberately not pflag last-value semantics.
+Help-looking tokens consumed as registered string-flag values do not participate in the policy.
+
+`version` alone preserves the measured compatibility seam. False-help is a compatibility no-op; if any
+parseable true-help is also present, true-help wins regardless of order and version help is rendered. An
+unknown flag combined with any true-help remains usage exit `2`. Positional validation has highest priority:
+any positional exits `2` with empty stdout and zero encoder calls before help or JSON output. Without a
+positional or true-help, false-help (including an unknown flag plus false-help) prints version JSON and exits
+`0`. Output-writer failures on all public true-help forms share one typed exit-`1` contract.
+
+Compound help is idempotent: `cerbix help --help` is equivalent to `cerbix help`, and
+`cerbix help <path> --help` is equivalent to `cerbix help <path>`. The same applies to
+`--help=true`, `-h`, and `-h=true`, including group and nested paths. `help ... --help=false` is not a
+success-help form and exits `2`.
 
 The following are required success paths:
 
 ```text
 cerbix --help
 cerbix help
+cerbix help --help
 cerbix help serve
+cerbix help serve --help
+cerbix help gate check --help
 cerbix serve --help
 cerbix gate --help
 cerbix gate check --help
@@ -486,7 +533,11 @@ A separately built baseline binary was then run against captured stdout/stderr. 
 | unknown nested subcommand | exit 2; diagnostic + group usage on stderr | exit 2; diagnostic + group usage on stderr; no suggestions |
 | unknown/extra `help` path | exit 0; ignored every supplied help path and printed root usage | exit 2; `help: unknown command path` on stderr; no runtime access |
 | unknown flag / invalid duration on flag-owning commands | exit 2; diagnostic/usage on stderr; no runtime access | exit 2; deterministic diagnostic on stderr; no runtime access |
-| `version --bogus` | exit 0; unknown flags ignored and version JSON printed | unchanged through a Cobra flag-error compatibility seam; any following positional still follows §10.2 |
+| root flag before top-level command; group/leaf flag before nested command | exit `2` as unknown command/subcommand before side effects | same canonical command-position boundary, before Cobra traversal or runtime access |
+| any parsed `--help=false` / `-h=false` on root, groups, side-effect leaves, or `help`, including repeated/conflicting help flags | exit `2` before side effects | any-false-wins usage exit `2`, empty stdout, zero executor/config/HTTP calls; string values are excluded |
+| `version --bogus`; version false-help forms without a positional | exit `0`; version JSON | unchanged through a Cobra flag-error compatibility seam; false-help is a no-op, while any parseable true-help wins regardless of order |
+| version unknown/false-help/true-help forms followed by a positional | baseline ignored some positionals | positional-first exit `2`, empty stdout, encoder not called, per §10.2 |
+| compound `help <path>` plus true help | old manual help ignored path details | idempotent root/path help, stdout only, writer failures exit `1` |
 | missing required flag | exit 2; command diagnostic on stderr; no runtime access | exit 2; command diagnostic on stderr; no runtime access |
 | invalid role/month/RFC3339/range/positive timeout | exit 2 before config/network | same semantic class and side-effect boundary |
 | gate/change valid parse with missing/bad environment | exit 1; environment diagnostic; no request where validation fails | same |
@@ -494,7 +545,9 @@ A separately built baseline binary was then run against captured stdout/stderr. 
 | runtime/recovery valid parse with missing config | exit 1 from existing config loader | unchanged |
 | normal gate/change stdout/stderr and JSON | current summary/reason/raw-body grammar | byte/line compatible |
 | gate/change semantic HTTP/action mapping | existing 0/1/2/4 and 0/1/2 maps | unchanged |
-| completion command | absent | absent |
+| public completion command | absent | absent |
+| hidden `__complete` / `__completeNoDesc` protocol command position | absent | rejected with exit `2` before `Execute`; no protocol stdout/directive stderr |
+| Windows Explorer lifecycle | application parser returned an exit code | Cobra mousetrap disabled; `Main(args) int` remains the exit owner |
 | implicit root version flag | absent | absent |
 
 ### 10.2 Intentional positional-argument tightening
@@ -506,8 +559,10 @@ The standard-library implementation explicitly rejects positional arguments only
 syntax.
 
 The Cobra target gives every leaf explicit `NoArgs` validation. Every unexpected positional argument
-therefore exits `2` on stderr before config, network, database, or runtime access. This is the only
-non-help CLI tightening introduced by the design and requires the owner's approval of this specification.
+therefore exits `2` on stderr before config, network, database, or runtime access. This remains the only
+intentional non-help compatibility tightening introduced by the design. The corrective canonical
+command-position boundary is not a new syntax change: it restores the measured pre-Cobra rule that flags
+cannot precede the command or nested command name.
 
 Documented command paths, canonical `--flag` names, types, defaults, required/optional meaning,
 environment variables, stdout/stderr contracts, and semantic result exit codes otherwise remain
@@ -619,21 +674,29 @@ expected result is no such import.
 
 Tests cover:
 
-- root no args and post-`--` inputs; all root help aliases; exact tree-derived leaf SET/group ownership;
-  stable grouping/order; no completion; no implicit version flag; no suggestions;
-- `gate --help`, `change --help`, unknown/misspelled nested subcommands (with help or leaf flags), invalid/
-  extra `help` paths, and positional-before-help paths failing with exit `2` rather than rendering help;
-- every leaf `-h` and `--help`; metadata-derived synopsis, required/optional sections, placeholders and
+- root no args and post-`--` inputs; canonical raw command position for top-level and nested commands; all
+  root help aliases; exact tree-derived leaf SET/group ownership; stable grouping/order; no public or hidden
+  completion protocol; no implicit version flag; no suggestions; Windows mousetrap disabled;
+- root/group flags before command names, `gate --help`, `change --help`, unknown/misspelled nested
+  subcommands (with help or leaf flags), invalid/extra `help` paths, and positional-before-help paths failing
+  with exit `2` rather than rendering help or reaching an executor;
+- every leaf `-h` and `--help`; all exact/assignment true/false/invalid boolean forms; repeated/conflicting
+  false→true, true→false, false→false, long→shorthand, and shorthand→long forms; any-false-wins rejection on
+  every ordinary side-effect path; version false-help no-op, order-independent true-help, unknown+true-help,
+  and positional-first matrices; metadata-derived synopsis, required/optional sections, placeholders and
   defaults; shell-safe examples; no runtime side effects; in-memory metadata mutations must update all
-  rendered help; string-flag values equal to `--help`/`-h`/`--` must execute normally, including a later
-  real help token; exact and assignment help
+  rendered help; string-flag values equal to `--help`/`--help=false`/`-h`/`-h=false`/`--`/`__complete`/
+  `__completeNoDesc` must execute normally, including a later real help token; exact and assignment help
   forms must map failing stdout writers to the same typed exit `1`;
+- compound `help --help` and `help <root|group|leaf path> --help` exact/assignment/shorthand forms, including
+  typed writer failures and false-help usage errors;
 - unknown flags; missing required flags; the six explicit positional-tightening cases and two preserved
   gate/change positional cases above; invalid durations; role/month/RFC3339/range validation;
 - every positional case asserts exit, readable diagnostic, empty stdout, and the applicable zero-call
   config/network/database/runtime boundary; adoption also covers duration-addition overflow before config;
-- root/group catalogue tests prove local metadata order without global Cobra mutation and exclude hidden/
-  unavailable commands;
+- root/group catalogue tests prove local metadata order without global Cobra command-sorting mutation and
+  exclude hidden/unavailable commands; the separate intentional process-global mousetrap assignment is
+  guarded independently;
 - stdout/stderr separation and runtime errors without automatic usage;
 - every gate/change semantic exit code through HTTP stubs;
 - environment-only credentials, CA file, TLS verification, no bypass, raw JSON, replay, and redaction of
@@ -683,14 +746,17 @@ Final verification runs:
 ```text
 go test ./internal/cli/... -count=1
 go build -buildvcs=false ./...
+GOOS=windows GOARCH=amd64 go build -o /tmp/cerbix-windows.exe ./cmd/cerbix
 go vet ./...
 go test -race -count=1 -timeout 40m ./...
 make docs-check
 git diff --check
 ```
 
-It manually checks root, alias, group, every leaf, and nested help with `go run ./cmd/cerbix ...`. Help
-must pass without config, PostgreSQL, RabbitMQ, API server, credentials, or production environment.
+It builds a temporary Linux binary and manually checks root, alias, group, every leaf, nested/compound
+help, canonical command-position failures, false-help forms, version compatibility, and hidden completion
+protocol rejection with exact process exit/stdout/stderr capture. Help must pass without config, PostgreSQL,
+RabbitMQ, API server, credentials, or production environment; temporary binaries are removed afterward.
 Dependency guards run `go list -m all`, `go mod why` for Cobra, pflag, and Viper,
 `go mod tidy -diff`, and automated/source scans for native flag parsing, direct pflag/Viper imports, and
 forbidden flags.
@@ -698,20 +764,25 @@ forbidden flags.
 ### 14.2 Acceptance invariants
 
 1. Cobra is the only command tree, subcommand dispatcher, argument parser, flag parser, and help owner.
-2. The public hierarchy is exactly the tree in §2; no completion command or implicit version flag exists.
+2. The public hierarchy is exactly the tree in §2; no public completion command, reachable hidden
+   `__complete`/`__completeNoDesc` protocol command, or implicit version flag exists.
 3. Every available runnable leaf appears once in the root catalogue, hidden/unavailable commands are absent,
    and deterministic local metadata order never mutates Cobra's global sorting setting.
 4. Every group and leaf has command-specific `Use`, `Short`, `Long` where applicable, examples, argument
    validation, and help.
 5. Flags are registered once; required/default help derives from the registered flag metadata.
-6. `Main(args []string) int` remains public and `cmd/cerbix/main.go` remains the sole `os.Exit` site.
+6. `Main(args []string) int` remains public and `cmd/cerbix/main.go` remains the sole application-owned
+   `os.Exit` site; `cobra.MousetrapHelpText` is empty before every `Execute`.
 7. Cobra uses `SilenceUsage: true`, `SilenceErrors: true`, explicit output/error writers, no suggestion
    text, and no process-global sorting mutation.
 8. Exact valid help paths exit `0` on stdout and reach no config, file, network, database, broker, or
-   runtime mechanism; positional/nested-command validation outranks help, parsed help intent does not steal
-   string values equal to `-h`/`--help`, unknown/extra help paths fail with exit `2`, and help writer errors
-   share typed exit `1` for exact/assignment `--help` and `help` syntaxes.
-9. Root/group no-argument, post-`--`, and all non-help usage failures keep application usage exit `2`.
+   runtime mechanism; positional/nested-command validation outranks help; help detection does not steal
+   string values equal to `-h`/`-h=false`/`--help`/`--help=false`/`--`; compound help is idempotent;
+   any parsed false-help assignment wins for ordinary commands regardless of repeated flag order, while
+   version false-help is a no-op and any parseable true-help wins; unknown/extra help paths fail with exit `2`;
+   and help writer errors share typed exit `1` for exact/assignment/shorthand `--help` and `help` syntaxes.
+9. Root/group no-argument, post-`--`, flag-before-command, and all non-help usage failures keep application
+   usage exit `2` and occur before executor/config/network/database/broker access.
 10. Documented command paths, canonical flags, types, defaults, requiredness, environment names,
     stdout/stderr contracts, semantic exit codes, and config precedence remain unchanged.
 11. `serve`, `migrate`, `reencrypt`, `adopt-fact-month`, `enqueue-service-repair`, and `version` reject

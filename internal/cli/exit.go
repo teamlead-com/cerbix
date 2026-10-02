@@ -52,71 +52,19 @@ func exitFromCode(code int) error {
 type rawCLIArgsContextKey struct{}
 
 func executeCommand(root *cobra.Command, args []string, stderr io.Writer) int {
-	root.SetContext(context.WithValue(context.Background(), rawCLIArgsContextKey{}, append([]string(nil), args...)))
-	if root.Name() == "cerbix" && len(args) > 0 && args[0] != "help" && !strings.HasPrefix(args[0], "-") {
-		found, remaining, err := root.Find(args)
-		if len(remaining) > 0 && (err != nil || found == root) {
-			_, _ = fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
-			if found == root {
-				_ = writeRootHelp(root, stderr)
-			} else {
-				_ = writeCommandHelp(found, stderr)
-			}
-			return 2
-		}
-		if found != root && hasVisibleSubcommands(found) && len(remaining) > 0 && !strings.HasPrefix(remaining[0], "-") {
-			return commandErrorCode(unknownSubcommandArgs(found, remaining[:1]), stderr)
-		}
+	boundary, err := inspectParserBoundary(root, args)
+	if err != nil {
+		return commandErrorCode(err, stderr)
 	}
-	if handled, err := executeRequestedHelp(root, args); handled {
+	ctx := context.WithValue(context.Background(), rawCLIArgsContextKey{}, append([]string(nil), args...))
+	ctx = context.WithValue(ctx, parserBoundaryContextKey{}, boundary)
+	root.SetContext(ctx)
+	boundary.target.SetContext(ctx)
+	if handled, err := executeRequestedHelp(root, boundary); handled {
 		return commandErrorCode(err, stderr)
 	}
 	root.SetArgs(args)
 	return commandErrorCode(root.Execute(), stderr)
-}
-
-func executeRequestedHelp(root *cobra.Command, args []string) (bool, error) {
-	if !containsPotentialHelpFlag(args) {
-		return false, nil
-	}
-	target, remaining, err := root.Find(args)
-	if err != nil {
-		return true, usageExit(err)
-	}
-	target.InitDefaultHelpFlag()
-	if err := target.ParseFlags(remaining); err != nil {
-		return true, usageExit(err)
-	}
-	helpRequested, err := target.Flags().GetBool("help")
-	if err != nil {
-		return true, usageExit(err)
-	}
-	if !target.Flags().Changed("help") || !helpRequested {
-		return false, nil
-	}
-	if target.Args != nil {
-		if err := target.Args(target, target.Flags().Args()); err != nil {
-			return true, err
-		}
-	}
-	if target == root {
-		err = writeRootHelp(root, root.OutOrStdout())
-	} else {
-		err = writeCommandHelp(target, target.OutOrStdout())
-	}
-	if err != nil {
-		return true, runtimeExit(fmt.Errorf("help: %w", err))
-	}
-	return true, nil
-}
-
-func containsPotentialHelpFlag(args []string) bool {
-	for _, arg := range args {
-		if arg == "-h" || arg == "--help" || strings.HasPrefix(arg, "-h=") || strings.HasPrefix(arg, "--help=") {
-			return true
-		}
-	}
-	return false
 }
 
 func commandErrorCode(err error, stderr io.Writer) int {

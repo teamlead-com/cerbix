@@ -8,6 +8,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func init() {
+	cobra.MousetrapHelpText = ""
+}
+
 const (
 	rootGroupRuntime          = "runtime"
 	rootGroupMaintenance      = "maintenance"
@@ -55,6 +59,7 @@ func newRootCommandWithVersionExecutor(stdout, stderr io.Writer, versionExecute 
 	version := newVersionCommand(versionExecute)
 	addOrderedCommands(root, serve, migrate, reencrypt, adopt, repair, gate, change, version)
 	root.SetHelpCommand(newHelpCommand(root))
+	root.InitDefaultHelpCmd()
 
 	root.SetHelpFunc(func(cmd *cobra.Command, _ []string) {
 		if cmd == root {

@@ -12,8 +12,10 @@
 > The corrective implementation is based on `c810b65901446de37221f0b7f747ef9ed6e8f607`; Cobra remains at
 > v1.10.2, pflag remains transitive, and Viper remains absent. Fresh targeted/full/race/build/vet/Windows/docs/
 > module/diff/scope and rebuilt-binary gates are green. The owner approved and closed the corrective cycle on
-> 2026-10-02. One local corrective commit was authorized, and this commit records the approved implementation
-> and closure. Push remains unauthorized; no PR, merge, deploy, or restart was performed.
+> 2026-10-02. Corrective implementation commit `07474d0b2537ccc9026de5883ac8fcf3d9a44d37` records the
+> approved implementation and closure and was fast-forwarded into local `main` on 2026-10-02 without a merge
+> commit. Push remains unauthorized; no PR, remote merge, tag, release, deploy, or restart was performed, and
+> the corrective worktree and branch remain preserved.
 >
 > The design changes command parsing and help ownership only. Documented command paths, canonical long
 > flag names, flag types, defaults, required/optional meaning, environment variables, stdout/stderr

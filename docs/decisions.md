@@ -8671,13 +8671,14 @@ database schema/migration, runtime-role, frontend, generated-SPA, metric, alert,
 Implementation and review history is recorded in iter-0196. The original migration received independent
 approval, owner closure, and a local implementation commit on 2026-10-02. Confirmed later defects in Cobra
 runtime initialization and parser-boundary ownership supersede those closure claims for the current tree.
-The corrective implementation is present on a separate uncommitted branch. Its first high-effort review
-findings are addressed under TDD. The targeted re-review then found one remaining Important blocker:
-non-unknown help parse errors returned before version positional validation. The version-local policy now
-checks raw positional input before classifying any parse error, with permanent invalid/unknown/end-of-options
-regressions and encoder zero-call assertions. Fresh focused/full/race/build/vet/Windows/docs/module/diff/scope
-and 17-case rebuilt-binary version gates are green. The final targeted independent review is APPROVED with
-Critical `0`, Important `0`, and Minor `0`. The owner approved the complete 12-file corrective diff, closed
-the corrective cycle on 2026-10-02, and authorized exact staging plus one local corrective commit. This commit
-records the approved implementation and closure. Push remains unauthorized; no PR, merge, deploy, or restart
-was performed.
+The corrective implementation was developed on a separate branch. Its first high-effort review findings were
+addressed under TDD. The targeted re-review then found one remaining Important blocker: non-unknown help
+parse errors returned before version positional validation. The version-local policy now checks raw
+positional input before classifying any parse error, with permanent invalid/unknown/end-of-options regressions
+and encoder zero-call assertions. Fresh focused/full/race/build/vet/Windows/docs/module/diff/scope and 17-case
+rebuilt-binary version gates are green. The final targeted independent review is APPROVED with Critical `0`,
+Important `0`, and Minor `0`. The owner approved the complete 12-file corrective diff and closed the
+corrective cycle on 2026-10-02. Commit `07474d0b2537ccc9026de5883ac8fcf3d9a44d37` records the approved
+implementation and closure and was fast-forwarded into local `main` on 2026-10-02 without a merge commit.
+Push remains unauthorized; no PR, remote merge, tag, release, deploy, or restart was performed, and the
+corrective worktree and branch remain preserved.

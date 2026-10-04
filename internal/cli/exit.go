@@ -49,15 +49,12 @@ func exitFromCode(code int) error {
 	return printedExit(code)
 }
 
-type rawCLIArgsContextKey struct{}
-
 func executeCommand(root *cobra.Command, args []string, stderr io.Writer) int {
 	boundary, err := inspectParserBoundary(root, args)
 	if err != nil {
 		return commandErrorCode(err, stderr)
 	}
-	ctx := context.WithValue(context.Background(), rawCLIArgsContextKey{}, append([]string(nil), args...))
-	ctx = context.WithValue(ctx, parserBoundaryContextKey{}, boundary)
+	ctx := context.WithValue(context.Background(), parserBoundaryContextKey{}, boundary)
 	root.SetContext(ctx)
 	boundary.target.SetContext(ctx)
 	if handled, err := executeRequestedHelp(root, boundary); handled {
@@ -80,14 +77,6 @@ func commandErrorCode(err error, stderr io.Writer) int {
 	}
 	_, _ = fmt.Fprintln(stderr, err)
 	return 2
-}
-
-func rawCLIArgs(cmd *cobra.Command) []string {
-	if cmd.Context() == nil {
-		return nil
-	}
-	args, _ := cmd.Context().Value(rawCLIArgsContextKey{}).([]string)
-	return args
 }
 
 func noArgs(cmd *cobra.Command, args []string) error {

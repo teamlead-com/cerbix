@@ -147,8 +147,6 @@ func mainWithWriters(args []string, stdout, stderr io.Writer) int {
 	return executeCommand(root, args, stderr)
 }
 
-// loadConfig loads and validates the config, logging a CRITICAL line and
-// returning nil on failure (strict-only: fail fast before any runtime wiring).
 // rabbitManagementClient builds the RabbitMQ management client for the region
 // picker: the explicit management_url if set, else derived from the AMQP url. Nil
 // (no error) when no RabbitMQ is configured.

@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### ✨ Added
 
-- **Structured Cobra CLI.** The command tree now provides grouped top-level help and detailed command-specific help. Documented commands, flags, defaults, environment variables and semantic exit codes remain unchanged. Leaf commands now reject previously ignored positional arguments with usage exit code 2 before loading configuration or performing side effects. Viper is not used.
+- **Structured Cobra CLI.** The command tree now provides grouped top-level help and detailed command-specific help. Documented commands, canonical flags, defaults, environment variables and gate/change result exit codes remain unchanged. Leaf commands reject previously ignored positional arguments and unsupported shorthand clusters with usage exit code 2 before side effects; cluster-looking string-flag values remain literal. A version JSON writer failure now reports `version:` and exits 1 instead of the native parser's silent exit 0; successful JSON still exits 0. Viper is not used.
 
 - **Cross-brand identity and shell UX.** cerbix now uses the Sealed C default mark with custom-logo priority and contrast-safe instance accents. The SPA adds responsive navigation access, accessible overlay
   and focus behavior, atomic organization/project transitions, a stale-response-safe SearchBox, truthful Dashboard loading/no-data/error states, and explicit breadcrumb, theme and announcement semantics. Desktop
@@ -20,7 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### 🩹 Fixed
 
-- **Cobra parser boundaries fail closed.** Commands must occupy their canonical raw positions; any parsed false-help assignment wins for ordinary commands regardless of repeated flag order; help-looking string values remain literal; `version` keeps false-help as a compatibility no-op while any parseable true-help wins; compound help is idempotent; hidden completion protocols are unreachable; and the Windows mousetrap is disabled.
+- **Cobra parser boundaries fail closed.** Commands must occupy their canonical raw positions; undocumented shorthand clusters (including `-hh=false` and `-hhh=false`) now fail with usage exit 2 before an executor or config/network access, while registered string-flag values remain literal. Version positionals, including `""`, take priority over unsupported clusters and malformed help before JSON encoding. Help assignments accept only exact lowercase `true`/`false`, not pflag aliases such as `1` or `t`; string-flag values remain literal. Ordinary positional and compound-help path errors precede any help policy; only then does any canonical false-help assignment win for ordinary commands regardless of repeated flag order; `version` keeps false-help as a compatibility no-op while any parseable true-help wins; compound help is idempotent; hidden completion protocols are unreachable; and the Windows mousetrap is disabled.
 
 - **Architecture and operator documentation now follows the current runtime.** HTTP-pull diagrams use the real `/api/v1/agent/*` routes; heartbeat storage is described as adaptive and the PostgreSQL 15+ floor is separated from the repository's PostgreSQL 16 images; README build and deploy/change boundaries match the supported workflow; and the top-level configuration table includes the current service, audit, and expected-run ledger sections.
 

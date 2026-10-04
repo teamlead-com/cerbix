@@ -33,10 +33,17 @@ A single binary; behavior is selected by subcommand and flags.
 | `cerbix version` | Print build info (version, commit) as JSON and exit. | — |
 | `cerbix help` / `-h` / `--help` | Show the grouped command catalogue; `cerbix help <path>` and `<path> --help` show command-specific flags, defaults, environment variables, exit codes, and examples. | Help exits `0` and does not load config or contact runtime dependencies. |
 
-Cobra is the sole owner of this tree, its arguments, flags, and help; Viper is not used. Documented
-command paths, flags, defaults, environment variables, stdout/stderr contracts, and semantic exit codes
-remain unchanged. Leaf commands reject previously ignored positional arguments with usage exit code `2`
-before config loading or other side effects.
+Cobra owns this tree, its registered arguments, flags, and help; Viper is not used. Documented command
+paths, canonical long flags, defaults, environment variables, and gate/change result exit codes remain
+unchanged. Leaf commands reject previously ignored positional arguments and unsupported single-dash
+shorthand clusters (including `-hh=false`, `-hfalse`, and `-config`) with usage exit `2` before config
+loading or other side effects. Only `-h`, `-h=true`, and `-h=false` are supported shorthand forms;
+`--help`, `--help=true`, and `--help=false` are the long equivalents. Assignments accept only exact
+lowercase `true`/`false`, not pflag boolean aliases; ordinary positional and `help <path>` errors
+precede help handling, while string-flag values remain literal. `version` validates positionals before
+cluster/help syntax, returns exit `0` for successfully written JSON,
+and returns runtime exit `1` with a `version:` diagnostic on writer failure — an intentional
+compatibility delta from the native parser's silent exit `0`.
 
 **Flags in detail:**
 

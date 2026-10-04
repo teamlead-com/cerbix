@@ -8682,3 +8682,122 @@ corrective cycle on 2026-10-02. Commit `07474d0b2537ccc9026de5883ac8fcf3d9a44d37
 implementation and closure and was fast-forwarded into local `main` on 2026-10-02 without a merge commit.
 Push remains unauthorized; no PR, remote merge, tag, release, deploy, or restart was performed, and the
 corrective worktree and branch remain preserved.
+
+## D-0266 — close Cobra grammar bypasses and correct rollback/lifecycle forward-only (2026-10-03)
+
+**Context.** The locally committed Cobra chain (`6a72f647635cc59b67e327aa71489425b5114679`,
+`c810b65901446de37221f0b7f747ef9ed6e8f607`, `07474d0b2537ccc9026de5883ac8fcf3d9a44d37`,
+`1ca047ac469b861483de81daf9133d52340a97b9`) left two parser gaps: `migrate --config
+/nonexistent/x -hh=false` reaches the config loader because the help scanner does not classify shorthand
+clusters, and `version --bogus ""` publishes JSON because the flag-error policy treats `""` as an
+absence sentinel. The spec's former §15 claimed a one-commit source revert, even though migration and
+corrections were delivered across multiple commits. A closed `iter-0196.md` §10 line 346 retains
+pre-corrective pending-review wording despite later owner closure. The native baseline
+`f6320fc1777e3ecd7201b06c21df64f2df936a12` silently returned exit `0` when version JSON could not
+be written; current code correctly returns `1` and reports the error.
+
+**Decision.** The public shorthand grammar is only `-h`, `-h=true`, and `-h=false`; long help has
+`--help`, `--help=true`, and `--help=false`. Both assignment forms accept **only exact lowercase**
+`true` or `false`; empty, aliased (`1`/`0`, `t`/`f`), and mixed-case values are not public syntax even
+though pflag accepts some of them. A single-dash multi-character flag token in actual flag position,
+other than the documented `-h=true`/`-h=false` assignments, is intentionally unsupported; examples
+include `-hh`, `-hh=true`, `-hh=false`, `-hhh=false`, `-hfalse`,
+`-htrue`, `-abc`, and `-config`. Reject such tokens *before* Cobra execution through a typed usage error
+and centralized `commandErrorCode`: exit `2`, empty stdout, deterministic stderr, and zero
+executor/config/HTTP/DB/broker access. Do not reproduce partial pflag cluster semantics. Preserve
+cluster-looking strings as literal values of registered string flags (both separate and `=` forms);
+preserve literal `-` and end-of-options `--`. Version's flag-error policy tracks positional **presence**
+independently of the positional value; an empty first positional is printed with `%q` as `""`, even with
+unknown or invalid flags, and never reaches the encoder. After command resolution, the boundary checks
+`version` positionals in command-local arguments *before* cluster/help scanning; the direct command
+never strips a positional named `"version"`. An invalid help assignment fails with a command-path usage
+diagnostic before pflag can accept an alias; ordinary canonical false-help still wins over invalid help
+*after* positional/path validation, and string-flag values are excluded from this policy.
+
+**Targeted review response.** The first independent iter-0197 review returned `CHANGES REQUIRED` with
+Critical `0`, Important `3`, Minor `2`: combined version positional/cluster precedence, `version -h=`
+publishing JSON, rollback-guard false GREEN, pflag help aliases, and direct-command loss of a `"version"`
+positional. The correction shares one command-local boundary for both version findings, accepts only exact
+help assignments, and bounds the rollback guard to §15 with fixture-based one-commit detection. This is
+implementation evidence, not independent targeted re-review approval or owner closure.
+
+**Second targeted review response.** The independent targeted re-review returned `CHANGES REQUIRED`
+(Critical `0`, Important `2`, Minor `4`): the heuristic rollback matcher missed alternative affirmative
+instructions, a second canonical §15 was ignored, safe negation was falsely refused, and CRLF was not
+recognized; ordinary positionals lost to malformed help without a normative priority; and the serve
+zero-path test never reached `executeServe`. At that stage the safety-critical §15 was compared in full
+against a readable golden fixture, with one unique heading and normalized line endings — not an NLP
+classifier. That §15 extraction was later superseded by the standalone whole-file guard below.
+Registered-arity scanning validates ordinary `Args` and `help <path>` before any help policy;
+canonical any-false-wins applies only when positional/path validation succeeds, and unknown flag values
+retain Cobra's parse error. An immutable injected serve-runtime seam proves zero/nonzero mapping, one
+runtime call, and unchanged options/writers without starting services. At that intermediate gate these
+were local corrections; another independent re-review and owner sign-off were still pending.
+
+**Third independent review response (OPEN).** A subsequent read-only targeted re-review returned
+`CHANGES REQUIRED` (Critical `0`, Important `1`, Minor `1`): the lexical rollback guard accepted §15
+inside a fence, rejected a harmless fenced duplicate, and misread tab/indented H2 boundaries. The
+confirmed follow-up findings also include real `15.<number>` headings after §16 bypassing the guard,
+and require an explicit combined-invalid-duration/positional priority, version malformed-help ordering,
+accurate commit provenance, the removal of a dead duplicate check, and a pending E2E closure gate.
+The correction at that stage used a bounded ATX H2/fence scan (not a CommonMark parser) to check
+numbered rollback headings in the document and compare the sole extracted §15 to a separate golden;
+subsequent review showed this scanner was not a reliable boundary for arbitrary Markdown. Ordinary positional/path
+preflight precedes Cobra validation of other flag values: `gate check --project p --service s
+--timeout=broken extra` reports `extra` before the invalid duration, whereas without `extra` Cobra
+reports the invalid duration. Version priority is positional > malformed help > true-help > canonical
+false-help when no higher-priority error is present; unknown flag plus true-help remains usage exit `2`.
+Only the redundant, unreachable post-`ParseFlags`/`Args` `!intent.sawTrue` check is removed. The CLI
+implementation commits are `6a72f64` and `07474d0`; `c810b65` and `1ca047a` carry docs-only lifecycle
+and integration changes. At that intermediate gate these local amendments had **not** received the next independent verdict.
+Live-stack E2E was still a pending closure gate requiring separately authorized safe dev-stack/broker-volume
+state or an explicit owner exception; it had not been run at that stage.
+
+**Later independent review and owner-approved boundary change (2026-10-04).** The next targeted review
+returned `CHANGES REQUIRED` (Critical `0`, Important `2`, Minor `1`): optional ATX closing hashes and
+quoted headings bypassed the Markdown scanner, while a thematic break was falsely refused. Rather than
+extend a hand-written Markdown parser, the owner approved a single standalone canonical procedure at
+[`cross-cli-rollback.md`](specs/cross-cli-rollback.md). §15 of the CLI spec now links to it instead of
+repeating steps; §16 names only the guard. The test compares the entire procedure file, including its
+title and final newline, with an independent readable golden after normalizing document CRLF/lone CR.
+Any addition, deletion, or replacement in that file fails until explicit golden update and review. This
+is **not** a CommonMark parser, an NLP classifier, or a proof that other documents contain no conflicting
+instructions; independent review owns that wider assessment. An actual restoration still requires its
+own separate owner approval. This correction changes no production CLI behavior.
+
+The rollback operations and their approval conditions are stated only in the standalone procedure, not
+repeated in this decision. A failed version JSON writer remains an **intentional compatibility delta**:
+exit `1` as an application runtime error with `version:` stderr, no Cobra usage and no false success.
+The closed `iter-0196.md` is an immutable closure snapshot; its §10 line 346 is intentionally not edited.
+The authoritative current state is the long-lived [`cross-cli-command-tree.md`](specs/cross-cli-command-tree.md),
+the standalone procedure, `docs/status.md`, `docs/traceability.md`, this decision and closed `iter-0197.md`.
+
+**Consequences and lifecycle at the whole-file boundary gate.** CLI-0197 remained `OPEN / IN_PROGRESS`:
+implementation could be completed and verified, but another independent targeted re-review, the live-stack
+E2E closure gate (or an explicit owner-approved exception), and owner sign-off were pending at that point;
+no staging/commit was authorized. The correction adds no API/OpenAPI, database schema/migration, config
+schema, frontend, runtime-role, production setting/data, metric, or alert change. Cobra v1.10.2,
+transitive pflag, and the module graph remain as shipped. No push, PR, merge, deploy, or production
+restart is part of this decision.
+
+**Evidence update (2026-10-04; before owner closure).** Four earlier independent Cobra reviews returned
+`CHANGES REQUIRED` (0/3/2, 0/2/4, 0/1/1, 0/2/1). The subsequent independent Cobra-code review returned
+**APPROVED** (Critical `0`, Important `0`, Minor `0`); a separate read-only E2E-harness review returned
+**APPROVED** (`0/0/0`) without running Playwright. Later, the owner-authorized unchanged **source suite**
+from the iter-0197 worktree ran on a fresh disposable stack: auth/setup exit `0`, 1 passed; Chromium
+without repeating setup exit `0`, 76 passed, 0 failed, 1 skipped. The skip was the file-managed-monitor
+UI case on an empty provider fixture; its diagnostics-endpoint check passed. This does **not** claim
+`make dev-test` ran. The earlier pre-fix 73 passed / 2 failed / 1 skipped was a failed historical run.
+The separate DB/broker race gate exited `0` across 33 packages, while restored-copy, PostgreSQL 15.8
+and two declarative-partition cases remained SKIP, not verified. Disposable volumes/image and private
+artifacts were retained without destructive cleanup. At this evidence gate CLI-0197 and DoD-0197
+remained `IN_PROGRESS`, iter-0197 remained `OPEN`, and owner sign-off and staging/commit authorization
+were pending.
+
+**Owner lifecycle closure (2026-10-04).** After checking readiness against the published independent
+reviews and test reports, the owner explicitly signed off on closing iter-0197. Its lifecycle is now
+`CLOSED / OWNER-APPROVED`; CLI-0197 and DoD-0197 are `DONE`. The earlier rejected reviews, failed
+pre-fix E2E and four special-fixture/mode skips remain historical evidence, not passing results.
+This sign-off authorizes lifecycle documentation only: staging and a local commit still require
+separate authorization. No push, PR, merge, deploy, cleanup of retained disposable resources or
+production restart was authorized or performed by this closure.

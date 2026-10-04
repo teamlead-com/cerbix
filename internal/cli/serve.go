@@ -14,13 +14,14 @@ type serveOptions struct {
 }
 
 type serveExecutor func(serveOptions, io.Writer, io.Writer) error
+type serveRuntimeExecutor func(serveOptions, io.Writer, io.Writer) int
 
 func executeServe(opts serveOptions, stdout, stderr io.Writer) error {
-	code := serveRuntime(opts, stdout, stderr)
-	if code == 0 {
-		return nil
-	}
-	return printedExit(code)
+	return executeServeWithRuntime(opts, stdout, stderr, serveRuntime)
+}
+
+func executeServeWithRuntime(opts serveOptions, stdout, stderr io.Writer, run serveRuntimeExecutor) error {
+	return exitFromCode(run(opts, stdout, stderr))
 }
 
 func newServeCommand(execute serveExecutor) *cobra.Command {

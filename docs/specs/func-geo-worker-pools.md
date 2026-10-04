@@ -28,13 +28,13 @@ mode is architecturally supported as soon as jobs can be **addressed** to the ri
 
 ```
         geo-2 (center)                        geo-1 (edge)
-  ┌───────────────────────────┐         ┌────────────────────────┐
-  │ api · scheduler · Postgres│         │ cerbix --role worker    │
-  │ RabbitMQ (THE ONLY ONE)    │◄────────│   --region geo1         │
-  │  checks.jobs.core         │ network │  (DB-less, only rabbitmq│
-  │  checks.jobs.geo1 ────────┼─────────┼─► + prober.allow_private│
-  │  checks.results           │◄────────┼── publishes heartbeats  │
-  └───────────────────────────┘         └────────────────────────┘
+  ┌───────────────────────────┐         ┌───────────────────────────────────┐
+  │ api · scheduler · Postgres│         │ cerbix serve --config <path>      │
+  │ RabbitMQ (THE ONLY ONE)    │◄────────│   --role worker --region geo1     │
+  │  checks.jobs.core         │ network │  (DB-less, only rabbitmq          │
+  │  checks.jobs.geo1 ────────┼─────────┼─► + prober.allow_private           │
+  │  checks.results           │◄────────┼── publishes heartbeats            │
+  └───────────────────────────┘         └───────────────────────────────────┘
 ```
 
 The network between geos (WireGuard / amqps / amqproxy) is **outside cerbix**, on the admins; the docs give recommendations.

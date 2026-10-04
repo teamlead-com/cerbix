@@ -17,11 +17,29 @@
 > commit. Push remains unauthorized; no PR, remote merge, tag, release, deploy, or restart was performed, and
 > the corrective worktree and branch remain preserved.
 >
+> **Forward correction, iter-0197 / D-0266 (CLOSED / OWNER-APPROVED 2026-10-04):** Later verification identified
+> unsupported shorthand clusters reaching execution, empty version positionals lost in the flag-error
+> path, and a one-commit rollback claim that did not match the delivered commit chain. The grammar,
+> positional presence, rollback and version-writer contracts below are authoritative current guidance.
+> The first independent iter-0197 review returned `CHANGES REQUIRED` (Critical 0, Important 3, Minor 2).
+> The first targeted independent re-review returned `CHANGES REQUIRED` (Critical 0, Important 2, Minor 4);
+> a later targeted re-review returned `CHANGES REQUIRED` (Critical 0, Important 1, Minor 1), and the
+> latest targeted re-review returned `CHANGES REQUIRED` (Critical 0, Important 2, Minor 1). The owner
+> approved a standalone whole-file rollback guard rather than more Markdown parsing. Its current-phase
+> Go/race/build/vet/module/docs/scope gates passed. Those four review results are historical: the later
+> independent Cobra-code review is **APPROVED** (0/0/0); the separate read-only E2E-harness review is
+> **APPROVED** (0/0/0, Playwright not run in that review). A subsequent owner-authorized disposable-stack
+> run of the unmodified source E2E suite passed (auth/setup 1 passed; Chromium 76 passed, 0 failed,
+> 1 skipped for the idle file provider); it was **not** `make dev-test`. The owner signed off on
+> lifecycle closure after reviewing readiness on 2026-10-04: CLI-0197 and DoD-0197 are DONE. The closed
+> iter-0196 report is an immutable closure snapshot; §10 line 346 retains historical pre-corrective
+> wording and was not edited after this finding. Staging/commit require separate authorization; no
+> push, PR, merge, deploy, or production restart was authorized or performed by this closure.
+>
 > The design changes command parsing and help ownership only. Documented command paths, canonical long
-> flag names, flag types, defaults, required/optional meaning, environment variables, stdout/stderr
-> contracts, and semantic exit codes remain unchanged. Help changes as specified in §7, and previously
-> ignored positional arguments are rejected with usage exit code `2` before side effects as specified in
-> §10.2.
+> flag names, flag types, defaults, required/optional meaning, and environment variables remain unchanged.
+> Help and positional tightening are specified in §§7/10.2; clustered shorthand is intentionally
+> unsupported (§6.3). Version JSON writer failure is the explicit historical exit-code exception (§9).
 
 ## 1. Problem and purpose
 
@@ -190,11 +208,22 @@ A single parser-boundary inspection runs before `Execute`. Its responsibility is
   `record` immediately after `change`;
 - reject root flags before a top-level command and group/leaf flags before a nested command with usage exit
   `2`, before any executor, config loader, HTTP client, database, or broker access;
-- preserve positional and unknown-nested-command precedence over true help;
+- resolve command and nested paths first; validate `version` positionals from command-local arguments
+  *before* scanning clusters or help, whether the caller supplied a root tree or an already selected
+  `version` command;
+- collect ordinary positionals through the same registered-arity scan and validate the target's `Args`
+  before true-, false-, or malformed-help policy. For `help <path>`, validate the whole path first without
+  rendering it. An unknown flag remains Cobra's flag error rather than making its following value a
+  positional; no second flag parser or command inventory is added;
 - classify help only when an exact help token occupies a flag position according to the selected command's
   registered flag arity; string values equal to `-h`, `--help`, `--help=false`, `--`, `__complete`, or
   `__completeNoDesc` are not reclassified;
-- route flag parse failures through the target command's Cobra `FlagErrorFunc` instead of replacing
+- reject unsupported single-dash multi-character flag tokens *before* Cobra execution, including clusters
+  whose final pflag help value would be false; registered string-flag values are never classified as flags,
+  and literal `-` / end-of-options `--` retain their separate meanings;
+- accept help assignments only with exact lowercase `true` or `false`; reject empty, aliased, mixed-case,
+  and otherwise invalid values with a command-path usage diagnostic before pflag can accept an alias;
+- route other flag parse failures through the target command's Cobra `FlagErrorFunc` instead of replacing
   command-specific compatibility policy with a generic usage error.
 
 The custom `help` command is inserted into Cobra's searchable tree during root construction, before that
@@ -288,7 +317,20 @@ Validation happens before config or remote access:
 
 The documented canonical long-flag spelling is `--name`. Standard-library `flag` incidentally accepted
 undocumented single-dash long forms such as `-config`; those spellings are not compatibility invariants.
-The existing standard help shorthand `-h` remains supported. No other shorthand is added.
+The only public shorthand grammar is `-h`, `-h=true`, and `-h=false`; the equivalent long forms are
+`--help`, `--help=true`, and `--help=false`. Assignment values are **exact lowercase** `true` or `false`:
+`-h=`, `-h=1`, `-h=t`, `--help=0`, `--help=TRUE`, and all other boolean aliases or malformed values
+fail with a command-path usage diagnostic, exit `2`, and no executor/config/HTTP/DB/broker access. pflag's
+broader boolean aliases are deliberately not part of the public grammar. For ordinary commands with a
+valid command path and no positional argument, a canonical false-help assignment still wins over any
+invalid help assignment regardless of order. Single-dash multi-character flag tokens in flag position
+are intentionally unsupported: `-hh`, `-hh=true`,
+`-hh=false`, `-hhh=false`, `-hfalse`, `-htrue`, `-abc`, and `-config` fail closed with a typed usage exit
+`2`, empty stdout, and no executor/config/HTTP/DB/broker access. This boundary does **not** implement a
+partial pflag shorthand-cluster parser. `--config -hh=false`, `--config=-hh=false`, `--external-id -h=t`,
+and `--external-id=-h=t` keep cluster-/help-looking text as literal string values. A later true `--help`
+in real flag position renders help without side effects; `-` is a literal argument, and `--` ends flag
+parsing unless consumed as a registered string value.
 
 ## 7. Help contract
 
@@ -296,24 +338,41 @@ The existing standard help shorthand `-h` remains supported. No other shorthand 
 
 Help is plain UTF-8 text with no ANSI sequences and no pager. It is deterministic and suitable for
 golden tests. Every exact valid help invocation exits `0`, writes help to stdout, writes nothing to
-stderr, and performs no config, file, network, database, RabbitMQ, or runtime-service access. Argument and
-nested-command validation precede help rendering: a positional before `--help`, or a misspelled nested
-command followed by help/leaf flags, exits `2` with the usage diagnostic and empty stdout. Help intent is
-derived from the selected command's registered Cobra flags rather than raw substring matching:
+stderr, and performs no config, file, network, database, RabbitMQ, or runtime-service access. Command
+and nested-command resolution precede all help handling. The first ordinary positional (including `""`
+and post-`--` tokens) is validated before true, false, or malformed help regardless of token order:
+`migrate extra -h=1` reports `migrate: unexpected argument "extra"`, not invalid help. The `help`
+command validates its entire path first, so `help gate bogus --help=1` reports an unknown command path,
+not an invalid assignment. This positional/path preflight also precedes Cobra's validation of other flag
+values: `gate check --project p --service s --timeout=broken extra` reports `unexpected argument "extra"`;
+without `extra`, Cobra reports the invalid duration. Both are usage exit `2` before side effects.
+Unregistered flags retain Cobra's unknown-flag diagnostic rather than turning the token after an unknown
+flag into a positional. Help intent is derived from the selected
+command's registered Cobra flags rather than raw substring matching:
 `--help`/`-h`/`--help=false`/`--` remain valid values of string flags, while a later exact or assignment help
 token is interpreted only after those values are accounted for. `--help`, `--help=true`, `-h`, and
-`-h=true` are supported true-help forms. For root, groups, all side-effect leaves, and the `help` command,
-help policy is **any-false-wins**: the presence of any parsed `--help=false` or `-h=false` assignment is a
+`-h=true` are supported true-help forms. After successful positional/path validation, root, groups,
+all side-effect leaves, and the `help` command apply **any-false-wins**: any parsed `--help=false` or
+`-h=false` assignment is a
 deterministic usage error with exit `2`, empty stdout, and zero executor calls, regardless of ordering,
-repetition, a preceding true-help, or a later true-help. This is deliberately not pflag last-value semantics.
-Help-looking tokens consumed as registered string-flag values do not participate in the policy.
+repetition, a preceding true-help, a later true-help, or an invalid help assignment. This is deliberately
+not pflag last-value semantics. Without a canonical false assignment, any invalid help assignment exits
+`2` with a command-path diagnostic before execution. Help-looking tokens consumed as registered string-
+flag values do not participate in the policy.
 
-`version` alone preserves the measured compatibility seam. False-help is a compatibility no-op; if any
-parseable true-help is also present, true-help wins regardless of order and version help is rendered. An
-unknown flag combined with any true-help remains usage exit `2`. Positional validation has highest priority:
-any positional exits `2` with empty stdout and zero encoder calls before help or JSON output. Without a
-positional or true-help, false-help (including an unknown flag plus false-help) prints version JSON and exits
-`0`. Output-writer failures on all public true-help forms share one typed exit-`1` contract.
+`version` alone preserves the measured compatibility seam. Positional validation has highest priority:
+any positional, **including the empty string**, exits `2` with empty stdout and zero encoder calls before
+unsupported clusters, invalid help assignments, unknown flags, help, or JSON output. After root command
+resolution, `firstVersionPositional` sees only command-local arguments; a directly executed `version`
+command likewise treats its first `"version"` argument as a positional, not as a command name. The flag-
+error fallback reads that same boundary slice and reports the first positional with `%q`; an empty value
+appears as `""` even after unknown/invalid help flags. In the absence of positionals, a malformed help
+assignment exits `2` before any parseable true-help, regardless of token order. Without either error,
+parseable true-help wins over canonical false-help regardless of order and renders version help; an unknown
+flag with true-help remains usage exit `2`. Otherwise false-help is a compatibility no-op: canonical
+false-help, including an unknown flag plus false-help, prints version JSON and exits `0`. Malformed help
+assignments never enter that unknown-flag compatibility exception. Output-writer failures on all public
+true-help forms share one typed exit-`1` contract.
 
 Compound help is idempotent: `cerbix help --help` is equivalent to `cerbix help`, and
 `cerbix help <path> --help` is equivalent to `cerbix help <path>`. The same applies to
@@ -487,14 +546,20 @@ func main() {
 A typed error carries at least the exit code, underlying error, and whether a diagnostic was already
 printed. Exact names are implementation details, but there is one centralized mapping. Cobra parse,
 unknown-command, unknown-subcommand, missing-required, and argument errors map to usage exit `2`.
-Runtime executors return typed exit errors rather than integers or process exits.
+Runtime executors return typed exit errors rather than integers or process exits. In particular,
+`version` JSON is published successfully only if its writer succeeds (exit `0`); an encoder/writer error
+is an application runtime exit `1`, with a `version:`-prefixed stderr diagnostic and no Cobra usage text.
+The native baseline `f6320fc` silently returned exit `0` on `/dev/full`; this **intentional compatibility
+delta** is safer than claiming output was published. An injected rejecting-writer regression and a Linux
+real-binary `/dev/full` probe cover it. It is not a usage exit `2`.
 
-Semantic mappings remain:
+Semantic mappings remain, with that explicit historical writer exception:
 
 | Command/outcome | Exit |
 | --- | ---: |
 | root/group/leaf explicit help | 0 |
-| valid `version` | 0 |
+| valid `version` with successfully written JSON | 0 |
+| `version` JSON writer failure (`version:` diagnostic, no usage) | 1 |
 | successful serve/migrate/reencrypt/recovery command | 0 |
 | config, database, broker, key, runtime, migration, adoption, or enqueue failure | 1 |
 | CLI usage/validation failure | 2 |
@@ -537,7 +602,11 @@ A separately built baseline binary was then run against captured stdout/stderr. 
 | unknown flag / invalid duration on flag-owning commands | exit 2; diagnostic/usage on stderr; no runtime access | exit 2; deterministic diagnostic on stderr; no runtime access |
 | root flag before top-level command; group/leaf flag before nested command | exit `2` as unknown command/subcommand before side effects | same canonical command-position boundary, before Cobra traversal or runtime access |
 | any parsed `--help=false` / `-h=false` on root, groups, side-effect leaves, or `help`, including repeated/conflicting help flags | exit `2` before side effects | any-false-wins usage exit `2`, empty stdout, zero executor/config/HTTP calls; string values are excluded |
-| `version --bogus`; version false-help forms without a positional | exit `0`; version JSON | unchanged through a Cobra flag-error compatibility seam; false-help is a no-op, while any parseable true-help wins regardless of order |
+| single-dash multi-character tokens in flag position (`-hh=false`, `-hhh=false`, `-hfalse`, `-config`, etc.) | undocumented native parser/pflag behavior | intentionally unsupported: typed usage exit `2` before Cobra execution, empty stdout and zero side effects; string-flag values remain literal |
+| noncanonical `-h=` / `-h=1` / `--help=TRUE` and other boolean aliases | native/pflag behavior was not a documented grammar invariant | command-path invalid-help diagnostic, usage exit `2`, no executor/encoder/config/HTTP; canonical ordinary false-help still wins if also present |
+| `version --bogus`; version false-help forms without a positional | exit `0`; version JSON | unchanged through a Cobra flag-error compatibility seam; canonical false-help is a no-op, while any canonical true-help wins regardless of order |
+| `version --bogus ""`, `version --help=invalid ""`, `version -hh=false ""` | baseline could ignore positionals | first positional, even empty, reported as `""` with exit `2` and zero encoder calls before syntax/help evaluation |
+| `version` JSON writer failure | exit `0` with silently lost output (Linux `/dev/full`) | intentional runtime exit `1`, `version:` stderr, no usage; never silently accept failed publication |
 | version unknown/false-help/true-help forms followed by a positional | baseline ignored some positionals | positional-first exit `2`, empty stdout, encoder not called, per §10.2 |
 | compound `help <path>` plus true help | old manual help ignored path details | idempotent root/path help, stdout only, writer failures exit `1` |
 | missing required flag | exit 2; command diagnostic on stderr; no runtime access | exit 2; command diagnostic on stderr; no runtime access |
@@ -561,15 +630,15 @@ The standard-library implementation explicitly rejects positional arguments only
 syntax.
 
 The Cobra target gives every leaf explicit `NoArgs` validation. Every unexpected positional argument
-therefore exits `2` on stderr before config, network, database, or runtime access. This remains the only
-intentional non-help compatibility tightening introduced by the design. The corrective canonical
-command-position boundary is not a new syntax change: it restores the measured pre-Cobra rule that flags
-cannot precede the command or nested command name.
+therefore exits `2` on stderr before config, network, database, or runtime access. The corrective
+canonical command-position boundary restores the measured pre-Cobra rule that flags cannot precede the
+command or nested command name. The follow-up deliberately forbids undocumented shorthand clusters in
+flag position, and the version writer's failed-publication exit `1` is another measured historical
+exception; neither is concealed behind an unqualified compatibility claim.
 
 Documented command paths, canonical `--flag` names, types, defaults, required/optional meaning,
-environment variables, stdout/stderr contracts, and semantic result exit codes otherwise remain
-unchanged. The positional rejection above is stated beside every compatibility claim and is not hidden
-behind an unqualified “all CLI contracts remain unchanged” assertion.
+environment variables, stdout/stderr contracts for successful output, and semantic gate/change result
+exit codes otherwise remain unchanged. §6.3 and the §9 writer rule specify the exceptions explicitly.
 
 ## 11. Security boundaries
 
@@ -724,9 +793,10 @@ After working implementation exists, synchronize:
 After working implementation exists, the Unreleased `Added` entry is:
 
 > **Structured Cobra CLI.** The command tree now provides grouped top-level help and detailed
-> command-specific help. Documented commands, flags, defaults, environment variables and semantic exit
-> codes remain unchanged. Leaf commands now reject previously ignored positional arguments with usage
-> exit code 2 before loading configuration or performing side effects. Viper is not used.
+> command-specific help. Documented commands, flags, defaults, environment variables, and gate/change
+> result exits remain unchanged. Previously ignored positional arguments and unsupported shorthand
+> clusters fail with usage exit 2 before side effects. Unlike the native baseline, a failed version JSON
+> write returns runtime exit 1 rather than falsely reporting success. Viper is not used.
 
 This entry does not precede working code.
 
@@ -778,7 +848,8 @@ forbidden flags.
 7. Cobra uses `SilenceUsage: true`, `SilenceErrors: true`, explicit output/error writers, no suggestion
    text, and no process-global sorting mutation.
 8. Exact valid help paths exit `0` on stdout and reach no config, file, network, database, broker, or
-   runtime mechanism; positional/nested-command validation outranks help; help detection does not steal
+   runtime mechanism; positional/nested-command validation outranks true, false, and malformed help;
+   help detection does not steal
    string values equal to `-h`/`-h=false`/`--help`/`--help=false`/`--`; compound help is idempotent;
    any parsed false-help assignment wins for ordinary commands regardless of repeated flag order, while
    version false-help is a no-op and any parseable true-help wins; unknown/extra help paths fail with exit `2`;
@@ -786,7 +857,8 @@ forbidden flags.
 9. Root/group no-argument, post-`--`, flag-before-command, and all non-help usage failures keep application
    usage exit `2` and occur before executor/config/network/database/broker access.
 10. Documented command paths, canonical flags, types, defaults, requiredness, environment names,
-    stdout/stderr contracts, semantic exit codes, and config precedence remain unchanged.
+    successful-output contracts, gate/change semantic exits, and config precedence remain unchanged;
+    §§6.3/9 explicitly record the unsupported shorthand and failed-version-write exceptions.
 11. `serve`, `migrate`, `reencrypt`, `adopt-fact-month`, `enqueue-service-repair`, and `version` reject
     every unexpected positional with exit `2`, a readable stderr diagnostic, empty stdout, and no config,
     database, network, or runtime executor call; `gate check` and `change record` keep that existing behavior;
@@ -808,12 +880,60 @@ forbidden flags.
 
 ## 15. Rollback
 
-The migration is one interface-layer change with no data migration. Before a commit, rollback is simply
-discarding the worktree changes. After an owner-authorized local commit, rollback is a source revert of
-that commit: restore the manual/native parser files and tests, remove Cobra from `go.mod`/`go.sum`, and
-restore the prior CLI documentation. No database, API, config, frontend, or persisted-data rollback is
-required.
+The sole canonical recovery procedure is [`cross-cli-rollback.md`](cross-cli-rollback.md). This section
+is only a pointer, not a second set of operational instructions. The automated guard compares that one
+file in full with a separate readable golden, normalizing only its line endings. It cannot prove that
+other documents contain no conflicting instructions; that remains an independent review responsibility.
 
-If a partial implementation cannot preserve a command's semantic exit/output contract, work stops at
-the last GREEN phase. The old parser is not removed until every leaf and nested command is GREEN, so the
-migration never relies on an unreviewable all-at-once cutover.
+## 16. Iter-0197 follow-up acceptance (OPEN)
+
+D-0266 records the forward correction to the delivered parser without adding a second cluster parser,
+changing Cobra v1.10.2 or its dependency set, or altering API/schema/config/frontend/runtime roles:
+
+1. Every unsupported cluster in flag position (including false- and true-ending variants) fails before
+   `Execute` with typed usage exit `2`, deterministic stderr, empty stdout, zero executor calls, and no
+   config loader or remote HTTP access. Root and group command positions fail closed too.
+2. `--config` and `--external-id` consume cluster-looking string values in separate and `=` forms;
+   without later help, they reach injected executors (and the remote HTTP body for change). A later real
+   `--help` prints help without side effects. Literal `-` and end-of-options `--` are not clusters.
+3. The first version positional is reported with `%q` even when empty, ahead of unsupported clusters,
+   malformed help, unknown flags, true/false help, and post-`--` processing. No JSON encoder call occurs.
+   The boundary uses command-local args after resolution; a direct `version` command does not discard a
+   positional merely because its value is `"version"`.
+4. A rejecting version writer produces exactly one failed encoder attempt, runtime exit `1`, and a
+   `version:` diagnostic, never Cobra usage or a false exit `0`. The Linux `/dev/full` binary probe
+   checks the same contract; the native baseline's silent exit `0` is **not** preserved.
+5. The separate [`cross-cli-rollback.md`](cross-cli-rollback.md) is the only canonical rollback procedure.
+   The guard compares its complete contents, including title and final newline, with the independent
+   `internal/cli/rollback_golden_test.txt` after normalizing CRLF/lone CR in the document only. Added,
+   removed, or changed text requires an explicit golden update and review. No Markdown interpretation,
+   instruction classification, or repository-wide absence-of-contradiction claim is made.
+6. The closed `iter-0196.md` is not edited to reconcile its §10 line 346. The authoritative current
+   lifecycle is this spec, D-0266, `docs/status.md`, `docs/traceability.md`, and the closed `iter-0197.md`.
+   Four earlier independent iter-0197 review passes returned `CHANGES REQUIRED`. The later independent
+   Cobra-code review returned `APPROVED` (0/0/0), and a separate read-only E2E-harness review returned
+   `APPROVED` (0/0/0; Playwright not run in that review). Source-suite live E2E subsequently passed on an
+   owner-authorized disposable stack. The owner signed off on lifecycle closure on 2026-10-04; staging
+   and a local commit still require separate authorization.
+7. Only exact lowercase `true` and `false` help assignments are accepted on root, group, leaf, version,
+   and compound help paths. Empty/aliased/mixed-case assignments return usage exit `2` with no executor,
+   config, or HTTP access; ordinary canonical false-help outranks invalid help only after successful
+   positional/path validation. Registered string-flag values with identical spelling remain literal.
+8. Ordinary `Args` and `help <path>` validation precede true/false/malformed help and Cobra flag-value
+   errors: `gate check --project p --service s --timeout=broken extra` reports the positional; without
+   `extra`, Cobra reports the invalid duration. Empty positionals and post-`--` text retain their identity;
+   an unknown flag still produces Cobra's flag diagnostic rather than misclassifying its following value
+   as a positional. A later real help token stays side-effect-free.
+9. For `version`, positional outranks malformed help, malformed help outranks true-help regardless of order,
+   and true-help outranks canonical false-help when neither positional nor malformed help is present.
+   Unknown flag plus true-help is usage exit `2`; false-help alone preserves the version JSON seam.
+10. `executeServeWithRuntime` receives the real runtime from `executeServe` and an immutable fake in tests;
+    zero returns nil, nonzero codes retain printed exits, writers/options are forwarded unchanged, and the
+    runtime is called once. The real missing-config exit is still tested without starting a stack.
+11. The owner-authorized post-fix E2E gate used the unchanged source suite from the iter-0197 worktree
+    on a separate disposable stack: auth/setup exited `0` with 1 passed; Chromium ran without repeating
+    setup and exited `0` with 76 passed, 0 failed, 1 skipped. The idle file-provider fixture had no
+    file-managed monitor; its diagnostics-endpoint test passed. This was **not** `make dev-test` and did
+    not verify the four special-fixture/mode DB/broker skips. Disposable data and private artifacts remain
+    retained; no destructive cleanup was performed. Passing this gate alone did not close the iteration;
+    the owner's separate lifecycle sign-off on 2026-10-04 did.

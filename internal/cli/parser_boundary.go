@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -12,9 +11,10 @@ import (
 const allowExplicitFalseHelpAnnotation = "cerbix.io/allow-explicit-false-help"
 
 type helpFlagIntent struct {
-	sawTrue    bool
-	sawFalse   bool
-	sawInvalid bool
+	sawTrue      bool
+	sawFalse     bool
+	sawInvalid   bool
+	invalidToken string
 }
 
 func (i helpFlagIntent) absent() bool {
@@ -38,6 +38,9 @@ func inspectParserBoundary(root *cobra.Command, args []string) (parserBoundary, 
 		}
 		token := remaining[0]
 		if strings.HasPrefix(token, "-") {
+			if isUnsupportedShorthand(token) {
+				return parserBoundary{}, unsupportedShorthandError(target, token)
+			}
 			if !isHelpFlagToken(token) || containsDirectCommandToken(target, remaining[1:]) {
 				return parserBoundary{}, commandPositionError(target, token)
 			}
@@ -51,11 +54,30 @@ func inspectParserBoundary(root *cobra.Command, args []string) (parserBoundary, 
 		remaining = remaining[1:]
 	}
 
+	if target.Name() == "version" {
+		if positional, found := firstVersionPositional(remaining); found {
+			return parserBoundary{}, usageExit(fmt.Errorf("version: unexpected argument %q", positional))
+		}
+	}
+
 	target.InitDefaultHelpFlag()
+	intent, positionals, err := scanHelpFlagIntent(target, remaining)
+	if err != nil {
+		return parserBoundary{}, err
+	}
+	if target.Name() == "help" && target.Parent() == root {
+		if _, err := resolveHelpPath(root, positionals); err != nil {
+			return parserBoundary{}, err
+		}
+	} else if target.Args != nil && len(positionals) > 0 {
+		if err := target.Args(target, positionals); err != nil {
+			return parserBoundary{}, err
+		}
+	}
 	return parserBoundary{
 		target:     target,
 		targetArgs: remaining,
-		helpIntent: scanHelpFlagIntent(target, remaining),
+		helpIntent: intent,
 	}, nil
 }
 
@@ -106,16 +128,27 @@ func isHelpFlagToken(token string) bool {
 	return token == "--help" || token == "-h" || strings.HasPrefix(token, "--help=") || strings.HasPrefix(token, "-h=")
 }
 
-func scanHelpFlagIntent(cmd *cobra.Command, args []string) helpFlagIntent {
+func scanHelpFlagIntent(cmd *cobra.Command, args []string) (helpFlagIntent, []string, error) {
 	var intent helpFlagIntent
+	var positionals []string
+	unknownFlag := false
 	for i := 0; i < len(args); i++ {
 		token := args[i]
 		if token == "--" {
+			if !unknownFlag {
+				positionals = append(positionals, args[i+1:]...)
+			}
 			break
+		}
+		if isUnsupportedShorthand(token) {
+			return intent, positionals, unsupportedShorthandError(cmd, token)
 		}
 
 		name, value, assigned, shorthand := splitFlagToken(token)
 		if name == "" {
+			if !unknownFlag && (token == "-" || !strings.HasPrefix(token, "-")) {
+				positionals = append(positionals, token)
+			}
 			continue
 		}
 		if name == "help" || shorthand && name == "h" {
@@ -123,13 +156,16 @@ func scanHelpFlagIntent(cmd *cobra.Command, args []string) helpFlagIntent {
 				intent.sawTrue = true
 				continue
 			}
-			parsed, err := strconv.ParseBool(value)
-			if err != nil {
-				intent.sawInvalid = true
-			} else if parsed {
+			switch value {
+			case "true":
 				intent.sawTrue = true
-			} else {
+			case "false":
 				intent.sawFalse = true
+			default:
+				intent.sawInvalid = true
+				if intent.invalidToken == "" {
+					intent.invalidToken = token
+				}
 			}
 			continue
 		}
@@ -138,11 +174,22 @@ func scanHelpFlagIntent(cmd *cobra.Command, args []string) helpFlagIntent {
 		if shorthand {
 			flag = cmd.Flags().ShorthandLookup(name)
 		}
+		if flag == nil {
+			unknownFlag = true // Cobra stops before interpreting later values as positionals.
+		}
 		if !assigned && flag != nil && flag.NoOptDefVal == "" && i+1 < len(args) {
 			i++
 		}
 	}
-	return intent
+	return intent, positionals, nil
+}
+
+func isUnsupportedShorthand(token string) bool {
+	return strings.HasPrefix(token, "-") && !strings.HasPrefix(token, "--") && len(token) > 2 && !strings.HasPrefix(token, "-h=")
+}
+
+func unsupportedShorthandError(cmd *cobra.Command, token string) error {
+	return usageExit(fmt.Errorf("%s: unsupported shorthand flag %q", commandDisplayPath(cmd), token))
 }
 
 func splitFlagToken(token string) (name, value string, assigned, shorthand bool) {
@@ -153,7 +200,7 @@ func splitFlagToken(token string) (name, value string, assigned, shorthand bool)
 		return name, value, assigned, false
 	case strings.HasPrefix(token, "-") && len(token) == 2:
 		return token[1:], "", false, true
-	case strings.HasPrefix(token, "-") && len(token) > 3 && token[2] == '=':
+	case strings.HasPrefix(token, "-") && len(token) >= 3 && token[2] == '=':
 		return token[1:2], token[3:], true, true
 	default:
 		return "", "", false, false
@@ -172,7 +219,10 @@ func executeRequestedHelp(root *cobra.Command, boundary parserBoundary) (bool, e
 	if intent.sawFalse && !allowsExplicitFalseHelp(boundary.target) {
 		return true, usageExit(fmt.Errorf("%s: explicitly false help is not allowed", commandDisplayPath(boundary.target)))
 	}
-	if !intent.sawTrue && !intent.sawInvalid {
+	if intent.sawInvalid {
+		return true, usageExit(fmt.Errorf("%s: invalid help assignment %q", commandDisplayPath(boundary.target), intent.invalidToken))
+	}
+	if !intent.sawTrue {
 		return false, nil
 	}
 
@@ -184,9 +234,6 @@ func executeRequestedHelp(root *cobra.Command, boundary parserBoundary) (bool, e
 		if err := target.Args(target, target.Flags().Args()); err != nil {
 			return true, err
 		}
-	}
-	if !intent.sawTrue {
-		return false, nil
 	}
 
 	var err error
@@ -205,23 +252,29 @@ func executeRequestedHelp(root *cobra.Command, boundary parserBoundary) (bool, e
 }
 
 func renderHelpPath(root *cobra.Command, path []string, w io.Writer) error {
-	if len(path) == 0 {
-		if err := writeRootHelp(root, w); err != nil {
-			return runtimeExit(fmt.Errorf("help: %w", err))
-		}
-		return nil
+	target, err := resolveHelpPath(root, path)
+	if err != nil {
+		return err
 	}
+	if target == root {
+		err = writeRootHelp(root, w)
+	} else {
+		err = writeCommandHelp(target, w)
+	}
+	if err != nil {
+		return runtimeExit(fmt.Errorf("help: %w", err))
+	}
+	return nil
+}
 
+func resolveHelpPath(root *cobra.Command, path []string) (*cobra.Command, error) {
 	target := root
 	for _, name := range path {
 		child := parserBoundaryChild(target, name, false)
 		if child == nil {
-			return usageExit(fmt.Errorf("help: unknown command path %q", strings.Join(path, " ")))
+			return nil, usageExit(fmt.Errorf("help: unknown command path %q", strings.Join(path, " ")))
 		}
 		target = child
 	}
-	if err := writeCommandHelp(target, w); err != nil {
-		return runtimeExit(fmt.Errorf("help: %w", err))
-	}
-	return nil
+	return target, nil
 }

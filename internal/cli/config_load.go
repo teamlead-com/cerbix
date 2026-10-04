@@ -7,6 +7,8 @@ import (
 	"github.com/teamlead-com/cerbix/internal/logging"
 )
 
+// loadConfigTo strictly loads and validates the config, logs a CRITICAL diagnostic
+// and returns nil on failure before any runtime wiring begins.
 func loadConfigTo(path string, stderr io.Writer) *config.Config {
 	cfg, err := config.Load(path)
 	if err != nil {

@@ -27,18 +27,21 @@ func newVersionCommand(execute versionExecutor) *cobra.Command {
 		},
 	}
 	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
-		if positional := firstVersionPositional(rawCLIArgs(cmd)); positional != "" {
-			return usageExit(fmt.Errorf("version: unexpected argument %q", positional))
+		var boundary parserBoundary
+		if ctx := cmd.Context(); ctx != nil {
+			boundary, _ = ctx.Value(parserBoundaryContextKey{}).(parserBoundary)
+			if boundary.target == cmd {
+				if positional, found := firstVersionPositional(boundary.targetArgs); found {
+					return usageExit(fmt.Errorf("version: unexpected argument %q", positional))
+				}
+			}
 		}
 		message := err.Error()
 		if !strings.HasPrefix(message, "unknown flag:") && !strings.HasPrefix(message, "unknown shorthand flag:") {
 			return err
 		}
-		if ctx := cmd.Context(); ctx != nil {
-			boundary, _ := ctx.Value(parserBoundaryContextKey{}).(parserBoundary)
-			if boundary.helpIntent.sawTrue || boundary.helpIntent.sawInvalid {
-				return err
-			}
+		if boundary.helpIntent.sawTrue || boundary.helpIntent.sawInvalid {
+			return err
 		}
 		return runVersionExecutor(cmd, execute)
 	})
@@ -52,24 +55,21 @@ func runVersionExecutor(cmd *cobra.Command, execute versionExecutor) error {
 	return nil
 }
 
-func firstVersionPositional(args []string) string {
-	if len(args) > 0 && args[0] == "version" {
-		args = args[1:]
-	}
+func firstVersionPositional(args []string) (value string, found bool) {
 	afterDash := false
 	for _, arg := range args {
 		if afterDash {
-			return arg
+			return arg, true
 		}
 		if arg == "--" {
 			afterDash = true
 			continue
 		}
 		if arg == "-" || !strings.HasPrefix(arg, "-") {
-			return arg
+			return arg, true
 		}
 	}
-	return ""
+	return "", false
 }
 
 func executeVersion(stdout io.Writer) error {

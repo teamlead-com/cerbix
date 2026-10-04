@@ -149,7 +149,7 @@ func TestHelpBooleanFormsAreParsedWithoutExecutingCommands(t *testing.T) {
 		{name: "short true assigned", args: []string{"migrate", "-h=true"}, wantCode: 0},
 		{name: "long false", args: []string{"migrate", "--config", "/nope", "--help=false"}, wantCode: 2, wantStderr: "migrate: explicitly false help is not allowed"},
 		{name: "short false", args: []string{"migrate", "--config", "/nope", "-h=false"}, wantCode: 2, wantStderr: "migrate: explicitly false help is not allowed"},
-		{name: "invalid boolean", args: []string{"migrate", "--config", "/nope", "--help=invalid"}, wantCode: 2, wantStderr: "invalid argument"},
+		{name: "invalid boolean", args: []string{"migrate", "--config", "/nope", "--help=invalid"}, wantCode: 2, wantStderr: `migrate: invalid help assignment "--help=invalid"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, calls := runInstrumentedRoot(t, tc.args)
@@ -756,8 +756,14 @@ func TestVersionInvalidHelpCannotHidePositionals(t *testing.T) {
 			if code != 2 || stdout.Len() != 0 || calls != 0 {
 				t.Errorf("%v: exit=%d calls=%d stdout=%q stderr=%q", args, code, calls, stdout.String(), stderr.String())
 			}
-			if !strings.Contains(stderr.String(), `invalid argument "invalid" for "-h, --help" flag`) {
-				t.Errorf("%v: stderr=%q, want invalid-help diagnostic", args, stderr.String())
+			invalidToken := "--help=invalid"
+			for _, arg := range args {
+				if arg == "-h=invalid" {
+					invalidToken = arg
+				}
+			}
+			if want := fmt.Sprintf("version: invalid help assignment %q\n", invalidToken); stderr.String() != want {
+				t.Errorf("%v: stderr=%q, want %q", args, stderr.String(), want)
 			}
 		}
 	})

@@ -1,5 +1,5 @@
 import { test as setup, expect } from "@playwright/test";
-import { ADMIN, ensureE2EWorkspace } from "./helpers";
+import { ADMIN, desktopNavAside, ensureE2EWorkspace } from "./helpers";
 
 // One real sign-in for the whole run; specs reuse the stored session.
 setup("authenticate as the bootstrap admin", async ({ page, browser }) => {
@@ -11,7 +11,7 @@ setup("authenticate as the bootstrap admin", async ({ page, browser }) => {
   );
   await page.click('button[type="submit"]');
   expect((await loginResponse).status(), "local bootstrap login").toBe(200);
-  await expect(page.locator("aside")).toBeVisible({ timeout: 15_000 });
+  await expect(desktopNavAside(page)).toBeVisible({ timeout: 15_000 });
   const workspace = await ensureE2EWorkspace(page);
   await page.evaluate(
     ([orgID, projectID]) => {
@@ -21,7 +21,7 @@ setup("authenticate as the bootstrap admin", async ({ page, browser }) => {
     [workspace.orgID, workspace.projectID] as [string, string],
   );
   await page.reload();
-  await expect(page.locator("aside")).toBeVisible({ timeout: 15_000 });
+  await expect(desktopNavAside(page)).toBeVisible({ timeout: 15_000 });
   await page.context().storageState({ path: ".auth/admin.json" });
 
   // The full single-stack suite includes admin flows that need a second user.

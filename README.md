@@ -289,9 +289,16 @@ cerbix gate check --help
 cerbix change record --help
 ```
 
-Documented command paths, flags, defaults, environment variables, stdout/stderr contracts, and semantic
-exit codes remain unchanged. Leaf commands now reject previously ignored positional arguments with usage
-exit code 2 before loading configuration or performing side effects.
+Documented command paths, canonical long flags, defaults, environment variables, and gate/change result
+exit codes remain unchanged. Leaves reject previously ignored positional arguments and unsupported
+single-dash clusters (`-hh=false`, `-hfalse`, `-config`, etc.) with usage exit `2` before side effects;
+only `-h`, `-h=true`, and `-h=false` are supported shorthand forms. The long help equivalents are
+`--help`, `--help=true`, and `--help=false`; assignments accept only lowercase `true`/`false`, not pflag
+boolean aliases such as `1` or `t`. Ordinary positional and `help <path>` errors precede help handling;
+cluster-/help-looking values of string flags remain literal. `version` rejects positionals before help
+or cluster syntax, and exits `0` on successfully written JSON,
+but a failed write exits `1`
+with a `version:` diagnostic (unlike the native parser's silent exit `0`).
 
 ```text
 cerbix serve --config <path> [--role all|api|scheduler|worker|agent] [--region <name>]

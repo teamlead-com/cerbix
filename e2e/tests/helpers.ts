@@ -12,13 +12,17 @@ export const E2E_WORKSPACE = {
   projectName: "E2E Harness",
 };
 
+export function desktopNavAside(page: Page) {
+  return page.getByTestId("app-shell").locator(":scope > aside");
+}
+
 // Signs in through the real login form and waits for the app shell.
 export async function login(page: Page, email = ADMIN.email, password = ADMIN.password) {
   await page.goto("/login");
   await page.fill('input[type="email"]', email);
   await page.fill('input[type="password"]', password);
   await page.click('button[type="submit"]');
-  await expect(page.locator("aside")).toBeVisible({ timeout: 15_000 });
+  await expect(desktopNavAside(page)).toBeVisible({ timeout: 15_000 });
 }
 
 // The page's request context shares the session cookie — arrange/cleanup via API.

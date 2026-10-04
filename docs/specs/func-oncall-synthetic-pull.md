@@ -173,8 +173,10 @@ alongside `Dispatcher` (inproc/amqp), declared "deferred" in the geo spec.
     AMQP results (no separate evaluation logic).
   - `GET /api/v1/agent/regions/heartbeat` — the agent's "I'm alive" (feeds the region-worker alert analogously to
     consumer detection, see below).
-- **Agent** — the same binary in a new mode `--role agent --region R --server https://core --token …`:
+- **Agent** — the same binary runs as `cerbix serve --config <path> --role agent --region R`:
   DB-less, without RabbitMQ; loop: poll jobs → prober.Runner → post results. Reuses `prober` entirely.
+  The validated agent config supplies `pull.server_url` (central API) and `pull.token` (bearer secret),
+  not separate CLI flags (see `docker/config.agent.yaml`).
 - **Liveness for the alert** — a region in pull mode has no consumer in RabbitMQ, so D-0088 (the alert
   "region without a worker") gets a second liveness source: a fresh `agent heartbeat` in the DB. `LiveRegions`
   becomes the union of {RabbitMQ consumers} ∪ {agents with a recent heartbeat}.
@@ -204,17 +206,18 @@ alongside `Dispatcher` (inproc/amqp), declared "deferred" in the geo spec.
 - **AC-PULL-1** — An agent claims only its own region; foreign/expired jobs are not returned; a double claim
   of one job is impossible (a concurrent test of `SKIP LOCKED`).
 - **AC-PULL-2** — An agent's result produces a heartbeat and opens/closes an incident the same way as AMQP.
-- **AC-PULL-3** — E2E: `scheduler` (pull region) + `agent --region pull1` **without RabbitMQ access**
-  from the geo — a monitor with region=pull1 is probed by the agent; the picker/alert see the region as live via heartbeat.
+- **AC-PULL-3** — E2E: `scheduler` (pull region) + `cerbix serve --config <path> --role agent --region pull1`
+  **without RabbitMQ access** from the geo — a monitor with region=pull1 is probed by the agent;
+  the picker/alert see the region as live via heartbeat.
 - **AC-PULL-4** — Token revocation immediately closes the agent's access (401).
 
 ### C.3 Affected files (guideline)
 `store/migrations/00036_pull_agent.sql` (+ api_tokens scope), `store/pulljobs.go` (enqueue/claim/expire),
 `domain/` (agent token scope, region transport), `scheduler/scheduler.go` (for pull regions —
 enqueue into pull_jobs), `api/handlers_agent.go` (jobs/results/heartbeat + token-auth middleware),
-`ingest` (shared result intake — reuse), `cli/cli.go` (`--role agent`, flags
-`--server/--token`), `mqadmin`/`LiveRegions` (union with agent heartbeat), `deploy` (an example
-`config.agent.yaml`), `openapi.yaml`(+schema), `docs/overview.md` (§2.4 — the pull transport variant).
+`ingest` (shared result intake — reuse), `cli/cli.go` (`cerbix serve --config <path> --role agent --region R`),
+`mqadmin`/`LiveRegions` (union with agent heartbeat), `docker/config.agent.yaml` (validated
+`pull.server_url` / `pull.token`), `openapi.yaml`(+schema), `docs/overview.md` (§2.4 — the pull transport variant).
 
 ---
 

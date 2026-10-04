@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { ADMIN, login } from "./helpers";
+import { ADMIN, desktopNavAside, login } from "./helpers";
 
 test.use({ storageState: { cookies: [], origins: [] } });
 
@@ -14,9 +14,10 @@ test.describe("authentication", () => {
 
   test("signs in locally and shows the build version", async ({ page }) => {
     await login(page);
-    await expect(page.locator("aside >> text=Settings")).toBeVisible();
+    const navigation = desktopNavAside(page);
+    await expect(navigation.getByRole("link", { name: "Settings" })).toBeVisible();
     // Sidebar footer carries the running build (iter D-0105).
-    await expect(page.locator("aside").getByText(/cerbix (dev|v)/)).toBeVisible();
+    await expect(navigation.getByText(/cerbix (dev|v)/)).toBeVisible();
   });
 
   test("logout ends the session", async ({ page }) => {

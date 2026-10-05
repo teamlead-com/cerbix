@@ -8,14 +8,13 @@ import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import { instantLabelShort, localInputZoneHint } from "@/lib/wallclock";
 import { isoInstant } from "@/lib/datekeys";
+import { budgetRemaining, sloStatus, type SloStatus } from "@/lib/slaBudget";
 
 type Monitor = components["schemas"]["Monitor"];
 type WindowSLA = components["schemas"]["WindowSLA"];
 type ErrorBudget = components["schemas"]["ErrorBudget"];
 type MaintenanceWindow = components["schemas"]["MaintenanceWindow"];
 type BurnRule = components["schemas"]["BurnRule"];
-
-type SloStatus = "met" | "risk" | "breach" | "none";
 
 interface Row {
   monitor: Monitor;
@@ -204,22 +203,12 @@ function burnBadge(w?: WindowSLA): { icon: string; cls: string; title: string } 
 const w30 = (r: Row) => r.windows.find((w) => w.window === "30d");
 const activeWin = (r: Row) => r.windows.find((w) => w.window === selectedWindow.value);
 
-function budgetRemaining(eb?: ErrorBudget): number {
-  if (!eb) return 0;
-  if (eb.remaining_ratio != null) return Math.max(0, Math.min(100, eb.remaining_ratio * 100));
-  return Math.max(0, 100 - (eb.burned_percent ?? 0));
-}
 function burnRate(eb?: ErrorBudget): number | null {
   if (!eb) return null;
   const allowed = eb.allowed_downtime_ratio ?? 0;
   const actual = eb.actual_downtime_ratio ?? 0;
   if (allowed <= 0) return actual > 0 ? 99 : 0;
   return actual / allowed;
-}
-function sloStatus(eb?: ErrorBudget): SloStatus {
-  if (!eb) return "none";
-  if (!eb.met) return "breach";
-  return budgetRemaining(eb) <= 25 ? "risk" : "met";
 }
 
 function budgetMeter(eb?: ErrorBudget): { width: number; cls: string; label: string } | null {

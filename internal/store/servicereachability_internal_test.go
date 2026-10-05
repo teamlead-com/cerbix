@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/reliability"
 )
 
 // PRODUCT-PATH reachability (func-service-reliability §10.5).
@@ -293,6 +294,148 @@ func TestLateDataBehindTheWatermarkQueuesItsOwnRepair(t *testing.T) {
 	after, _ := readFact(t, st, ctx, f.serviceID, domain.FloorToBucket(late))
 	if after.bad == before.bad {
 		t.Errorf("the sealed bucket still reports bad_us=%d after a DOWN result arrived late", after.bad)
+	}
+}
+
+// A late observation is not evidence about its own minute only: sample-and-hold keeps it in
+// force until the member's StaleAfter, so it changes every sealed bucket it holds into. A repair
+// scoped to the arrival's own bucket leaves the later ones stating UNKNOWN for time the product
+// now knows was GOOD (iter-0198, finding 5).
+func TestLateDataRepairCoversEveryBucketTheObservationHoldsInto(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+
+	// No observation at all: the adopted stretch seals UNKNOWN.
+	leaderSliceFor(t, st, ctx, 60)
+	base := domain.FloorToBucket(time.Now().UTC().Add(-20 * time.Minute))
+	next := base.Add(domain.CanonicalBucket)
+	through := sealedThrough(t, st, ctx, f.serviceID)
+	if through == nil || !next.Add(domain.CanonicalBucket).Before(*through) {
+		t.Fatalf("test setup: %s..%s is not sealed (sealed_through=%v)", base, next, through)
+	}
+	if fact, ok := readFact(t, st, ctx, f.serviceID, next); !ok || fact.unknown != domain.CanonicalBucket.Microseconds() {
+		t.Fatalf("test setup: %s is not a wholly UNKNOWN sealed fact: %+v ok=%v", next, fact, ok)
+	}
+
+	// The fixture's members run every 30 s, so StaleAfter is the 90 s floor: a GOOD at
+	// base+30s is in force until base+2m and covers the whole of `next`.
+	late := base.Add(30 * time.Second)
+	if _, _, err := st.RecordHistoricalResults(ctx, []domain.Heartbeat{
+		{MonitorID: f.http, Ts: late, Up: true},
+	}); err != nil {
+		t.Fatalf("late backfill: %v", err)
+	}
+
+	var covered int
+	if err := st.pool.QueryRow(ctx,
+		`SELECT count(*) FROM service_repair_ranges
+		  WHERE service_id=$1 AND reason='late_data' AND state='pending'
+		    AND range_start <= $2 AND range_end > $2`,
+		f.serviceID, next).Scan(&covered); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if covered == 0 {
+		t.Errorf("no pending late_data repair covers %s, which the late observation holds into", next)
+	}
+
+	drainRepair(t, st, ctx)
+	after, _ := readFact(t, st, ctx, f.serviceID, next)
+	if after.good != domain.CanonicalBucket.Microseconds() {
+		t.Errorf("%s after repair: good_us=%d unknown_us=%d, want the whole bucket GOOD",
+			next, after.good, after.unknown)
+	}
+}
+
+// An observation's reach is not its own StaleAfter: it stays the member's carry-in until the NEXT
+// observation, and a LATER epoch with a longer StaleAfter makes it fresh again there — even when that
+// epoch begins after the old deadline (iter-0198 review, Important 1). The second epoch is opened by
+// the product path (an interval change); its effective instant is moved into the past by SQL only to
+// model time having passed since that change.
+func TestLateDataRepairReachesALaterEpochThatRefreshesTheObservation(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+
+	base := domain.FloorToBucket(time.Now().UTC().Add(-20 * time.Minute))
+	m, err := st.GetMonitor(ctx, f.http)
+	if err != nil {
+		t.Fatalf("get monitor: %v", err)
+	}
+	m.IntervalSeconds = 120 // StaleAfter 3 × 120 s = 360 s, against 90 s before
+	if _, err := st.UpdateMonitor(ctx, m); err != nil {
+		t.Fatalf("update monitor: %v", err)
+	}
+	later := base.Add(3 * time.Minute) // after the first epoch's 12:02 deadline, not at it
+	tag, err := st.pool.Exec(ctx, `
+		UPDATE service_evaluation_epochs SET effective_at = $2
+		 WHERE id = (SELECT id FROM service_evaluation_epochs
+		              WHERE service_id = $1 AND state = 'effective'
+		              ORDER BY epoch_seq DESC LIMIT 1)`, f.serviceID, later)
+	if err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("model the second epoch's age: %v rows=%d", err, tag.RowsAffected())
+	}
+
+	leaderSliceFor(t, st, ctx, 60)
+	probe := base.Add(4 * time.Minute)
+	through := sealedThrough(t, st, ctx, f.serviceID)
+	if through == nil || !probe.Add(domain.CanonicalBucket).Before(*through) {
+		t.Fatalf("test setup: %s is not sealed (sealed_through=%v)", probe, through)
+	}
+	if fact, _ := readFact(t, st, ctx, f.serviceID, probe); fact.unknown != domain.CanonicalBucket.Microseconds() {
+		t.Fatalf("test setup: %s is not wholly UNKNOWN before the late arrival: %+v", probe, fact)
+	}
+
+	if _, _, err := st.RecordHistoricalResults(ctx, []domain.Heartbeat{
+		{MonitorID: f.http, Ts: base.Add(30 * time.Second), Up: true},
+	}); err != nil {
+		t.Fatalf("late backfill: %v", err)
+	}
+	drainRepair(t, st, ctx)
+
+	// Under the second epoch the GOOD at base+30s is fresh until base+6m30s.
+	if after, _ := readFact(t, st, ctx, f.serviceID, probe); after.good != domain.CanonicalBucket.Microseconds() {
+		t.Errorf("%s after repair: good_us=%d unknown_us=%d, want GOOD — the later epoch refreshes the observation",
+			probe, after.good, after.unknown)
+	}
+}
+
+// Past its deadline the late observation still changes the bucket: the member is no longer
+// `no_observation` but `stale`, and that reason is what survives raw retention (§10.3). Durations do
+// not move, so a duration-only range misses it (iter-0198 review, Important 2).
+func TestLateDataRepairRewritesTheUnknownReasonPastTheDeadline(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+
+	leaderSliceFor(t, st, ctx, 60)
+	base := domain.FloorToBucket(time.Now().UTC().Add(-20 * time.Minute))
+	probe := base.Add(5 * time.Minute) // far past the 90 s deadline of a GOOD at base+30s
+	through := sealedThrough(t, st, ctx, f.serviceID)
+	if through == nil || !probe.Add(domain.CanonicalBucket).Before(*through) {
+		t.Fatalf("test setup: %s is not sealed (sealed_through=%v)", probe, through)
+	}
+	reason := func() string {
+		t.Helper()
+		var r string
+		if err := st.pool.QueryRow(ctx,
+			`SELECT COALESCE(provenance->'Unknown'->0->>'Reason', '')
+			   FROM service_reliability_buckets WHERE service_id=$1 AND bucket_start=$2`,
+			f.serviceID, probe).Scan(&r); err != nil {
+			t.Fatalf("read provenance: %v", err)
+		}
+		return r
+	}
+	if got := reason(); got != string(reliability.ReasonNoObservation) {
+		t.Fatalf("test setup: %s reason = %q, want no_observation before the late arrival", probe, got)
+	}
+
+	if _, _, err := st.RecordHistoricalResults(ctx, []domain.Heartbeat{
+		{MonitorID: f.http, Ts: base.Add(30 * time.Second), Up: true},
+	}); err != nil {
+		t.Fatalf("late backfill: %v", err)
+	}
+	drainRepair(t, st, ctx)
+
+	if got := reason(); got != string(reliability.ReasonStale) {
+		t.Errorf("%s reason = %q after repair, want stale: the member HAS reported, it went quiet", probe, got)
 	}
 }
 

@@ -320,9 +320,10 @@ func (h *Handler) setServiceBurnAlerting(w http.ResponseWriter, r *http.Request)
 		})
 	}
 	// One validator again (§16.6a / §16.4b): the per-rule bounds AND the canonical-key collision
-	// check, which is what keeps one latch from having to answer for two rules. Run before the
-	// store call so a bad rule set is a 400 that writes nothing.
-	if err := domain.ValidateBurnRules(rules); err != nil {
+	// check, which is what keeps one latch from having to answer for two rules, plus the
+	// service-only short-window floor (iter-0198). Run before the store call so a bad rule set is
+	// a 400 that writes nothing.
+	if err := domain.ValidateServiceBurnRules(rules); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

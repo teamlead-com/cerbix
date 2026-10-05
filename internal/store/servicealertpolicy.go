@@ -298,8 +298,9 @@ func (s *Store) SetServiceBurnAlerting(
 	rules []domain.BurnRule, actor AlertActor,
 ) error {
 	// ONE validator (§16.6a / §16.4b): the bounds AND the canonical-key collision check, which is
-	// what keeps a latch from having to answer for two rules. It is not re-implemented here.
-	if err := domain.ValidateBurnRules(rules); err != nil {
+	// what keeps a latch from having to answer for two rules — and the service-only short-window
+	// floor. It is not re-implemented here.
+	if err := domain.ValidateServiceBurnRules(rules); err != nil {
 		return fmt.Errorf("store: %w", err)
 	}
 

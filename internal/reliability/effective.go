@@ -61,6 +61,13 @@ func (s memberSeries) stateAt(t time.Time, spans []MaintenanceSpan, maintenanceE
 		}
 	}
 	o, ok := s.latestAt(t)
+	if ok && s.Type == domain.MonitorPush && !s.ArmedAt.IsZero() && o.Ts.Before(s.ArmedAt) {
+		// A ping from before the switch was (re-)armed is not evidence about anything after
+		// it: re-enabling stamps push_armed_at precisely so the pre-disable ping cannot keep or
+		// break liveness. The product's dead-man counts from GREATEST(push_armed_at,
+		// last_result_ts), which is the same as ignoring every ping older than the arm.
+		ok = false
+	}
 	if !ok {
 		// No observation yet. For an active probe the absence of a result is uncertainty.
 		// For push the absence IS the failure — but only once the dead-man has actually

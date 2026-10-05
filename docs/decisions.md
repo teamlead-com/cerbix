@@ -8801,3 +8801,89 @@ pre-fix E2E and four special-fixture/mode skips remain historical evidence, not 
 This sign-off authorizes lifecycle documentation only: staging and a local commit still require
 separate authorization. No push, PR, merge, deploy, cleanup of retained disposable resources or
 production restart was authorized or performed by this closure.
+
+## D-0267 — service reliability audit fixes: budget-left, late-hold repair range, re-armed push, service burn floor, and FSR amendments (2026-10-05)
+
+**Context.** A read-only audit of the service reliability surface produced ten findings, re-verified
+against the code at `d4a3e6d` (iter-0198, *Source*). Four were product defects: the SLA view rendered
+`remaining_ratio` — `allowed − actual` as a fraction of ALL time — as "budget left", so an untouched
+99.9 % budget read `0 %` and `At risk`; a late heartbeat behind the watermark queued repair for its own
+minute only, while sample-and-hold carries it into later sealed buckets; a re-enabled push monitor's
+pre-disable ping made the service member BAD immediately, while the monitor's own dead-man counted from
+`push_armed_at`; and service burn rules accepted a 60 s short window although a service window ends at
+`sealed_through`, which trails now by at least the 120 s late-arrival grace, so any short window at or
+under that lag can only hold. Four were places where `func-service-reliability.md` described something
+the implementation does not do (§10.3, §10.4/§20.4, §10.10, §9.5).
+
+**Decision.**
+
+1. *Budget left* in the SLA view is `max(0, min(100, 100 − burned_percent))`, the share of the budget not
+   yet burned, the same expression the project card already used. `remaining_ratio` stays in the API
+   with its documented meaning; the view no longer reads it.
+2. A `late_data` repair covers `[bucket(ts), min(sealed_through, ceil_to_bucket(next.ts)))`, where
+   `next` is the same monitor's next observation, or `[bucket(ts), sealed_through)` when there is
+   none before the watermark. The first
+   implementation bounded it by `ts + StaleAfter` (walking epochs that start inside that hold); review
+   showed that misses both a LATER epoch whose longer `StaleAfter` refreshes the observation and the
+   buckets past the deadline whose unknown reason becomes `stale` — the observation stays the
+   member's carry-in until the next one. The new bound replaces the epoch walk with one indexed
+   lookup per late heartbeat; a historical batch notes after inserting all its rows, so each row's
+   `next` is normally the next row and the ranges coalesce. A late heartbeat for a monitor that then
+   went silent repairs up to the watermark (raw retention bounds how far back it can start).
+   Recomputing a bucket whose content does not change rewrites the same row and writes no audit row;
+   the recompute audit compares durations only, so a provenance-only change is rewritten unaudited.
+   Because such a range can now be long, the repair runner had to be fixed with it: every slice
+   opened with a fixed 60-bucket batch and a slice that ran out of budget kept no record of it, so a
+   range whose first batch never fit made no progress at all (re-review). Each slice now opens at one
+   bucket and grows (`adaptRepairBatch`). A `statement_timeout` after the slice has committed a
+   batch, or on a batch larger than one bucket, is a release at the cursor, not a counted failure —
+   the server bound is the slice's remainder, and a healthy bucket that met the slice's tail would
+   otherwise back the range off 5 s, 10 s, 20 s … (second re-review). A one-bucket timeout in the
+   slice's FIRST batch is still classified as the §10.10 fault, and `lock_timeout` (55P03) keeps the
+   retry path. That criterion is knowingly incomplete: the third re-review showed a first batch can
+   start on a reduced budget — a short scheduler-cycle remainder (≥ 140 ms) or a slow claim — and a
+   healthy 75 ms bucket was then counted as a fault on both storage modes. The owner decided
+   (2026-10-05) to leave this to a separate iteration (`BUG-0198-R`): the fix needs the runner to know
+   its real budget, or a persisted no-progress count, and either changes §10.10's fault contract.
+   The iter-0198 runner change is a trade, not a strict improvement. It removes the base's livelock
+   (a range whose fixed 60-bucket opening batch never fit made no progress at all), but it is
+   slower on other inputs: each batch pays a fixed persistence cost, and opening at one bucket
+   spends several small transactions where the base spent one. The fourth re-review measured it on a
+   60-bucket range with 45 ms added to every cursor write: the base completed all 60 buckets in one
+   250 ms slice, the current runner 3–5 (both storage modes, no errors). Lower repair throughput
+   can delay forward materialization longer, since repair is served first; indefinite starvation
+   was not shown. The deferral rests on the owner's decision and on the livelock fix being worth
+   that cost, not on the absence of regressions.
+3. For a `push` member the reducer ignores observations older than `ArmedAt`
+   (`COALESCE(push_armed_at, created_at)` in the epoch snapshot); with no later ping the dead-man counts
+   from `ArmedAt`. Together this is the product's `GREATEST(push_armed_at, last_result_ts)` rule. It is
+   in the shared `stateAt`, so facts, `current_health` and the status projection agree.
+4. `domain.ValidateServiceBurnRules` = `ValidateBurnRules` + short window ≥ `domain.MinSealLag`
+   (300 s), the floor the reliability gate already uses. Both writers of a service rule — the HTTP
+   handler and `Store.SetServiceBurnAlerting` — call it. Monitor rules keep the 60 s floor: they read
+   raw heartbeats and have no seal lag. Rules stored before this decision are not migrated: they keep
+   behaving exactly as before, and the next write of that target must bring them to the floor. The
+   OpenAPI `minimum: 60` is kept because such stored rules may still be echoed; the description states
+   the write floor.
+5. FSR is amended in place (*Amendment (D-0267 / iter-0198)* blocks): §10.3 — two stored unknown
+   reasons, and a region that never reported is NOT derivable from the record (causes name only
+   undecided members); §10.4 — a
+   third, automatic case for rewriting a sealed bucket (`late_data`, implemented since iter-0125), and
+   §20.4's late-heartbeat row follows it; §10.10 — `late_arrival_grace`, `max_provenance_causes` and
+   `max_late_examples` are compile-time constants in phase 1; §9.5 — composite modes include `quorum`,
+   and a nested composite's heartbeat is derived from its children's confirmed status.
+
+**Not decided here.** Monitor SLA windows longer than raw heartbeat retention (90d over a 30-day
+default) need an API completeness contract and an approved UI mock (`BUG-0198-7`). Whether the main
+service report needs a freshness threshold on `sealed_through` relative to `as_of` is a product
+question (`Q-0198-10`). Both are TODO rows in `status.md`; no behavior changed for either.
+
+**Consequences.** No migration, no new configuration, no new metric. The SPA's burn editor already
+offers nothing below 5 min. A service operator who stored a sub-300 s short window through the API
+gets a 400 on the next write of that target until the rule is changed. That includes rules that
+WORKED: a short window is quotable while the seal lag stays under it, and a healthy lag sits in
+[120 s, 180 s) before queueing and commit, so a rule at or under 120 s could never fire, one in
+(120 s, ~180 s] held or flapped with the lag, and one in (~180 s, 300 s) — e.g. 240 s — was stably
+quotable under a healthy materializer (review measured OK for every lag 120–179 s). 300 s is a chosen
+headroom (two buckets over the healthy lag, the gate's own floor), not the boundary of what can
+work; the price is that an operator re-saving such a working rule must widen it.

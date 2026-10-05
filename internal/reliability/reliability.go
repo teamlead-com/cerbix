@@ -127,11 +127,13 @@ type Member struct {
 	Enabled   bool
 	// StaleAfter is the resolved freshness deadline (domain.ResolveStaleAfter).
 	StaleAfter time.Duration
-	// ArmedAt is the instant a `push` member's dead-man starts counting when it has no
-	// observation yet. The product measures from COALESCE(GREATEST(push_armed_at,
-	// last_result_ts), created_at), so a never-reported push monitor does eventually go
-	// down; a service that treated it as permanently UNKNOWN would disagree with its own
-	// monitor. Ignored for active probes, where absence is uncertainty and not failure.
+	// ArmedAt is the instant a `push` member's current liveness epoch began (re-enabling
+	// re-arms it). Pings older than it are not evidence, and with no later ping the dead-man
+	// counts from it. The product measures from COALESCE(GREATEST(push_armed_at,
+	// last_result_ts), created_at); ignoring pre-arm pings is what makes the reducer agree
+	// with that, so a never-reported or just re-enabled push monitor goes down when — and only
+	// when — its own monitor does. Ignored for active probes, where absence is uncertainty
+	// and not failure.
 	ArmedAt time.Time
 }
 

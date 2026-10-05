@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -466,6 +467,32 @@ func TestSetServiceBurnAlertingValidatesRules(t *testing.T) {
 	}
 	if fs.serviceStore()[id].burnWrites != 0 {
 		t.Errorf("an invalid burn declaration reached the store %d times", fs.serviceStore()[id].burnWrites)
+	}
+}
+
+// A service burn window is anchored at sealed_through, which trails now by at least the late-arrival
+// grace (120 s) plus up to a bucket, so a short window at or under that lag never contains sealed
+// time and the rule would HOLD forever. The floor is domain.MinSealLag — the same healthy-lag bound
+// the reliability gate uses (iter-0198, finding 6).
+func TestSetServiceBurnAlertingRefusesAShortWindowUnderTheSealLag(t *testing.T) {
+	fs := seededStore()
+	h := newHandler(fs)
+	id := seedAlertingService(fs, "p1", nil, true)
+
+	rule := func(short int) string {
+		return fmt.Sprintf(`{"window":"30d","burn_alert_enabled":true,"burn_rules":[`+
+			`{"long_window_seconds":3600,"short_window_seconds":%d,"threshold":14.4,"severity":"page"}]}`, short)
+	}
+	for _, short := range []int{60, 120, 180, 299} {
+		if rec := do(h, p1Editor, http.MethodPut, burnPath("p1", id), rule(short)); rec.Code != http.StatusBadRequest {
+			t.Errorf("short window %ds = %d, want 400: %s", short, rec.Code, rec.Body.String())
+		}
+	}
+	if fs.serviceStore()[id].burnWrites != 0 {
+		t.Fatalf("a short window under the seal lag reached the store %d times", fs.serviceStore()[id].burnWrites)
+	}
+	if rec := do(h, p1Editor, http.MethodPut, burnPath("p1", id), rule(300)); rec.Code != http.StatusOK {
+		t.Errorf("short window 300s = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
 }
 

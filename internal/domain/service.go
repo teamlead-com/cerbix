@@ -385,9 +385,11 @@ type EpochMember struct {
 	MonitorID  string              `json:"monitor_id"`
 	Semantics  EvaluationSemantics `json:"semantics"`
 	StaleAfter time.Duration       `json:"stale_after"`
-	// ArmedAt is where a push member's dead-man starts counting when it has no observation
-	// yet, mirroring the product's own COALESCE(GREATEST(push_armed_at, last_result_ts),
-	// created_at).
+	// ArmedAt is COALESCE(push_armed_at, created_at) when the epoch was snapshotted: the
+	// instant a push member's current liveness epoch began. The reducer ignores pings older
+	// than it and counts the dead-man from it when no later ping exists, which together match
+	// the product's own COALESCE(GREATEST(push_armed_at, last_result_ts), created_at) — the
+	// last real ping comes from the heartbeat history, not from this snapshot.
 	ArmedAt time.Time `json:"armed_at,omitempty"`
 }
 

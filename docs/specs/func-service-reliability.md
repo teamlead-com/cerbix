@@ -742,6 +742,18 @@ produces its normalized state, which enters step 1 as one member. The UI must sh
 nesting, otherwise a budget derived from `quorum(any(A,B,C), HTTP, synthetic)` is
 unexplainable to the person reading it.
 
+*Amendment (D-0267 / iter-0198):* a composite's own mode is one of `all`, `any` **or
+`quorum`** (down when at least M children vote down; `internal/prober/composite.go`), not
+`all|any` only. And the composite's heartbeat is not a raw measurement: the composite prober
+evaluates its children's **stored `monitors.status`** (`MonitorStatuses`), which is the
+CONFIRMED status — after each child's failure threshold and confirmation cadence. The service
+reducer still reads the composite's raw `heartbeat.up` as §6.7 requires, so §6.7 holds for the
+composite as a member; but through that heartbeat, a nested composite's contribution inherits
+its children's confirmation thresholds, and a pending or missing child is never counted as up
+(in `quorum` it is a down vote). This is
+an indirect dependency the reducer cannot see, and it is stated here so a budget containing a
+composite is not read as if every input were raw.
+
 ## 10. Storage and computability (the phase-1 core)
 
 ### 10.1 Why a new fact store is required
@@ -810,6 +822,16 @@ Each fact therefore carries a bounded provenance record:
 Bounded is the operative word: a fixed small structure per bucket, not an event log. Anything
 the bound cannot carry is removed from the explainability promise rather than implied by it.
 
+*Amendment (D-0267 / iter-0198):* the stored unknown reasons are exactly two, `no_observation`
+and `stale` (`reliability.UnknownReason`). "Region never reported" is **not a third stored
+reason**, and it is **not derivable from the record either**. Unknown causes name only the
+members that were undecided — each with its `region` and reason — never the members of the same
+region that were decided: in a two-member region where A is GOOD and B has never reported, an
+`all` aggregation stores `{B, region, no_observation}` and nothing about A, which reads exactly like
+a region that never reported. Past `max_provenance_causes` the overflow counter additionally hides
+which members were undecided. What the record supports is per member: each named member's reason
+— no observation at all, or one that went stale. The promise above is narrowed to that.
+
 ### 10.4 Sealing, the late-arrival boundary, and the ingest handshake
 
 ```
@@ -824,7 +846,8 @@ skew and that was wrong: `allowed_skew` bounds a worker clock running FAST — i
 `ts > now + skew` — and says nothing about how late a result may arrive. Old results are
 accepted up to raw retention, the durable results queue has no TTL, and an agent's historical
 backfill can arrive much later still. The grace is an explicit accounting-finality policy with
-a default and a maximum (§10.10).
+a default and a maximum (§10.10). *Amended (D-0267 / iter-0198):* in phase 1 that policy is a
+compile-time constant (`domain.LateArrivalGrace`, 120 s), not a setting — see §10.10.
 
 **The handshake, because "visible to the sealing transaction" is not a mechanism.** r2 declared
 that a heartbeat counts if it is visible to the sealing transaction. PostgreSQL at READ
@@ -909,6 +932,31 @@ A sealed bucket is rewritten in exactly two cases, both audit-visible:
 
 1. an explicit definition-revision or epoch recompute over that row's validity range;
 2. an administrative repair, annul or backfill with an explicit requested range (§10.9).
+
+*Amendment (D-0267 / iter-0198):* there is a **third** case, and it is automatic:
+
+3. **late evidence behind the watermark.** A heartbeat actually inserted for a bucket already
+   behind `sealed_through` queues a `late_data` range (§10.8) in the same transaction as the
+   heartbeat, and the repair recomputes those sealed buckets. This has been the implemented
+   behavior since iter-0125 (its P0-6: a sealed number known to be wrong with nothing scheduled
+   to correct it); the two-case list above and §20.4's "the sealed fact does not change" were
+   never updated, and both are superseded by this amendment.
+
+   The range is every sealed bucket whose fact the observation can change:
+   `[bucket(ts), min(sealed_through, ceil_to_bucket(next.ts)))`, where `next` is the monitor's next
+   observation, and `[bucket(ts), sealed_through)` when there is none before the watermark (past
+   it, the ordinary forward pass reads the observation). It is not bounded by the observation's `StaleAfter`:
+   sample-and-hold keeps it as the member's carry-in until the next observation, so past its
+   deadline it still turns an unknown reason from `no_observation` into `stale`, and a later epoch
+   with a longer `StaleAfter` makes it fresh again.
+
+   Finality is therefore **sealed against ordinary materialization, not against evidence**: a
+   sealed number changes only when a real inserted observation contradicts it, never on a
+   duplicate (the insertion gate above). A bucket whose **durations** change writes the same
+   before/after recompute audit as cases 1 and 2; that audit compares both duration axes and
+   nothing else, so a bucket whose only change is its provenance (an unknown reason) is
+   rewritten **without** an audit row. The late-arrival record is still written, so the
+   disagreement between the first and the corrected number stays explainable.
 
 ### 10.5 The `sealed_through` watermark
 
@@ -1248,6 +1296,16 @@ raisable without a code change, because these are what keep the leader's dispatc
 | `max_dispatch_delay` | 250ms | 1s | the cadence guarantee below |
 | `max_scheduling_tolerance` | 25ms | 100ms | the slack the cadence assertion allows for Go scheduling and commit round-trip |
 
+*Amendment (D-0267 / iter-0198):* "every bound below is configuration" is not what phase 1
+built, and is withdrawn. `late_arrival_grace` (`domain.LateArrivalGrace`, 120 s),
+`max_provenance_causes` (`reliability.MaxCauses`, 8) and `max_late_examples`
+(`store.MaxLateExamples`, 8) are **compile-time constants at their defaults**; no config key,
+setting or environment variable reaches them, and the "hard max" column is a ceiling for a
+future setting, not a current one. `LateArrivalGrace` is also an input of `domain.MinSealLag`,
+which the reliability gate and the service burn-rule floor derive from, so making it settable
+would move those floors with it and needs its own decision. The other rows are unchanged by
+this amendment.
+
 **`min_decidable_coverage` is deliberately not a knob.** r3 listed it as configuration with no
 floor, which lets an operator set `0.01` and recreate the exact failure the coverage axis was
 introduced to prevent — a confident `100%` derived from almost no measurement. In phase 1 the
@@ -1285,6 +1343,22 @@ slice_deadline = min(remaining recompute budget this cycle, max_dispatch_delay)
   deadline and shrinking on a timeout. A fixed large batch under a tight deadline would time out
   every slice and commit nothing — a livelock that makes progress zero while every individual
   bound is respected.
+  *Amendment (D-0267 / iter-0198):* the adaptation lived only inside one slice, and every slice
+  opened with a fixed 60-bucket batch; a slice that ran out of budget rolled that batch back and
+  left no trace of its size, so a range whose first 60-bucket batch never fit made exactly this
+  livelock (review measured cursor movement 0 over six 250 ms slices). Each slice now **opens at
+  one bucket** and grows from there. A `statement_timeout` is the slice running out — a release at
+  the cursor, not a counted failure — whenever the slice has already committed a batch or the
+  batch has grown past one bucket, because the server bound is derived from what is LEFT of the
+  slice. A single bucket that times out in the slice's **first** batch takes the fault path of the
+  next bullet; a `lock_timeout` (55P03) keeps the ordinary retry-with-backoff path. **Known
+  limitation, not closed here:** "first batch" is not the same as "full budget" — a slice handed a
+  short remainder by the scheduler cycle (down to the 140 ms floor of `RunServiceSlice`) or one whose
+  claim was slow gives that first batch less than a full slice, and a healthy bucket can then be
+  counted as a fault and backed off. Classifying against the slice's real budget is tracked as
+  `BUG-0198-R` in `status.md`. Opening at one bucket also costs throughput: every batch pays a fixed
+  persistence cost, so where that cost is high a slice commits fewer buckets than one 60-bucket
+  batch would have (D-0267).
 - **A single bucket that cannot be computed within the deadline is a fault, not a retry loop.**
   It raises its own metric and moves the range to `error` with backoff, because a 60-second
   bucket that takes longer than `max_dispatch_delay` to reduce means something pathological, and
@@ -3411,10 +3485,12 @@ signal trails the watermark and could not have carried outage paging on its own.
     seal UPSERTS every bucket's row before locking it, so a bucket with no prior heartbeat has no
     phantom; a late arrival is recorded in an AGGREGATED, idempotent, bounded record; and a
     monitor in no service's SLI at that instant writes nothing;
-15. `late_arrival_grace` is its own bounded setting and is never `result.allowed_skew`;
-16. sealed facts are rewritten only by a recompute over the target's validity range or by an
-    audited administrative operation with an explicit range — recorded with before/after
-    availability;
+15. `late_arrival_grace` is its own bound and is never `result.allowed_skew` (*amended, D-0267 /
+    iter-0198:* a compile-time constant in phase 1, not a setting — §10.10);
+16. sealed facts are rewritten only by a recompute over the target's validity range, by an
+    audited administrative operation with an explicit range, or (*amended, D-0267 / iter-0198*)
+    by the automatic `late_data` repair of §10.4 case 3 — the duration changes of all three are
+    recorded with before/after availability;
 17. `sealed_through` is contiguity-defined — a materialization hole holds it rather than being
     jumped over — and never moves backwards except under an audited retraction (§10.5);
 18. recompute is bounded by raw availability; older facts keep their epoch and revision;
@@ -3745,7 +3821,7 @@ both are reproducible, and neither is ever inferred at read time.
 | **Duplicate redelivery of a heartbeat already counted, arriving after the seal** | A full no-op. The raw insert affects zero rows, so the handshake never runs (§10.4). r3 said "every heartbeat ingress" and would have filed an already-counted heartbeat as data the seal excluded — false evidence in exactly the surface built to explain a disagreement. |
 | **Historical heartbeat for a bucket whose SLI membership has since changed** | Membership is resolved as of `bucket_start(ts)` (§10.4). A member removed from the SLI afterwards still routes the arrival, because the bucket's fact was produced by an epoch containing it; a member added afterwards does not, because it was not a member then. r3 read today's reference rows and got both directions wrong. |
 | **One historical agent batch of thousands of rows landing after a seal** | Recorded as aggregated per `(service, bucket, monitor)` with counts and bounded examples, not one retained row per event (§10.4), and the batch takes `(service_id, bucket_start)` keys in ascending order so two overlapping batches cannot deadlock (§15.4). |
-| **Late heartbeat arriving after seal** | Still recorded as raw data; the sealed fact does not change. A sealed bucket and raw history can legitimately disagree, and the disagreement always has a stored explanation. The knob is `late_arrival_grace` alone — never `result.allowed_skew`, which bounds a fast worker clock and says nothing about arrival lateness. |
+| **Late heartbeat arriving after seal** | Still recorded as raw data, with a late-arrival record. *Amended (D-0267 / iter-0198):* the sealed fact is then corrected by an automatic, audited `late_data` repair over every sealed bucket the observation reaches — up to the monitor's next observation (§10.4, case 3) — the original "the sealed fact does not change" described a design the implementation left in iter-0125. The grace is `late_arrival_grace` alone — never `result.allowed_skew`, which bounds a fast worker clock and says nothing about arrival lateness. |
 | **Recompute changes the budget by 80%** | Not blocked — a correction that large usually means the previous number was wrong — but never silent: leader-only, audited, with the affected range and before/after availability (§10.6). |
 | **Leader failover mid-recompute** | Batches are bounded (§10.10) and each commits its own bucket range, so a failover loses at most the in-flight batch; the successor resumes from the durable cursor (§10.8). Fencing is the ownership migration of §10.7 — not a reuse of `LeaderSession`, which r1 claimed and which is false about this codebase. |
 | **Two replicas attempting recompute** | Only the elected leader computes (§10.7). The election mechanism stays the existing advisory lock; what changes is that lock ownership and the writing connection become the same thing. |

@@ -7837,7 +7837,7 @@ export interface components {
         BurnRuleDeclaration: {
             /** @description Noise-filtering window, must exceed the short one (max 7d). */
             long_window_seconds: number;
-            /** @description Confirmation window ("still burning right now"). */
+            /** @description Confirmation window ("still burning right now"). A WRITE requires at least 300 s (`MinSealLag`): a service burn window ends at `sealed_through`, which trails now by the 120 s late-arrival grace plus up to a bucket, so a window at or under that lag never contains sealed time and one just above it is quotable only some of the time. A rule stored before this floor existed may still be echoed with a shorter window and keeps its old behavior until it is rewritten. */
             short_window_seconds: number;
             /**
              * Format: double

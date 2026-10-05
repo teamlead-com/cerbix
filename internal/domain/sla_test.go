@@ -59,6 +59,19 @@ func TestValidateBurnRulesRejectsDuplicateCanonicalKeys(t *testing.T) {
 	}
 }
 
+// Monitor burn rules are evaluated over RAW heartbeats, which have no seal lag, so the 60 s floor
+// stays theirs; the service-only floor must not leak into this validator (iter-0198, finding 6).
+func TestValidateBurnRulesKeepsTheMonitorFloorAtOneMinute(t *testing.T) {
+	ok := []BurnRule{{LongWindowSeconds: 3600, ShortWindowSeconds: 60, Threshold: 14.4, Severity: BurnSeverityPage}}
+	if err := ValidateBurnRules(ok); err != nil {
+		t.Fatalf("a 60 s short window was refused for a monitor rule: %v", err)
+	}
+	tooShort := []BurnRule{{LongWindowSeconds: 3600, ShortWindowSeconds: 59, Threshold: 14.4, Severity: BurnSeverityPage}}
+	if err := ValidateBurnRules(tooShort); err == nil {
+		t.Fatal("a 59 s short window was accepted")
+	}
+}
+
 // The key is about to become PERSISTED identity (`rule_key` for a service's normalized latch and its
 // episodes), so it must be lossless: a formatted-to-4-places threshold collapsed distinct valid
 // rules onto one key, which both false-rejected them here and would have made one latch answer for

@@ -26,28 +26,43 @@ func pagingPolicy(states ...domain.ServiceAlertState) domain.ServiceAlertPolicy 
 	return domain.ServiceAlertPolicy{OwnsPaging: true, PageOn: states, ConfirmEvaluations: 2}
 }
 
-// oneBurnRuleSet is `oneBurnRule` as the domain type: canonical key "page/300/120/14".
+// The rules these tests WRITE through Store.SetServiceBurnAlerting must pass the service validator, so
+// they cannot reuse the evaluator suite's `oneBurnRule` (300/120): a service short window must be at
+// least domain.MinSealLag (iter-0198, D-0267). The evaluator suite keeps its short pair because it
+// plants rules directly, as rules stored before that floor existed. Every target here is seeded with
+// the same writable rule it is later re-declared with, so a no-op stays a no-op.
+
+// writableBurnRule is the one-rule seed of these tests: canonical key "page/600/300/14".
+const writableBurnRule = `[{"long_window_seconds":600,"short_window_seconds":300,` +
+	`"threshold":14,"severity":"page"}]`
+
+const writableBurnRuleKey = "page/600/300/14"
+
+// burnPlantMinutes fills the whole 600 s long window, so both windows see the planted rate.
+const burnPlantMinutes = 10
+
+// oneBurnRuleSet is `writableBurnRule` as the domain type.
 func oneBurnRuleSet() []domain.BurnRule {
 	return []domain.BurnRule{{
-		LongWindowSeconds: 300, ShortWindowSeconds: 120,
+		LongWindowSeconds: 600, ShortWindowSeconds: 300,
 		Threshold: 14, Severity: domain.BurnSeverityPage,
 	}}
 }
 
-// twoBurnRuleSet is `twoRulesJSON` as the domain type: "page/300/120/14" and "ticket/300/120/30".
+// twoBurnRuleSet is `twoRulesJSON` as the domain type: "page/600/300/14" and "ticket/600/300/30".
 func twoBurnRuleSet() []domain.BurnRule {
 	return append(oneBurnRuleSet(), domain.BurnRule{
-		LongWindowSeconds: 300, ShortWindowSeconds: 120,
+		LongWindowSeconds: 600, ShortWindowSeconds: 300,
 		Threshold: 30, Severity: domain.BurnSeverityTicket,
 	})
 }
 
-const twoRulesJSON = `[{"long_window_seconds":300,"short_window_seconds":120,` +
+const twoRulesJSON = `[{"long_window_seconds":600,"short_window_seconds":300,` +
 	`"threshold":14,"severity":"page"},` +
-	`{"long_window_seconds":300,"short_window_seconds":120,` +
+	`{"long_window_seconds":600,"short_window_seconds":300,` +
 	`"threshold":30,"severity":"ticket"}]`
 
-const ticketBurnRuleKey = "ticket/300/120/30"
+const ticketBurnRuleKey = "ticket/600/300/30"
 
 // auditTargets returns the targets of every audit row with this action, oldest first.
 func auditTargets(t *testing.T, st *Store, ctx context.Context, action string) []string {
@@ -176,8 +191,8 @@ func liveFiring(t *testing.T, st *Store, ctx context.Context, serviceID string) 
 // evaluate that rule again and no evaluator could ever produce this close.
 func TestDisowningPagingClosesAFiringBurnAnnouncement(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
-	f := burnAlertService(t, st, ctx, oneBurnRule)
-	plantBurn(t, st, ctx, f, 5, minute/60) // ~16.7×, over the rule's threshold of 14
+	f := burnAlertService(t, st, ctx, writableBurnRule)
+	plantBurn(t, st, ctx, f, burnPlantMinutes, minute/60) // ~16.7×, over the rule's threshold of 14
 
 	if got := burnEvalOnce(t, st, ctx); got.Onsets != 1 {
 		t.Fatalf("onsets = %d, want a firing rule to disown", got.Onsets)
@@ -207,7 +222,7 @@ func TestDisowningPagingClosesAFiringBurnAnnouncement(t *testing.T) {
 	case got.CloseReason != domain.CloseOwnershipDisabled:
 		t.Fatalf("close reason = %q, want ownership_disabled — turning paging off is not a recovery",
 			got.CloseReason)
-	case got.Signal != domain.ServiceSignalBurn || got.RuleKey != oneBurnRuleKey:
+	case got.Signal != domain.ServiceSignalBurn || got.RuleKey != writableBurnRuleKey:
 		t.Fatalf("close identity = %q/%q", got.Signal, got.RuleKey)
 	case got.SLATargetID != f.targetID || got.Window != "30d":
 		t.Fatalf("close target = %q/%q, want the firing target's own identity",
@@ -223,7 +238,7 @@ func TestDisowningPagingClosesAFiringBurnAnnouncement(t *testing.T) {
 	if n := openBurnEpisodes(t, st, ctx, f.targetID); n != 0 {
 		t.Fatalf("%d episodes still open after the close", n)
 	}
-	if s := burnState(t, st, ctx, f.targetID, oneBurnRuleKey); s.firing {
+	if s := burnState(t, st, ctx, f.targetID, writableBurnRuleKey); s.firing {
 		t.Fatal("the latch is still FIRING with no open episode: re-enabling ownership would " +
 			"swallow the next onset as 'no edge'")
 	}
@@ -377,16 +392,16 @@ func TestConfirmEvaluationsEditClosesNothing(t *testing.T) {
 // service and (legally) their canonical rule keys.
 func TestDisablingBurnClosesOnlyThatTargetAndDropsItsLatches(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
-	f := burnAlertService(t, st, ctx, oneBurnRule) // the 30d target, objective 99.9
+	f := burnAlertService(t, st, ctx, writableBurnRule) // the 30d target, objective 99.9
 
 	var weekID string
 	if err := st.pool.QueryRow(ctx, `
 		INSERT INTO sla_targets (service_id, window_name, objective, burn_alert_enabled, burn_rules)
 		VALUES ($1,'7d',99.5,true,$2::jsonb) RETURNING id`,
-		f.serviceID, oneBurnRule).Scan(&weekID); err != nil {
+		f.serviceID, writableBurnRule).Scan(&weekID); err != nil {
 		t.Fatalf("second target: %v", err)
 	}
-	plantBurn(t, st, ctx, f, 5, minute/10) // 100× / 20×: both targets breach
+	plantBurn(t, st, ctx, f, burnPlantMinutes, minute/10) // 100× / 20×: both targets breach
 	if got := burnEvalOnce(t, st, ctx); got.Onsets != 2 {
 		t.Fatalf("onsets = %d, want one per target", got.Onsets)
 	}
@@ -407,7 +422,7 @@ func TestDisablingBurnClosesOnlyThatTargetAndDropsItsLatches(t *testing.T) {
 		t.Fatal("disabling burn published another onset")
 	case got.CloseReason != domain.CloseBurnDisabled:
 		t.Fatalf("close reason = %q, want burn_disabled", got.CloseReason)
-	case got.Window != "7d" || got.SLATargetID != weekID || got.RuleKey != oneBurnRuleKey:
+	case got.Window != "7d" || got.SLATargetID != weekID || got.RuleKey != writableBurnRuleKey:
 		t.Fatalf("the close does not name what ended: %+v", got)
 	case got.EpisodeID != weekOnset[0].EpisodeID:
 		t.Fatalf("the close ends episode %q, want the onset's %q", got.EpisodeID, weekOnset[0].EpisodeID)
@@ -430,7 +445,7 @@ func TestDisablingBurnClosesOnlyThatTargetAndDropsItsLatches(t *testing.T) {
 	if n := openBurnEpisodes(t, st, ctx, f.targetID); n != 1 {
 		t.Fatalf("the 30d episode is not open (%d): the 7d disable ended the wrong alert", n)
 	}
-	if s := burnState(t, st, ctx, f.targetID, oneBurnRuleKey); !s.firing {
+	if s := burnState(t, st, ctx, f.targetID, writableBurnRuleKey); !s.firing {
 		t.Fatalf("the 30d latch = %+v, want untouched by the other target's disable", s)
 	}
 
@@ -449,7 +464,7 @@ func TestDisablingBurnClosesOnlyThatTargetAndDropsItsLatches(t *testing.T) {
 func TestRemovingOneRuleClosesOnlyThatRule(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := burnAlertService(t, st, ctx, twoRulesJSON)
-	plantBurn(t, st, ctx, f, 5, 2*minute/60) // 33.3×: over BOTH thresholds
+	plantBurn(t, st, ctx, f, burnPlantMinutes, 2*minute/60) // 33.3×: over BOTH thresholds
 	if got := burnEvalOnce(t, st, ctx); got.Onsets != 2 {
 		t.Fatalf("onsets = %d, want both rules firing before the removal", got.Onsets)
 	}
@@ -486,7 +501,7 @@ func TestRemovingOneRuleClosesOnlyThatRule(t *testing.T) {
 	}
 
 	// The surviving rule is untouched, on every axis that could silence it later.
-	if s := burnState(t, st, ctx, f.targetID, oneBurnRuleKey); !s.firing || s.seq != 1 {
+	if s := burnState(t, st, ctx, f.targetID, writableBurnRuleKey); !s.firing || s.seq != 1 {
 		t.Fatalf("the surviving rule's latch = %+v, want still firing on its original sequence", s)
 	}
 	if n := openBurnEpisodes(t, st, ctx, f.targetID); n != 1 {
@@ -505,7 +520,7 @@ func TestRemovingOneRuleClosesOnlyThatRule(t *testing.T) {
 
 	audits := auditTargets(t, st, ctx, "service.burn_alerting")
 	if len(audits) != 1 || !strings.Contains(audits[0],
-		"rules:{page/300/120/14,ticket/300/120/30}→{page/300/120/14}") {
+		"rules:{page/600/300/14,ticket/600/300/30}→{page/600/300/14}") {
 		t.Fatalf("audit = %v, want the rule-key set's before→after", audits)
 	}
 	if strings.Contains(audits[0], "enabled:") {
@@ -523,7 +538,7 @@ func TestRemovingOneRuleClosesOnlyThatRule(t *testing.T) {
 func TestRemovedRuleLatchDeletionKeepsBurnCoverageArmed(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := burnAlertService(t, st, ctx, twoRulesJSON)
-	plantBurn(t, st, ctx, f, 5, 2*minute/60)
+	plantBurn(t, st, ctx, f, burnPlantMinutes, 2*minute/60)
 	if got := burnEvalOnce(t, st, ctx); got.Onsets != 2 {
 		t.Fatalf("onsets = %d, want both rules firing before the removal", got.Onsets)
 	}
@@ -575,8 +590,8 @@ func TestRemovedRuleLatchDeletionKeepsBurnCoverageArmed(t *testing.T) {
 // of both answers.
 func TestFileManagedServiceRefusesPagingWrites(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
-	f := burnAlertService(t, st, ctx, oneBurnRule)
-	plantBurn(t, st, ctx, f, 5, minute/60)
+	f := burnAlertService(t, st, ctx, writableBurnRule)
+	plantBurn(t, st, ctx, f, burnPlantMinutes, minute/60)
 	if got := burnEvalOnce(t, st, ctx); got.Onsets != 1 {
 		t.Fatalf("onsets = %d, want a firing rule", got.Onsets)
 	}
@@ -636,8 +651,8 @@ func TestFileManagedServiceRefusesPagingWrites(t *testing.T) {
 // leaks across the boundary — and writes nothing.
 func TestForeignProjectCannotEditPagingConfig(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
-	f := burnAlertService(t, st, ctx, oneBurnRule)
-	plantBurn(t, st, ctx, f, 5, minute/60)
+	f := burnAlertService(t, st, ctx, writableBurnRule)
+	plantBurn(t, st, ctx, f, burnPlantMinutes, minute/60)
 	if got := burnEvalOnce(t, st, ctx); got.Onsets != 1 {
 		t.Fatalf("onsets = %d, want a firing rule", got.Onsets)
 	}
@@ -684,7 +699,7 @@ func TestForeignProjectCannotEditPagingConfig(t *testing.T) {
 // an objective nobody declared would page against a number that does not exist.
 func TestBurnAlertingRefusesAnUndeclaredWindow(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
-	f := burnAlertService(t, st, ctx, oneBurnRule)
+	f := burnAlertService(t, st, ctx, writableBurnRule)
 	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "90d", true,
 		oneBurnRuleSet(), AlertActor{}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("burn write for an undeclared window = %v, want ErrNotFound", err)
@@ -695,11 +710,27 @@ func TestBurnAlertingRefusesAnUndeclaredWindow(t *testing.T) {
 	}
 }
 
+// The store is a second entry to the same rule, so it must refuse a service short window under the
+// seal lag on its own, not trust the handler to have asked (iter-0198, finding 6).
+func TestServiceBurnWriteRefusesAShortWindowUnderTheSealLag(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	f := burnAlertService(t, st, ctx, writableBurnRule)
+	genBefore := alertConfigGeneration(t, st, ctx, f.serviceID)
+
+	short := []domain.BurnRule{{LongWindowSeconds: 3600, ShortWindowSeconds: 120, Threshold: 14.4, Severity: domain.BurnSeverityPage}}
+	if err := st.SetServiceBurnAlerting(ctx, f.projectID, f.serviceID, "30d", true, short, AlertActor{}); err == nil {
+		t.Fatal("a 120 s short window was accepted for a service: it can never contain sealed time")
+	}
+	if got := alertConfigGeneration(t, st, ctx, f.serviceID); got != genBefore {
+		t.Fatalf("a refused write moved the alert config generation %d → %d", genBefore, got)
+	}
+}
+
 // Invalid input is refused BEFORE anything is written, by the one domain validator — including the
 // §16.4b duplicate-key rule, which exists because one latch cannot answer for two rules.
 func TestPagingWritesRejectInvalidInputBeforeWriting(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
-	f := burnAlertService(t, st, ctx, oneBurnRule)
+	f := burnAlertService(t, st, ctx, writableBurnRule)
 	genBefore := alertConfigGeneration(t, st, ctx, f.serviceID)
 
 	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID, FullServiceAlertPolicyPatch(domain.ServiceAlertPolicy{OwnsPaging: true,
@@ -820,7 +851,7 @@ func TestClearingPageOnUnknownClosesTheAnnouncementItNoLongerCovers(t *testing.T
 // test could ever fail.
 func TestDisowningClosesEachOpenSignalExactlyOnce(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
-	f := burnAlertService(t, st, ctx, oneBurnRule)
+	f := burnAlertService(t, st, ctx, writableBurnRule)
 	live := alertFixture{projectID: f.projectID, serviceID: f.serviceID, monitorID: f.monitorID}
 
 	rota := liveChannels(t, st, ctx, f.projectID, "burn-oncall", "live-oncall")
@@ -838,7 +869,7 @@ func TestDisowningClosesEachOpenSignalExactlyOnce(t *testing.T) {
 	}
 
 	// (a) the burn announcement, to "ch-burn".
-	plantBurn(t, st, ctx, f, 5, minute/60) // ~16.7×, over the rule's threshold of 14
+	plantBurn(t, st, ctx, f, burnPlantMinutes, minute/60) // ~16.7×, over the rule's threshold of 14
 	if got := burnEvalOnce(t, st, ctx); got.Onsets != 1 {
 		t.Fatalf("onsets = %d, want the burn rule firing", got.Onsets)
 	}
@@ -931,7 +962,7 @@ func TestDisowningClosesEachOpenSignalExactlyOnce(t *testing.T) {
 	if n := openHealthEpisodes(t, st, ctx, f.serviceID); n != 0 {
 		t.Fatalf("%d health episodes still open after disowning", n)
 	}
-	if s := burnState(t, st, ctx, f.targetID, oneBurnRuleKey); s.firing {
+	if s := burnState(t, st, ctx, f.targetID, writableBurnRuleKey); s.firing {
 		t.Fatal("the burn latch is still FIRING with no open episode")
 	}
 	if liveFiring(t, st, ctx, f.serviceID) {
@@ -960,7 +991,7 @@ func TestPagingWritesAuditTheirActor(t *testing.T) {
 	if _, err := st.CreateProject(ctx, decoy.ID, "elsewhere", "Elsewhere"); err != nil {
 		t.Fatalf("decoy project: %v", err)
 	}
-	f := burnAlertService(t, st, ctx, oneBurnRule)
+	f := burnAlertService(t, st, ctx, writableBurnRule)
 
 	// `actor_user_id` is a soft FK to a real row (00018), so the human actor has to exist.
 	var userID string
@@ -1042,14 +1073,14 @@ func TestPagingWritesAuditTheirActor(t *testing.T) {
 // freshly edited by nobody.
 func TestSemanticNoOpDoesNotEvenStampTheRow(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
-	f := burnAlertService(t, st, ctx, oneBurnRule)
+	f := burnAlertService(t, st, ctx, writableBurnRule)
 
 	policy := domain.ServiceAlertPolicy{
 		OwnsPaging: true, PageOn: []domain.ServiceAlertState{domain.ServiceAlertDown},
 		ConfirmEvaluations: 2,
 	}
 	rules := []domain.BurnRule{{
-		LongWindowSeconds: 300, ShortWindowSeconds: 120, Threshold: 14,
+		LongWindowSeconds: 600, ShortWindowSeconds: 300, Threshold: 14,
 		Severity: domain.BurnSeverityPage,
 	}}
 	if _, err := st.UpdateServiceAlertPolicy(ctx, f.projectID, f.serviceID,
@@ -1100,7 +1131,7 @@ func TestSemanticNoOpWritesChangeNothing(t *testing.T) {
 	live := alertFixture{projectID: f.projectID, serviceID: f.serviceID, monitorID: f.monitorID}
 
 	// Both signals firing, so "closes nothing" is a claim with something to lose.
-	plantBurn(t, st, ctx, f, 5, 2*minute/60) // 33.3×: over BOTH thresholds
+	plantBurn(t, st, ctx, f, burnPlantMinutes, 2*minute/60) // 33.3×: over BOTH thresholds
 	if got := burnEvalOnce(t, st, ctx); got.Onsets != 2 {
 		t.Fatalf("onsets = %d, want both burn rules firing", got.Onsets)
 	}
@@ -1172,7 +1203,7 @@ func TestSemanticNoOpWritesChangeNothing(t *testing.T) {
 		if !liveFiring(t, st, ctx, f.serviceID) {
 			t.Fatalf("%s: the live latch was cleared by an edit that changed nothing", after)
 		}
-		for _, key := range []string{oneBurnRuleKey, ticketBurnRuleKey} {
+		for _, key := range []string{writableBurnRuleKey, ticketBurnRuleKey} {
 			if s := burnState(t, st, ctx, f.targetID, key); !s.firing {
 				t.Fatalf("%s: the latch for %s was cleared by an edit that changed nothing", after, key)
 			}
@@ -1218,8 +1249,8 @@ func TestSemanticNoOpWritesChangeNothing(t *testing.T) {
 // also has to leave both tenants' rows exactly as it found them.
 func TestPagingWritesRefuseForeignAndMalformedIdentifiers(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
-	f := burnAlertService(t, st, ctx, oneBurnRule)
-	plantBurn(t, st, ctx, f, 5, minute/60)
+	f := burnAlertService(t, st, ctx, writableBurnRule)
+	plantBurn(t, st, ctx, f, burnPlantMinutes, minute/60)
 	if got := burnEvalOnce(t, st, ctx); got.Onsets != 1 {
 		t.Fatalf("onsets = %d, want a firing rule the refused writes could destroy", got.Onsets)
 	}
@@ -1246,7 +1277,7 @@ func TestPagingWritesRefuseForeignAndMalformedIdentifiers(t *testing.T) {
 	if err := st.pool.QueryRow(ctx, `
 		INSERT INTO sla_targets (service_id, window_name, objective, burn_alert_enabled, burn_rules)
 		VALUES ($1,'30d',99.9,true,$2::jsonb) RETURNING id`,
-		otherSvc.ID, oneBurnRule).Scan(&otherTarget); err != nil {
+		otherSvc.ID, writableBurnRule).Scan(&otherTarget); err != nil {
 		t.Fatalf("foreign target: %v", err)
 	}
 
@@ -1301,7 +1332,7 @@ func TestPagingWritesRefuseForeignAndMalformedIdentifiers(t *testing.T) {
 	if n := openBurnEpisodes(t, st, ctx, f.targetID); n != 1 {
 		t.Fatalf("open episodes = %d, want the announcement untouched", n)
 	}
-	if s := burnState(t, st, ctx, f.targetID, oneBurnRuleKey); !s.firing {
+	if s := burnState(t, st, ctx, f.targetID, writableBurnRuleKey); !s.firing {
 		t.Fatal("a refused write cleared the firing latch")
 	}
 	if a := auditTargets(t, st, ctx, "service.alerting"); len(a) != 0 {

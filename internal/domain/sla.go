@@ -50,6 +50,29 @@ func (r BurnRule) Key() string {
 		strconv.FormatFloat(r.Threshold, 'g', -1, 64)
 }
 
+// ValidateServiceBurnRules is ValidateBurnRules plus the one bound that exists only for a
+// SERVICE target: the short window must be at least MinSealLag.
+//
+// A service burn window is anchored at sealed_through, and §11.3 answers
+// insufficient_sealed_coverage whenever sealed_through ≤ as_of − short window. A healthy
+// materializer trails now by LateArrivalGrace plus up to one bucket, so a short window at or
+// under that lag can never be quoted and the rule would HOLD forever, while one just above it
+// flaps with every bucket. MinSealLag is the healthy lag plus two buckets of headroom — the same
+// floor the reliability gate puts on `max_seal_lag_seconds`. Monitor rules read raw heartbeats,
+// have no seal lag, and keep the 60 s floor of ValidateBurnRules.
+func ValidateServiceBurnRules(rules []BurnRule) error {
+	if err := ValidateBurnRules(rules); err != nil {
+		return err
+	}
+	floor := int(MinSealLag / time.Second)
+	for i, r := range rules {
+		if r.ShortWindowSeconds < floor {
+			return fmt.Errorf("burn rule %d: a service short window must be at least %ds (the sealing lag)", i+1, floor)
+		}
+	}
+	return nil
+}
+
 // ValidateBurnRules enforces rule invariants: at most 4 rules; per rule a known
 // severity, a positive threshold, and sane paired windows (1m ≤ short < long ≤ 7d).
 func ValidateBurnRules(rules []BurnRule) error {

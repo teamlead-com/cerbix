@@ -471,3 +471,59 @@ describe("the maintenance window names the zone it is typed in", () => {
     }
   });
 });
+
+// iter-0198 review finding 6: the budget helper is tested on its own, but only the RENDERED screen
+// proves the view reads it. The budget below is exactly what internal/sla.ErrorBudget returns for a
+// 99.9 objective with zero errors — remaining_ratio 0.001 is a fraction of ALL time, which the view
+// once rendered as "0 %" and flagged At risk.
+describe("SlaView budget left (iter-0198)", () => {
+  beforeEach(() => {
+    for (const method of Object.values(apiMock)) method.mockReset();
+  });
+
+  it("shows an untouched 99.9 budget as 100 % left and Meeting, on the row and in the summary", async () => {
+    const untouched = {
+      objective: 99.9,
+      allowed_downtime_ratio: 0.001,
+      actual_downtime_ratio: 0,
+      remaining_ratio: 0.001,
+      burned_percent: 0,
+      met: true,
+    };
+    apiMock.GET.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/projects/{projectID}/monitors")
+        return { data: [{ id: "mon-a", name: "checkout-http", type: "http", project_id: "project-a" }] };
+      if (path === "/api/v1/monitors/{monitorID}/sla")
+        return {
+          data: {
+            monitor_id: "mon-a",
+            windows: [
+              { window: "30d", total: 1000, up: 1000, uptime_percent: 100, avg_latency_ms: 5, p95_latency_ms: 9, objective: 99.9, error_budget: untouched },
+            ],
+          },
+        };
+      if (path === "/api/v1/projects/{projectID}/sla") return { data: { project_id: "project-a", windows: [] } };
+      return { data: [] };
+    });
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const ws = useWorkspace();
+    ws.orgId = "org-a";
+    ws.projectId = "project-a";
+    ws.loaded = true;
+    const session = useSession();
+    session.user = { id: "user-a", is_global_admin: true } as typeof session.user;
+    const wrapper = mount(SlaView, {
+      global: { plugins: [pinia], stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    const row = wrapper.findAll("tr").find((tr) => tr.text().includes("checkout-http"));
+    expect(row, "the monitor's SLO row is rendered").toBeTruthy();
+    expect(row!.text()).toContain("Meeting");
+    expect(row!.text()).not.toContain("At risk");
+    expect(row!.text()).toContain("100%");
+    expect(wrapper.text()).toMatch(/Budget remaining\s*100\s*%/);
+  });
+});

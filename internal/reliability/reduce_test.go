@@ -138,6 +138,43 @@ func TestPushDeadManExpiresFromArmedAt(t *testing.T) {
 	}
 }
 
+// A re-armed push monitor (disabled → enabled stamps push_armed_at) starts a new liveness
+// epoch: the ping from before the re-arm is not proof of anything after it. The monitor's
+// own dead-man counts from GREATEST(push_armed_at, last_result_ts), so the service must not
+// call the member BAD the instant it is re-enabled because a ten-minute-old ping went stale
+// (iter-0198, finding 8).
+func TestPushPingBeforeReArmIsNotEvidence(t *testing.T) {
+	armed := bucketStart.Add(-30 * time.Second) // StaleAfter is 60s → dead-man expires 30s in
+	m := pushMember("p", "core", armed)
+	stale := Observation{MonitorID: "p", Ts: bucketStart.Add(-10 * time.Minute), Up: true}
+
+	b := reduce(t, Input{
+		Start: bucketStart, End: bucketEnd,
+		Members: []Member{m}, Observations: []Observation{stale}, Policies: allPolicies(),
+	})
+	if b.Durations.Unknown != 30*time.Second {
+		t.Errorf("unknown = %s, want 30s while the re-armed dead-man is still running", b.Durations.Unknown)
+	}
+	if b.Durations.Bad != 30*time.Second {
+		t.Errorf("bad = %s, want 30s — only after the re-armed dead-man expires", b.Durations.Bad)
+	}
+}
+
+// A ping AFTER the re-arm is ordinary evidence and holds as usual.
+func TestPushPingAfterReArmHolds(t *testing.T) {
+	armed := bucketStart.Add(-5 * time.Minute)
+	m := pushMember("p", "core", armed)
+	ping := Observation{MonitorID: "p", Ts: bucketStart.Add(-10 * time.Second), Up: true}
+
+	b := reduce(t, Input{
+		Start: bucketStart, End: bucketEnd,
+		Members: []Member{m}, Observations: []Observation{ping}, Policies: allPolicies(),
+	})
+	if b.Durations.Good != 50*time.Second || b.Durations.Bad != 10*time.Second {
+		t.Errorf("good=%s bad=%s, want 50s GOOD then 10s BAD after the ping's 60s", b.Durations.Good, b.Durations.Bad)
+	}
+}
+
 // An active probe with no observation is UNCERTAIN, never failing. Confusing the two is
 // how a monitoring system invents outages on a freshly created service.
 func TestActiveProbeWithNoObservationIsUnknownNotBad(t *testing.T) {

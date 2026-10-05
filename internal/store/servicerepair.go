@@ -259,7 +259,20 @@ func (s *Store) RunRepairRange(ctx context.Context, r RepairRange, deadline time
 }
 
 func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, deadline time.Time, policy lifecyclePolicy) error {
-	batch := initialRepairBatch
+	// Every slice starts SMALL and grows (adaptRepairBatch doubles a batch that finished well
+	// inside its target). What a batch costs is learned only inside a slice, and a slice that runs
+	// out of budget rolls its batch back and leaves no record of the size that failed — so a slice
+	// that OPENED with a batch too large to fit would fail identically on every retry, the cursor
+	// never moving: §10.10's livelock with every bound respected (iter-0198 re-review). Starting
+	// at one bucket guarantees progress whenever a single bucket fits what the slice has left.
+	// It is a trade, not a free win: each batch pays a fixed persistence cost (generation re-read,
+	// cursor write, commit), and a slice that would have afforded one large batch now spends
+	// several small transactions growing to it — on a database where that fixed cost is high the
+	// slice commits fewer buckets than a 60-bucket opening would have (iter-0198 re-review #4).
+	batch := minRepairBatch
+	// progressed records whether this slice has already committed a batch. A timeout AFTER that
+	// met the slice's tail, not a fresh budget — the bucket in hand may well fit the next slice.
+	progressed := false
 	cursor := r.Cursor
 	if cursor.Before(r.From) {
 		cursor = r.From
@@ -283,6 +296,17 @@ func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, 
 		}
 		started := time.Now()
 		err := s.runRepairBatch(ctx, db, r, cursor, end, remaining)
+		if isStatementTimeout(err) && (progressed || batch > minRepairBatch) {
+			// The server's statement_timeout is derived from the slice's REMAINDER. Once this
+			// slice has committed work, or the batch has grown past one bucket, a timeout means
+			// what was left ran out — the slice ending, not the range failing; counting it would
+			// back the range off for up to five minutes after every slice that made progress.
+			// A single bucket that times out in this call's FIRST batch is still classified as the
+			// §10.10 fault. That is NOT proof the bucket had a full slice: the claim and a short
+			// scheduler-cycle remainder can already have spent part of it, so a healthy bucket can
+			// be counted here — a known limitation tracked as BUG-0198-R (D-0267).
+			err = errSliceBudget
+		}
 		switch {
 		case errors.Is(err, errSliceBudget):
 			// The slice's budget, not the range's health: release at the cursor already
@@ -306,6 +330,7 @@ func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, 
 		spent := time.Since(started)
 		batch = adaptRepairBatch(batch, spent, remaining)
 		cursor = end
+		progressed = true
 	}
 	return s.completeRepairRange(ctx, db, r.ID, cursor, r.Reason, policy.writeDeadline(deadline))
 }
@@ -317,9 +342,8 @@ func (s *Store) runRepairRangeOn(ctx context.Context, db dbConn, r RepairRange, 
 const lifecycleReserve = 40 * time.Millisecond
 
 const (
-	initialRepairBatch = 60   // one hour of canonical buckets
-	maxRepairBatch     = 1440 // §10.10 `recompute_batch_buckets`
-	minRepairBatch     = 1
+	maxRepairBatch = 1440 // §10.10 `recompute_batch_buckets`
+	minRepairBatch = 1
 )
 
 // adaptRepairBatch grows a batch that finished comfortably and shrinks one that did not,

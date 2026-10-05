@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -422,5 +423,259 @@ func TestASameBoundaryDeclarationDoesNotDiscardUnrelatedWork(t *testing.T) {
 	}
 	if alive != 2 {
 		t.Fatalf("%d of 2 unrelated ranges survived a declaration write; the rest were discarded with no record", alive)
+	}
+}
+
+// A long repair under PRODUCTION-sized slices must make progress (iter-0198 re-review, Important 1).
+// A late heartbeat for a monitor that then went silent repairs up to the watermark; if the first
+// batch of every slice is a fixed hour of buckets (the former initial size) and that one atomic
+// batch does not fit, the
+// slice rolls back, the cursor never moves, and the next slice starts with the same batch again —
+// every bound respected, progress zero (§10.10's livelock). A 5 ms trigger on every bucket write
+// models a database where small batches fit and a 60-bucket one does not. drainRepair's generous
+// deadline hides this, so the slices here are the scheduler's own 250 ms.
+func TestLongRepairProgressesUnderProductionSlices(t *testing.T) {
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+	leaderSliceFor(t, st, ctx, 80)
+
+	base := domain.FloorToBucket(time.Now().UTC().Add(-90 * time.Minute))
+	if n, _, err := st.RecordHistoricalResults(ctx, []domain.Heartbeat{
+		{MonitorID: f.http, Ts: base.Add(30 * time.Second), Up: true},
+	}); err != nil || n != 1 {
+		t.Fatalf("late backfill: n=%d err=%v", n, err)
+	}
+	var rid string
+	var from, to time.Time
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id, range_start, range_end FROM service_repair_ranges
+		  WHERE service_id=$1 AND reason='late_data' AND state='pending'`,
+		f.serviceID).Scan(&rid, &from, &to); err != nil {
+		t.Fatalf("read range: %v", err)
+	}
+	if to.Sub(from) < time.Hour {
+		t.Fatalf("test setup: range %s is shorter than the hour-sized batch that cannot fit", to.Sub(from))
+	}
+
+	if _, err := st.pool.Exec(ctx, `
+		CREATE FUNCTION iter0198_slow_bucket() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN PERFORM pg_sleep(0.005); RETURN NEW; END $$;
+		CREATE TRIGGER iter0198_slow_bucket BEFORE UPDATE ON service_reliability_buckets
+		   FOR EACH ROW EXECUTE FUNCTION iter0198_slow_bucket()`); err != nil {
+		t.Fatalf("slow-bucket trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := st.pool.Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS iter0198_slow_bucket ON service_reliability_buckets;
+			DROP FUNCTION IF EXISTS iter0198_slow_bucket()`); err != nil {
+			t.Errorf("drop slow-bucket trigger: %v", err)
+		}
+	})
+
+	ls, ok, err := st.TryBecomeLeaderSession(ctx, time.Now().UnixNano())
+	if err != nil || !ok {
+		t.Fatalf("leader session: ok=%v err=%v", ok, err)
+	}
+	defer ls.Release()
+
+	prev := from
+	state := ""
+	for i := 0; i < 12 && state != "complete"; i++ {
+		if _, err := ls.RunServiceRepairSlice(ctx, time.Now().Add(250*time.Millisecond)); err != nil {
+			t.Logf("slice %d: %v", i, err)
+		}
+		var cursor time.Time
+		var attempts int
+		if err := st.pool.QueryRow(ctx,
+			`SELECT COALESCE(cursor_at, range_start), state, attempts FROM service_repair_ranges WHERE id=$1`,
+			rid).Scan(&cursor, &state, &attempts); err != nil {
+			t.Fatalf("read range: %v", err)
+		}
+		if attempts != 0 {
+			t.Fatalf("slice %d counted a failure (attempts=%d): running out of slice is a stop, not an error", i, attempts)
+		}
+		if state != "complete" && !cursor.After(prev) {
+			t.Fatalf("slice %d made no progress: cursor still %s of [%s, %s)", i, cursor, from, to)
+		}
+		prev = cursor
+	}
+	if state != "complete" {
+		t.Fatalf("range not complete after 12 production slices (cursor %s of [%s, %s))", prev, from, to)
+	}
+	if fact, ok := readFact(t, st, ctx, f.serviceID, base.Add(time.Minute)); !ok || fact.good != domain.CanonicalBucket.Microseconds() {
+		t.Errorf("first held minute after repair: %+v exists=%v, want GOOD", fact, ok)
+	}
+}
+
+// lateRepairRange plants a sealed UNKNOWN stretch and one late GOOD 90 minutes back with no later
+// heartbeat, so the late_data range runs to the watermark — long enough for several slices.
+func lateRepairRange(t *testing.T) (*Store, context.Context, string, time.Time) {
+	t.Helper()
+	st, ctx := declStore(t)
+	f := adoptedService(t, st, ctx)
+	leaderSliceFor(t, st, ctx, 80)
+	base := domain.FloorToBucket(time.Now().UTC().Add(-90 * time.Minute))
+	if n, _, err := st.RecordHistoricalResults(ctx, []domain.Heartbeat{
+		{MonitorID: f.http, Ts: base.Add(30 * time.Second), Up: true},
+	}); err != nil || n != 1 {
+		t.Fatalf("late backfill: n=%d err=%v", n, err)
+	}
+	var rid string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT id FROM service_repair_ranges WHERE service_id=$1 AND reason='late_data' AND state='pending'`,
+		f.serviceID).Scan(&rid); err != nil {
+		t.Fatalf("read range: %v", err)
+	}
+	return st, ctx, rid, base
+}
+
+// bucketWriteTrigger runs `body` (PL/pgSQL) before every bucket UPDATE, and is dropped with a
+// fresh context so a failing test cannot leave it behind on the shared database.
+func bucketWriteTrigger(t *testing.T, st *Store, ctx context.Context, body string) {
+	t.Helper()
+	if _, err := st.pool.Exec(ctx, `
+		CREATE FUNCTION iter0198_bucket_write() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN `+body+`; RETURN NEW; END $$;
+		CREATE TRIGGER iter0198_bucket_write BEFORE UPDATE ON service_reliability_buckets
+		   FOR EACH ROW EXECUTE FUNCTION iter0198_bucket_write()`); err != nil {
+		t.Fatalf("bucket-write trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		clean, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := st.pool.Exec(clean, `
+			DROP TRIGGER IF EXISTS iter0198_bucket_write ON service_reliability_buckets;
+			DROP FUNCTION IF EXISTS iter0198_bucket_write()`); err != nil {
+			t.Errorf("drop bucket-write trigger: %v", err)
+		}
+	})
+}
+
+func repairRangeState(t *testing.T, st *Store, ctx context.Context, rid string) (cursor time.Time, attempts int) {
+	t.Helper()
+	if err := st.pool.QueryRow(ctx,
+		`SELECT COALESCE(cursor_at, range_start), attempts FROM service_repair_ranges WHERE id=$1`,
+		rid).Scan(&cursor, &attempts); err != nil {
+		t.Fatalf("read range: %v", err)
+	}
+	return cursor, attempts
+}
+
+// A healthy bucket that fits a FRESH slice is not a fault because it did not fit the slice's TAIL.
+// At 75 ms per bucket write the first bucket commits, the batch stays at one, and the next bucket
+// meets what is left of the slice. That is the slice running out (iter-0198 re-review #2,
+// Important): counting it would back the range off 5 s, 10 s, 20 s … after every slice that made
+// progress. Scenario from the reviewer's reproducer.
+func TestRepairTailTimeoutOnOneBucketIsNotAFault(t *testing.T) {
+	st, ctx, rid, base := lateRepairRange(t)
+	bucketWriteTrigger(t, st, ctx, `PERFORM pg_sleep(0.075)`)
+	ls, ok, err := st.TryBecomeLeaderSession(ctx, time.Now().UnixNano())
+	if err != nil || !ok {
+		t.Fatalf("leader session: ok=%v err=%v", ok, err)
+	}
+	defer ls.Release()
+
+	prev := base
+	for i := 0; i < 3; i++ {
+		if _, err := ls.RunServiceRepairSlice(ctx, time.Now().Add(250*time.Millisecond)); err != nil {
+			t.Logf("slice %d: %v", i, err)
+		}
+		cursor, attempts := repairRangeState(t, st, ctx, rid)
+		if !cursor.After(prev) {
+			t.Fatalf("test setup: slice %d committed nothing — one 75 ms bucket must fit a fresh slice", i)
+		}
+		if attempts != 0 {
+			t.Fatalf("slice %d: running out at the slice's tail counted as a fault (attempts=%d)", i, attempts)
+		}
+		prev = cursor
+	}
+}
+
+// Deterministic guard for the classification itself, with no timing lottery about whether the
+// budget runs out between statements or inside one: every bucket after the first sleeps 1 s, far
+// past any slice. Slice 0 commits bucket 0, grows to a multi-bucket batch and times out → release,
+// no failure. Slice 1 opens fresh at one bucket on that same bucket and still times out → that is
+// the §10.10 fault, counted once.
+//
+// The slow statement bumps a SEQUENCE before sleeping, and nextval is not rolled back with the
+// batch: the test proves slice 0 reached it — i.e. that its release came from a 57014 being
+// remapped — instead of trusting that it did. On a database slow enough that slice 0 runs out
+// BETWEEN statements (errSliceBudget, which releases on its own), the remap would go unexercised and
+// the old version of this guard passed with the remap disabled (iter-0198 re-review #3); that case
+// now fails as a setup error, never as a green result.
+func TestRepairTimeoutIsAReleaseAfterProgressAndAFaultOnAFreshBucket(t *testing.T) {
+	st, ctx, rid, base := lateRepairRange(t)
+	if _, err := st.pool.Exec(ctx, `CREATE SEQUENCE iter0198_slow_reached`); err != nil {
+		t.Fatalf("reach counter: %v", err)
+	}
+	t.Cleanup(func() {
+		clean, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := st.pool.Exec(clean, `DROP SEQUENCE IF EXISTS iter0198_slow_reached`); err != nil {
+			t.Errorf("drop reach counter: %v", err)
+		}
+	})
+	reached := func() int64 {
+		t.Helper()
+		var n int64
+		if err := st.pool.QueryRow(ctx,
+			`SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM iter0198_slow_reached`).Scan(&n); err != nil {
+			t.Fatalf("read reach counter: %v", err)
+		}
+		return n
+	}
+	// Registered after the sequence, so cleanup drops the trigger before the sequence it calls.
+	bucketWriteTrigger(t, st, ctx, fmt.Sprintf(
+		`IF NEW.bucket_start >= '%s'::timestamptz THEN PERFORM nextval('iter0198_slow_reached'); PERFORM pg_sleep(1); END IF`,
+		base.Add(time.Minute).Format(time.RFC3339)))
+	ls, ok, err := st.TryBecomeLeaderSession(ctx, time.Now().UnixNano())
+	if err != nil || !ok {
+		t.Fatalf("leader session: ok=%v err=%v", ok, err)
+	}
+	defer ls.Release()
+
+	first := base.Add(time.Minute)
+	if _, err := ls.RunServiceRepairSlice(ctx, time.Now().Add(250*time.Millisecond)); err != nil {
+		t.Errorf("slice 0: a timeout after progress must release, got %v", err)
+	}
+	if n := reached(); n < 1 {
+		t.Fatalf("test setup: slice 0 never reached the slow statement (it ran out between statements), so the 57014 remap was not exercised")
+	}
+	if cursor, attempts := repairRangeState(t, st, ctx, rid); !cursor.Equal(first) || attempts != 0 {
+		t.Fatalf("slice 0: cursor=%s attempts=%d, want %s and 0", cursor, attempts, first)
+	}
+
+	before := reached()
+	_, err = ls.RunServiceRepairSlice(ctx, time.Now().Add(250*time.Millisecond))
+	if reached() <= before {
+		t.Fatalf("test setup: slice 1 never reached the slow statement")
+	}
+	if !isStatementTimeout(err) {
+		t.Errorf("slice 1: a bucket that does not fit a fresh slice must fail with 57014, got %v", err)
+	}
+	if cursor, attempts := repairRangeState(t, st, ctx, rid); !cursor.Equal(first) || attempts != 1 {
+		t.Fatalf("slice 1: cursor=%s attempts=%d, want %s and 1", cursor, attempts, first)
+	}
+}
+
+// lock_timeout (55P03) is deliberately not folded into the slice budget: shrinking or releasing does
+// not help a lock wait, and the retry backoff is its answer.
+func TestRepairLockTimeoutKeepsTheFailurePath(t *testing.T) {
+	st, ctx, rid, base := lateRepairRange(t)
+	bucketWriteTrigger(t, st, ctx, fmt.Sprintf(
+		`IF NEW.bucket_start >= '%s'::timestamptz THEN RAISE EXCEPTION 'iter0198 forced lock timeout' USING ERRCODE = '55P03'; END IF`,
+		base.Add(time.Minute).Format(time.RFC3339)))
+	ls, ok, err := st.TryBecomeLeaderSession(ctx, time.Now().UnixNano())
+	if err != nil || !ok {
+		t.Fatalf("leader session: ok=%v err=%v", ok, err)
+	}
+	defer ls.Release()
+
+	_, err = ls.RunServiceRepairSlice(ctx, time.Now().Add(250*time.Millisecond))
+	if pgErrCode(err) != "55P03" {
+		t.Errorf("slice error = %v, want the 55P03", err)
+	}
+	if _, attempts := repairRangeState(t, st, ctx, rid); attempts != 1 {
+		t.Fatalf("attempts=%d, want 1: a lock timeout is a range failure", attempts)
 	}
 }

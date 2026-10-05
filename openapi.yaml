@@ -4469,7 +4469,16 @@ components:
       additionalProperties: false
       properties:
         long_window_seconds: { type: integer, description: 'Noise-filtering window, must exceed the short one (max 7d).' }
-        short_window_seconds: { type: integer, minimum: 60, description: 'Confirmation window ("still burning right now").' }
+        short_window_seconds:
+          type: integer
+          minimum: 60
+          description: >
+            Confirmation window ("still burning right now"). A WRITE requires at least 300 s
+            (`MinSealLag`): a service burn window ends at `sealed_through`, which trails now by the
+            120 s late-arrival grace plus up to a bucket, so a window at or under that lag never
+            contains sealed time and one just above it is quotable only some of the time. A rule
+            stored before this floor existed may still be echoed with a shorter window and keeps
+            its old behavior until it is rewritten.
         threshold: { type: number, format: double, exclusiveMinimum: 0, description: 'Burn-rate multiple that trips the rule (e.g. 14.4).' }
         severity: { type: string, enum: [page, ticket] }
 

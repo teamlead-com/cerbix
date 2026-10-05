@@ -84,7 +84,7 @@ func (s *Store) noteHeartbeatsForServices(ctx context.Context, tx pgx.Tx, beats 
 		if err := s.markBucket(ctx, tx, k.projectID, k.serviceID, k.monitorID, k.bucket, k.ts); err != nil {
 			return err
 		}
-		if err := repairIfBehindWatermark(ctx, tx, k.projectID, k.serviceID, k.bucket); err != nil {
+		if err := repairIfBehindWatermark(ctx, tx, k.projectID, k.serviceID, k.monitorID, k.bucket, k.ts); err != nil {
 			return err
 		}
 	}
@@ -124,7 +124,7 @@ func (s *Store) noteHeartbeatForServices(ctx context.Context, tx pgx.Tx, monitor
 		// and the forward driver has already walked past. Queue the correction in the SAME
 		// transaction as the heartbeat, or the two can separate — leaving a fact that is
 		// known to be wrong with nothing scheduled to put it right.
-		if err := repairIfBehindWatermark(ctx, tx, a.projectID, a.serviceID, bucketStart); err != nil {
+		if err := repairIfBehindWatermark(ctx, tx, a.projectID, a.serviceID, monitorID, bucketStart, ts); err != nil {
 			return err
 		}
 	}
@@ -132,7 +132,16 @@ func (s *Store) noteHeartbeatForServices(ctx context.Context, tx pgx.Tx, monitor
 }
 
 // repairIfBehindWatermark queues a late-data recompute when the bucket is already sealed.
-func repairIfBehindWatermark(ctx context.Context, tx pgx.Tx, projectID, serviceID string, bucketStart time.Time) error {
+//
+// The range is every sealed bucket whose fact the observation can change, which is NOT bounded by
+// its own StaleAfter. Sample-and-hold makes it the member's carry-in for every later bucket until the
+// monitor's NEXT observation: inside its deadline it decides the state; past it, it turns the unknown
+// reason from `no_observation` into `stale` (provenance, which outlives raw retention); and a later
+// epoch with a longer StaleAfter makes it fresh again (iter-0198 review). So the range runs from the
+// observation's bucket to the bucket holding the next observation of the same monitor, or to the
+// watermark when there is none yet. Recomputing a bucket whose content does not change rewrites the
+// same row and writes no audit row.
+func repairIfBehindWatermark(ctx context.Context, tx pgx.Tx, projectID, serviceID, monitorID string, bucketStart, ts time.Time) error {
 	var sealedThrough *time.Time
 	err := tx.QueryRow(ctx,
 		`SELECT sealed_through FROM service_materialization WHERE service_id = $1`,
@@ -146,8 +155,30 @@ func repairIfBehindWatermark(ctx context.Context, tx pgx.Tx, projectID, serviceI
 	if sealedThrough == nil || !bucketStart.Before(*sealedThrough) {
 		return nil
 	}
-	return enqueueRepairRangeTx(ctx, tx, projectID, serviceID,
-		bucketStart, bucketStart.Add(domain.CanonicalBucket), ReasonLateData, "")
+	end, err := lateObservationReachEnd(ctx, tx, monitorID, ts, *sealedThrough)
+	if err != nil {
+		return err
+	}
+	return enqueueRepairRangeTx(ctx, tx, projectID, serviceID, bucketStart, end, ReasonLateData, "")
+}
+
+// lateObservationReachEnd is the end of the last sealed bucket an observation at ts can change:
+// CeilToBucket of the monitor's next observation, clipped at the watermark (past it the ordinary
+// forward pass reads the observation anyway). A next observation inside a bucket still leaves this
+// one as that bucket's carry-in up to it, hence the ceiling; one exactly on a boundary begins the
+// following bucket itself, which the ceiling of a boundary leaves out. Because the next observation
+// is strictly later than ts, the result always covers ts's own bucket.
+func lateObservationReachEnd(ctx context.Context, tx pgx.Tx, monitorID string, ts, sealedThrough time.Time) (time.Time, error) {
+	var next *time.Time
+	if err := tx.QueryRow(ctx,
+		`SELECT min(ts) FROM heartbeats WHERE monitor_id = $1 AND ts > $2 AND ts < $3`,
+		monitorID, ts, sealedThrough).Scan(&next); err != nil {
+		return time.Time{}, fmt.Errorf("store: next observation after a late arrival: %w", err)
+	}
+	if next == nil {
+		return sealedThrough, nil
+	}
+	return domain.CeilToBucket(*next), nil
 }
 
 // affectedService is one service the heartbeat belongs to, with the tenant key read from the

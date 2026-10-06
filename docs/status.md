@@ -3,7 +3,14 @@
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. `DEFERRED` is not permitted. Every `DONE` links to code,
 tests, and metrics.
 
-## Latest closed iteration (iter-0199 — SLI windows longer than raw retention, bugfix; OPENED AND CLOSED 2026-10-06; CLOSED / OWNER-APPROVED after independent review APPROVED at re-review 2; D-0268; committed and fast-forwarded into local main by owner authorization)
+## Latest closed iteration (iter-0200 — Security workflow back to green: frontend advisories and the govulncheck pin; OPENED AND CLOSED 2026-10-06 BY THE OWNER without an independent review; released as v0.3.6. No requirement row changes — versions and a CI pin, not behaviour. See [iter-0200](iterations/iter-0200.md))
+
+| ID | Acceptance criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| AC-0200-1 | `npm audit --omit=dev --audit-level=high` passes: `vue` ≥ 3.5.42 (GHSA-g2v6-rqmx-r4w6) and `source-map-js` 1.2.2 (GHSA-68fv-2mgg-jv7q), with the SPA rebuilt, tested and re-embedded. | DONE | Local `npm audit` and govulncheck v1.7.0 (Go 1.25.13, `GOTOOLCHAIN=local`) GREEN after RED; `-race` 33 packages; vitest 904; `make dev-test` 77/1 known skip — [`iter-0200.md`](iterations/iter-0200.md). Closed by the OWNER 2026-10-06 without an independent review. Metrics: N/A. |
+| AC-0200-2 | The govulncheck job installs a scanner that runs on the repository's Go toolchain (pinned `v1.7.0` instead of `@latest`, which needs Go 1.26) and passes; `grpc` 1.83.2 clears the imported-package finding; the `x/crypto` findings that need Go 1.26 are recorded, not hidden. | DONE | Local `npm audit` and govulncheck v1.7.0 (Go 1.25.13, `GOTOOLCHAIN=local`) GREEN after RED; `-race` 33 packages; vitest 904; `make dev-test` 77/1 known skip — [`iter-0200.md`](iterations/iter-0200.md). Closed by the OWNER 2026-10-06 without an independent review. Metrics: N/A. |
+
+## Previous closed iteration (iter-0199 — SLI windows longer than raw retention, bugfix; OPENED AND CLOSED 2026-10-06; CLOSED / OWNER-APPROVED after independent review APPROVED at re-review 2; D-0268; committed and fast-forwarded into local main by owner authorization)
 
 | ID | Acceptance criterion | Status | Evidence |
 | --- | --- | --- | --- |

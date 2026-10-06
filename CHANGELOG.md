@@ -4,6 +4,23 @@ All notable changes to **cerbix** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.6] - 2026-10-06
+
+### 🔒 Security
+
+- **Frontend dependencies patched.** `vue` 3.5.43 fixes GHSA-g2v6-rqmx-r4w6 in `@vue/server-renderer` (XSS through an attribute name containing a carriage return) and `source-map-js` 1.2.2 fixes GHSA-68fv-2mgg-jv7q (event-loop denial of service); both were flagged as high by `npm audit` on v0.3.5's dependencies. The embedded SPA is rebuilt with them.
+- **`google.golang.org/grpc` 1.83.2.** Clears GO-2026-6443 (in an imported package; govulncheck finds no call path from cerbix).
+
+### 🩹 Fixed
+
+- **The Security workflow scans again.** `govulncheck` is pinned to v1.7.0, the newest release that runs on the repository's Go 1.25 toolchain; `@latest` (v1.8.0) needs Go 1.26 and had stopped installing, so nothing was being scanned. Three `golang.org/x/crypto` advisories (GO-2026-6355, GO-2026-6354, GO-2026-5932) remain until the Go 1.26 upgrade; govulncheck reports none of them as called.
+
+### Upgrade notes
+
+- No schema migration, no configuration change.
+
+---
+
 ## [v0.3.5] - 2026-10-06
 
 ### ✨ Added

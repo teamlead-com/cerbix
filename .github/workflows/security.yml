@@ -20,7 +20,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      # Pinned, not @latest: govulncheck v1.8.0 requires Go 1.26 and this workflow builds with the
+      # go.mod toolchain (Go 1.25, GOTOOLCHAIN=local), so @latest failed to install and the nightly
+      # gate went red without scanning anything (iter-0200). v1.7.0 is the newest release that runs
+      # on Go 1.25; bump it together with the Go toolchain. The vulnerability DATABASE is still
+      # fetched live, so a pinned scanner keeps seeing new advisories.
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
       - run: govulncheck ./...
 
   gitleaks:

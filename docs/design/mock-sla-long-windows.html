@@ -1,0 +1,371 @@
+<title>Cerbix SLA Long Windows</title>
+
+<style>
+/* Tokens VERBATIM from frontend/src/style.css (the block every approved mock carries). This change
+   adds NO new colour. "since <date>" is a statement about how much history the number covers, not
+   a health state, so it speaks in --ink-2 on --inset and never borrows a status colour. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --focus:#7d79ff;
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+/* Layout: one column of three surfaces as they ship (monitor detail SLA cards, SLA page table,
+   public status page row); each pairs a COMPLETE example with an INCOMPLETE one. */
+*{box-sizing:border-box}
+body{margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.wrap{max-width:1040px; margin:0 auto; padding-inline:16px; padding-block:28px 48px; display:flex; flex-direction:column; gap:28px}
+h1{margin:0; font-size:19px; font-weight:600; letter-spacing:-.01em; text-wrap:balance}
+.lede{margin:6px 0 0; max-width:68ch; color:var(--ink-2)}
+section > header{display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 12px; margin-bottom:10px}
+section > header h2{margin:0; font-size:13.5px; font-weight:600}
+section > header .where{font-size:12px; color:var(--ink-3)}
+section > header .where code{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; color:var(--ink-2)}
+.note{margin:10px 0 0; padding:9px 12px; border:1px solid var(--note-border); border-radius:5px; background:var(--note-bg); color:var(--ink-2); font-size:12.5px; max-width:80ch}
+.note b{color:var(--ink)}
+.card{border:1px solid var(--border); border-radius:6px; background:var(--surface); box-shadow:var(--shadow)}
+.label{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+.since{display:inline-flex; align-items:center; gap:4px; padding:1px 7px; border-radius:999px; background:var(--inset);
+  font-family:ui-monospace,Menlo,Consolas,monospace; font-size:10.5px; color:var(--ink-2); white-space:nowrap}
+.since::before{content:""; width:5px; height:5px; border-radius:50%; border:1px solid var(--ink-3)}
+.latnote{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; color:var(--ink-3)}
+.pill{margin-left:auto; padding:1px 7px; border-radius:999px; font-size:10.5px; font-weight:600}
+.pill.met{background:var(--up-weak); color:var(--up)}
+.meter{height:6px; overflow:hidden; border-radius:999px; background:var(--inset)}
+.meter i{display:block; height:100%; border-radius:999px; background:var(--up)}
+
+/* (1) monitor detail SLA cards */
+.monitor{display:flex; flex-direction:column; gap:8px}
+.monitor .mname{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:13px; font-weight:600}
+.monitor .mname span{font-weight:400; color:var(--ink-3)}
+.cards{display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px}
+.wcard{padding:14px; display:flex; flex-direction:column; gap:9px; min-width:0}
+.wcard.slo{border-color:var(--accent); box-shadow:0 0 0 1px var(--accent-weak)}
+.wcard .top{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+.wcard .num{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:24px; font-weight:500; line-height:1; letter-spacing:-.02em; font-variant-numeric:tabular-nums}
+.wcard .num small{font-size:13px; color:var(--ink-3)}
+.wcard .sub{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.5px; color:var(--ink-3); font-variant-numeric:tabular-nums}
+@media (max-width:900px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* (2) SLA page table */
+.tbl{overflow-x:auto}
+table{width:100%; border-collapse:collapse; font-size:13px; min-width:620px}
+th{padding:10px 14px; text-align:left; background:var(--surface-2); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); border-bottom:1px solid var(--border); font-weight:600}
+td{padding:11px 14px; border-bottom:1px solid var(--border); vertical-align:middle}
+tr:last-child td{border-bottom:0}
+td.r, th.r{text-align:right}
+td .sli{display:inline-flex; flex-direction:column; align-items:flex-end; gap:3px}
+td .sli b{font-family:ui-monospace,Menlo,Consolas,monospace; font-weight:600; font-variant-numeric:tabular-nums}
+.type{display:inline-block; margin-left:6px; padding:1px 4px; border:1px solid var(--border); border-radius:3px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:9.5px; text-transform:uppercase; color:var(--ink-3)}
+.seg{display:inline-flex; border:1px solid var(--border); border-radius:5px; overflow:hidden; font-size:12px}
+.seg span{padding:4px 10px; color:var(--ink-2); background:var(--surface)}
+.seg span.on{background:var(--surface-2); color:var(--ink); font-weight:500}
+.bar{display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--border)}
+
+/* (3) public status page */
+.page{padding:18px; display:flex; flex-direction:column; gap:18px}
+.comp{display:flex; flex-direction:column; gap:7px}
+.comp .head{display:flex; align-items:center; gap:8px}
+.comp .head b{font-weight:600}
+.comp .head .op{margin-left:auto; font-size:12px; color:var(--up)}
+.strip{display:flex; gap:2px; height:28px}
+.strip i{flex:1; min-width:0; border-radius:2px; background:var(--up)}
+.strip i.none{background:var(--inset)}
+.strip i.deg{background:var(--degraded)}
+.foot{display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.5px; color:var(--ink-3)}
+.foot b{color:var(--ink-2); font-weight:600}
+.foot .mid{display:inline-flex; align-items:center; gap:6px}
+</style>
+
+<div class="wrap">
+  <div>
+    <h1>SLA windows longer than raw retention</h1>
+    <p class="lede">iter-0199 · BUG-0198-7. A 90-day number is now computed from daily rollups plus recent raw checks, so it covers 90 days. When a monitor is younger than the window, the number is still shown, with the date its data starts. Every example below uses a 30-day raw retention, the default.</p>
+  </div>
+
+  <section>
+    <header><h2>1 · Monitor detail — SLA windows</h2><span class="where"><code>MonitorDetailView.vue</code>, SLA cards</span></header>
+    <div class="monitor">
+      <div class="mname">checkout-http <span>· monitored since March, full history</span></div>
+      <div class="cards">
+        <div class="card wcard"><div class="top"><span class="label">24h</span></div><div class="num">100.00<small>%</small></div><div class="sub">1440 / 1440 up</div><div class="meter"><i style="width:100%"></i></div></div>
+        <div class="card wcard"><div class="top"><span class="label">7d</span></div><div class="num">99.99<small>%</small></div><div class="sub">10079 / 10080 up</div><div class="meter"><i style="width:100%"></i></div></div>
+        <div class="card wcard slo"><div class="top"><span class="label">30d · SLO</span><span class="pill met">met</span></div><div class="num">99.97<small>%</small></div><div class="sub">69% budget left</div><div class="meter"><i style="width:69%"></i></div></div>
+        <div class="card wcard"><div class="top"><span class="label">90d</span></div><div class="num">99.95<small>%</small></div><div class="sub">129535 / 129600 up</div><div class="latnote">latency since 06.09.2026 UTC</div><div class="meter"><i style="width:100%"></i></div></div>
+      </div>
+      <p class="note"><b>Complete window, no marker.</b> The 90d number is a full 90 days: days older than raw retention come from the daily rollup. Latency (avg, p95) cannot come from a rollup, so where the window leans on one, the card says the day latency starts (here: the first retained raw day).</p>
+    </div>
+    <div class="monitor" style="margin-top:18px">
+      <div class="mname">payments-webhook <span>· created 24.08.2026</span></div>
+      <div class="cards">
+        <div class="card wcard"><div class="top"><span class="label">24h</span></div><div class="num">100.00<small>%</small></div><div class="sub">1440 / 1440 up</div><div class="meter"><i style="width:100%"></i></div></div>
+        <div class="card wcard"><div class="top"><span class="label">7d</span></div><div class="num">100.00<small>%</small></div><div class="sub">10080 / 10080 up</div><div class="meter"><i style="width:100%"></i></div></div>
+        <div class="card wcard slo"><div class="top"><span class="label">30d · SLO</span><span class="pill met">met</span></div><div class="num">99.98<small>%</small></div><div class="sub">80% budget left</div><div class="meter"><i style="width:80%"></i></div></div>
+        <div class="card wcard"><div class="top"><span class="label">90d</span><span class="since" title="This monitor's data starts 24.08.2026 UTC; the 90-day window reaches further back.">since 24.08.2026 UTC</span></div><div class="num">99.98<small>%</small></div><div class="sub">61910 / 61920 up</div><div class="meter"><i style="width:100%"></i></div></div>
+      </div>
+      <p class="note"><b>Incomplete window, marked.</b> The monitor is 43 days old. The 90d card shows the number for the 43 days that exist and says where they start. It is never presented as 90 days.</p>
+    </div>
+  </section>
+
+  <section>
+    <header><h2>2 · SLA page — monitors table, 90d selected</h2><span class="where"><code>SlaView.vue</code>, SLI column</span></header>
+    <div class="card">
+      <div class="bar"><span class="label">Window</span><div class="seg"><span>24h</span><span>7d</span><span>30d</span><span class="on">90d</span></div></div>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Monitor</th><th>SLO</th><th class="r">SLI · 90d</th><th class="r">Burn</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr><td><span class="mono" style="font-weight:600">checkout-http</span><span class="type">http</span></td><td class="mono" style="color:var(--ink-3)">99.9%</td><td class="r"><span class="sli"><b>99.95%</b></span></td><td class="r mono">0.5×</td><td><span class="pill met" style="margin:0">Meeting</span></td></tr>
+            <tr><td><span class="mono" style="font-weight:600">payments-webhook</span><span class="type">push</span></td><td class="mono" style="color:var(--ink-3)">99.9%</td><td class="r"><span class="sli"><b>99.98%</b><span class="since" title="This monitor's data starts 24.08.2026 UTC; the 90-day window reaches further back.">since 24.08.2026 UTC</span></span></td><td class="r mono">0.2×</td><td><span class="pill met" style="margin:0">Meeting</span></td></tr>
+            <tr><td><span class="mono" style="font-weight:600">search-api</span><span class="type">http</span></td><td class="mono" style="color:var(--ink-3)">—</td><td class="r"><span class="sli"><b>99.91%</b></span></td><td class="r mono">—</td><td><span class="mono" style="color:var(--ink-3)">No SLO</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <p class="note"><b>Same marker, placed under the number</b>, so the column stays aligned. The project summary cards above the table use the project's own <code class="mono">data_from</code>: the marker appears there only when the whole project is younger than the window.</p>
+  </section>
+
+  <section>
+    <header><h2>3 · Public status page — component row</h2><span class="where"><code>PublicStatusView.vue</code>, 90-day strip</span></header>
+    <div class="card page">
+      <div class="comp">
+        <div class="head"><b>Checkout</b><span class="op">Operational</span></div>
+        <div class="strip" aria-hidden="true">
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i class="deg"></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+        </div>
+        <div class="foot"><span>90 days ago</span><span class="mid"><span><b>99.95%</b> uptime</span></span><span>today</span></div>
+      </div>
+      <div class="comp">
+        <div class="head"><b>Payments webhooks</b><span class="op">Operational</span></div>
+        <div class="strip" aria-hidden="true">
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i class="none"></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+          <i></i>
+                  <i></i>
+        </div>
+        <div class="foot"><span>90 days ago</span><span class="mid"><span><b>99.98%</b> uptime</span><span class="since">since 24.08.2026 UTC</span></span><span>today</span></div>
+      </div>
+    </div>
+    <p class="note"><b>Public, by design.</b> The day strip already showed empty days for a young component, while the number below it claimed 90 days. The marker makes the number agree with the strip. API: <code class="mono">uptime_since</code> on the component, present only when the window is incomplete.</p>
+  </section>
+</div>

@@ -527,3 +527,68 @@ describe("SlaView budget left (iter-0198)", () => {
     expect(wrapper.text()).toMatch(/Budget remaining\s*100\s*%/);
   });
 });
+
+// iter-0199 / D-0268: on the SLA page an incomplete window carries "since <day> UTC" under its number
+// (monitors table, selected window) and on the project's composite card.
+describe("SlaView incomplete windows (iter-0199)", () => {
+  beforeEach(() => {
+    for (const method of Object.values(apiMock)) method.mockReset();
+  });
+
+  it("marks the selected window of a young monitor and a young project", async () => {
+    const win = (window: string, extra: Record<string, unknown> = {}) => ({
+      window, total: 1000, up: 1000, uptime_percent: 100, avg_latency_ms: 5, p95_latency_ms: 9, ...extra,
+    });
+    apiMock.GET.mockImplementation(async (path: string, options: { params: { path: { monitorID?: string } } }) => {
+      if (path === "/api/v1/projects/{projectID}/monitors")
+        return {
+          data: [
+            { id: "mon-old", name: "checkout-http", type: "http", project_id: "project-a" },
+            { id: "mon-young", name: "payments-webhook", type: "push", project_id: "project-a" },
+          ],
+        };
+      if (path === "/api/v1/monitors/{monitorID}/sla") {
+        const young = options.params.path.monitorID === "mon-young";
+        return {
+          data: {
+            monitor_id: options.params.path.monitorID,
+            windows: ["24h", "7d", "30d", "90d"].map((n) =>
+              win(n, young && n === "90d" ? { data_from: "2026-08-24T00:00:00Z" } : {}),
+            ),
+          },
+        };
+      }
+      if (path === "/api/v1/projects/{projectID}/sla")
+        return {
+          data: {
+            project_id: "project-a",
+            windows: [win("24h"), win("7d"), win("30d", { data_from: "2026-09-20T00:00:00Z" }), win("90d")],
+          },
+        };
+      return { data: [] };
+    });
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const ws = useWorkspace();
+    ws.orgId = "org-a";
+    ws.projectId = "project-a";
+    ws.loaded = true;
+    const session = useSession();
+    session.user = { id: "user-a", is_global_admin: true } as typeof session.user;
+    const wrapper = mount(SlaView, {
+      global: { plugins: [pinia], stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+
+    // The project composite card is 30d: the project's own data_from.
+    expect(wrapper.find('[data-testid="project-window-since"]').text()).toBe("since 20.09.2026 UTC");
+
+    const tab = wrapper.findAll("button").find((b) => b.text() === "90d");
+    expect(tab, "the 90d window tab").toBeTruthy();
+    await tab!.trigger("click");
+    const row = (name: string) => wrapper.findAll("tr").find((tr) => tr.text().includes(name))!;
+    expect(row("payments-webhook").find('[data-testid="window-since"]').text()).toBe("since 24.08.2026 UTC");
+    expect(row("checkout-http").find('[data-testid="window-since"]').exists()).toBe(false);
+  });
+});

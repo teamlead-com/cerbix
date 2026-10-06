@@ -12,17 +12,22 @@ import (
 )
 
 type windowSLA struct {
-	Window        string            `json:"window"`
-	Total         int64             `json:"total"`
-	Up            int64             `json:"up"`
-	UptimePercent float64           `json:"uptime_percent"`
-	AvgLatencyMS  float64           `json:"avg_latency_ms"`
-	P95LatencyMS  float64           `json:"p95_latency_ms"`
-	Objective     *float64          `json:"objective,omitempty"`
-	Budget        *sla.Budget       `json:"error_budget,omitempty"`
-	BurnAlert     bool              `json:"burn_alert,omitempty"`
-	BurnFiring    bool              `json:"burn_firing,omitempty"` // any rule latched firing
-	BurnRules     []domain.BurnRule `json:"burn_rules,omitempty"`
+	Window        string  `json:"window"`
+	Total         int64   `json:"total"`
+	Up            int64   `json:"up"`
+	UptimePercent float64 `json:"uptime_percent"`
+	AvgLatencyMS  float64 `json:"avg_latency_ms"`
+	P95LatencyMS  float64 `json:"p95_latency_ms"`
+	// DataFrom is the UTC day this window's data starts, present only when the window is
+	// incomplete (no data older than its start); LatencyFrom the UTC day the latency aggregates
+	// start, present only when later than availability's (D-0268, func-sla-sli.md).
+	DataFrom    *time.Time        `json:"data_from,omitempty"`
+	LatencyFrom *time.Time        `json:"latency_from,omitempty"`
+	Objective   *float64          `json:"objective,omitempty"`
+	Budget      *sla.Budget       `json:"error_budget,omitempty"`
+	BurnAlert   bool              `json:"burn_alert,omitempty"`
+	BurnFiring  bool              `json:"burn_firing,omitempty"` // any rule latched firing
+	BurnRules   []domain.BurnRule `json:"burn_rules,omitempty"`
 }
 
 // monitorSLA reports SLI per standard window, with the SLO error budget where a
@@ -43,6 +48,7 @@ func (h *Handler) monitorSLA(w http.ResponseWriter, r *http.Request) {
 		ws := windowSLA{
 			Window: win.Name, Total: c.Total, Up: c.Up,
 			UptimePercent: sla.Uptime(c.Up, c.Total), AvgLatencyMS: c.AvgLatencyMS, P95LatencyMS: c.P95LatencyMS,
+			DataFrom: c.DataFrom, LatencyFrom: c.LatencyFrom,
 		}
 		if target, err := h.store.GetMonitorSLATarget(r.Context(), mon.ID, win.Name); err == nil {
 			obj := target.Objective
@@ -133,6 +139,7 @@ func (h *Handler) projectSLA(w http.ResponseWriter, r *http.Request) {
 		ws := windowSLA{
 			Window: win.Name, Total: c.Total, Up: c.Up,
 			UptimePercent: sla.Uptime(c.Up, c.Total), AvgLatencyMS: c.AvgLatencyMS, P95LatencyMS: c.P95LatencyMS,
+			DataFrom: c.DataFrom, LatencyFrom: c.LatencyFrom,
 		}
 		// A project objective is REPORTING ONLY (iter-0155): state it and the budget it produces when
 		// the project has one, and say nothing when it does not. The burn fields stay absent because

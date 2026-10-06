@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
+import SinceChip from "@/components/SinceChip.vue";
 import StatusPill from "@/components/StatusPill.vue";
 import { useLive } from "@/stores/live";
 import { useSession } from "@/stores/session";
@@ -1009,12 +1010,14 @@ watch(
           class="flex flex-col gap-[9px] rounded border bg-surface p-[14px] shadow-card"
           :class="w.window === '30d' ? 'border-accent shadow-[0_0_0_1px_var(--accent-weak)]' : 'border-border'"
         >
-          <div class="flex items-center gap-2">
+          <div class="flex flex-wrap items-center gap-2">
             <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">{{ w.window }}<span v-if="w.window === '30d' && w.objective"> · SLO</span></span>
+            <SinceChip v-if="w.data_from" :day="w.data_from" :window="w.window" data-testid="window-since" />
             <span v-if="w.error_budget" class="ml-auto rounded-full px-[7px] py-px text-[10.5px] font-semibold" :class="w.error_budget.met ? 'bg-up-weak text-up' : 'bg-down-weak text-down'">{{ w.error_budget.met ? "met" : "breach" }}</span>
           </div>
           <div class="font-mono text-[24px] font-medium leading-none tracking-tight tnum">{{ (w.uptime_percent ?? 0).toFixed(2) }}<span class="text-[13px] text-ink-3">%</span></div>
           <div class="font-mono text-[11.5px] text-ink-3 tnum">{{ windowSub(w) }}</div>
+          <div v-if="w.latency_from" class="font-mono text-[11px] text-ink-3" data-testid="window-latency-since">latency since {{ utcDayLabel(w.latency_from) }}</div>
           <div class="h-[6px] overflow-hidden rounded-full bg-inset">
             <i class="block h-full rounded-full" :class="budgetMeter(w).cls" :style="{ width: budgetMeter(w).width + '%' }"></i>
           </div>

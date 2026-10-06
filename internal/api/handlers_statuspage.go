@@ -370,6 +370,10 @@ type componentView struct {
 	// because a missing number without its reason is indistinguishable from a number nobody
 	// bothered to compute (§11.2/§11.3).
 	UptimeWithheld string `json:"withheld_reason,omitempty"`
+	// UptimeSince is the UTC day `uptime_90d`'s data starts when the 90-day window is incomplete.
+	// PUBLIC, for the same reason as `withheld_reason`: a number that names a window must not
+	// claim more history than it has (D-0268).
+	UptimeSince *time.Time `json:"uptime_since,omitempty"`
 }
 
 type statusPageRender struct {
@@ -597,6 +601,7 @@ func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, 
 		// one; `source` and `reason` stay authenticated, because those describe internal wiring.
 		view.Unavailable = res.Unavailable
 		view.UptimeWithheld = res.UptimeWithheld
+		view.UptimeSince = res.UptimeSince
 		if !public {
 			view.Source = c.Source
 			view.Reason = res.Reason

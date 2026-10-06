@@ -41,9 +41,14 @@ type Delegation = {
   burn: { delegated: boolean; owners?: { id: string; slug: string; name: string }[]; reason?: string };
 };
 
-function mountWith(delegation?: Delegation, monitorOverrides: Record<string, unknown> = {}) {
+function mountWith(
+  delegation?: Delegation,
+  monitorOverrides: Record<string, unknown> = {},
+  routes: Record<string, unknown> = {},
+) {
   apiMock.GET.mockReset();
   apiMock.GET.mockImplementation(async (path: string) => {
+    if (path in routes) return { data: routes[path] };
     if (path === "/api/v1/monitors/{monitorID}") {
       return {
         data: {
@@ -169,5 +174,32 @@ describe("MonitorDetailView successor picker", () => {
     expect(real).toHaveLength(1);
     expect(real[0].attributes("value")).toBe("svc1");
     expect(real[0].text()).toBe("Checkout");
+  });
+});
+
+// iter-0199 / D-0268, against the approved mock (docs/design/mock-sla-long-windows.html): a window the
+// API reports as incomplete says where its data starts, and a window whose latency starts later than
+// its availability says that too. Complete windows carry neither.
+describe("SLA windows longer than raw retention", () => {
+  it("marks an incomplete window with its start day, and late latency with its own", async () => {
+    const w = mountWith(undefined, {}, {
+      "/api/v1/monitors/{monitorID}/sla": {
+        monitor_id: "mon1",
+        windows: [
+          { window: "24h", total: 1440, up: 1440, uptime_percent: 100 },
+          { window: "7d", total: 10080, up: 10080, uptime_percent: 100 },
+          { window: "30d", total: 43200, up: 43190, uptime_percent: 99.98 },
+          {
+            window: "90d", total: 61920, up: 61910, uptime_percent: 99.98,
+            data_from: "2026-08-24T00:00:00Z", latency_from: "2026-09-06T00:00:00Z",
+          },
+        ],
+      },
+    });
+    await flushPromises();
+    const since = w.findAll('[data-testid="window-since"]');
+    expect(since.map((e) => e.text())).toEqual(["since 24.08.2026 UTC"]);
+    const latency = w.findAll('[data-testid="window-latency-since"]');
+    expect(latency.map((e) => e.text())).toEqual(["latency since 06.09.2026 UTC"]);
   });
 });

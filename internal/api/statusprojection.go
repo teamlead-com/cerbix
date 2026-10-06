@@ -32,7 +32,8 @@ import (
 // COST: both halves are batched, so the whole page is a FIXED number of statements ([314] P1-3).
 // Service components go through one page-scoped snapshot over (project, service) pairs — an
 // org-level page spans projects, so a per-project batch was never one snapshot — and monitor
-// components through three set-wise reads.
+// components through three set-wise reads (identity, the 90-day aggregate whose raw and rollup
+// parts share one statement — D-0268 — and the day strips).
 
 // publicComponentHardCeiling is the absolute fail-closed bound on an unauthenticated render
 // (§15.0, invariant 71b). The per-page ceiling in `status_pages.component_ceiling` can only
@@ -52,7 +53,10 @@ type componentResolution struct {
 	// to be quoted; UptimeWithheld names the reason when it cannot.
 	Uptime90d      *float64
 	UptimeWithheld string
-	Daily          []dayPoint
+	// UptimeSince is the UTC day Uptime90d's data starts when the 90-day window is incomplete
+	// (a monitor younger than the window, D-0268); nil otherwise.
+	UptimeSince *time.Time
+	Daily       []dayPoint
 	// Unavailable marks a component the resolver could not EVALUATE because a read failed (not
 	// because measurement is absent). Invariant 71a: this must not be published as the calm
 	// statement `no_data`, so unlike `Reason` it DOES reach the public payload — it says only that
@@ -156,6 +160,7 @@ func (h *Handler) resolveComponents(
 			res.Project = p.ProjectID
 			if withHistory {
 				res.Uptime90d = p.Uptime
+				res.UptimeSince = p.UptimeSince
 				if p.Uptime == nil {
 					res.UptimeWithheld = domain.ServiceReportReasonNothingMeasured
 				}

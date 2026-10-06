@@ -8887,3 +8887,39 @@ WORKED: a short window is quotable while the seal lag stays under it, and a heal
 quotable under a healthy materializer (review measured OK for every lag 120–179 s). 300 s is a chosen
 headroom (two buckets over the healthy lag, the gate's own floor), not the boundary of what can
 work; the price is that an operator re-saving such a working rule must widen it.
+
+## D-0268 — SLI windows longer than raw retention read the daily rollup and state their coverage (2026-10-06)
+
+**Context.** BUG-0198-7: every SLI window was a raw aggregate over `heartbeats`, whose retention is
+`heartbeats.retention_days` (default 30, minimum 2). The default 90d window — and any window longer
+than a lowered retention, including the weekly report's 7d/30d — silently covered only the retained
+days, with no completeness signal, on the monitor and project SLA endpoints, the public status page's
+90-day uptime of a monitor-backed component, and the weekly SLA report. `func-sla-sli.md` already
+said the frozen `heartbeats_daily` rows remain for long windows; no read used them.
+
+**Decision.** Availability of a window is every raw heartbeat in it plus, from the rollup, the whole
+UTC days of the window that hold no raw heartbeat of that monitor — the days before the UTC day of
+its earliest retained heartbeat (exact rule in `func-sla-sli.md`, *Windows longer than raw
+retention*). The earliest raw heartbeat is not treated as a retention boundary, so raw days the
+rollup has not reached are never dropped. A window with no data older than its start — raw at or
+before it, or a rollup day strictly before its start day — is incomplete and states `data_from`; its
+number is still returned (owner decision 2026-10-06: show the number with its start date rather
+than withhold it). The monitor burn-rate long window uses the same computation (review: a 7-day
+long window over a 2-day retention paged on raw-only counts the full window never reached). Each
+reader takes its raw aggregate and its rollup part from ONE statement, so a concurrent purge cannot
+make a day count in both (re-review: a two-statement read counted a purged day twice).
+Latency stays raw and states `latency_from` when it starts later than availability. The public
+status page carries `uptime_since`. The UI marks an incomplete window "since <date> UTC" per the
+approved mock `docs/design/mock-sla-long-windows.html`.
+
+**Not decided here.** Detecting days the rollup never produced (indistinguishable from days without
+checks), and a coverage field in the weekly report payload. Both are stated as limitations in the
+spec.
+
+**Consequences.** No migration, no new table, no new configuration. Windows that raw heartbeats
+cover are counted exactly as before. A rollup-backed window is up to 24 hours shorter than its name
+(the partial first UTC day is not counted). **Cost:** every read now probes each scope monitor's
+earliest raw heartbeat. On TimescaleDB and on small scopes that is near base; on plain PostgreSQL the
+probe touches every daily partition's index, and the review measured a 500-monitor project's four SLA
+windows at 2.07–2.49 s against 1.06–1.13 s on the base (status-page projection 2.41–2.53 s against
+2.14–2.20 s). Accepted for this bugfix; reducing it (e.g. a bounded probe) would be a separate change.

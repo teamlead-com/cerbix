@@ -4,6 +4,7 @@ import { api } from "@/api/client";
 import { canonicalObjective } from "@/lib/objective";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
+import SinceChip from "@/components/SinceChip.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import { instantLabelShort, localInputZoneHint } from "@/lib/wallclock";
@@ -246,6 +247,8 @@ function objFmt(v?: number | null): string {
 // ---- 30-day roll-up KPIs (fixed window, per the page header) -------------
 const sloRows = computed(() => rows.value.filter((r) => w30(r)?.error_budget));
 const composite30 = computed(() => projectWindows.value.find((w) => w.window === "30d")?.uptime_percent);
+// The project's own coverage of that 30d window (D-0268): set only when the project is younger.
+const composite30Since = computed(() => projectWindows.value.find((w) => w.window === "30d")?.data_from);
 const metCount = computed(() => sloRows.value.filter((r) => w30(r)!.error_budget!.met).length);
 const breachCount = computed(() => sloRows.value.filter((r) => !w30(r)!.error_budget!.met).length);
 const budgetRemainingAvg = computed(() => {
@@ -692,6 +695,7 @@ watch(() => ws.projectId, () => {
               <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Composite availability · 30d</span>
               <span class="font-mono text-[24px] font-medium leading-none tracking-tight tnum">{{ composite30 !== undefined ? composite30.toFixed(2) : "—" }}<small class="text-[13px] text-ink-3">%</small></span>
               <span class="text-[12px] text-ink-3">across {{ sloRows.length }} SLO monitor{{ sloRows.length === 1 ? "" : "s" }}</span>
+              <SinceChip v-if="composite30Since" :day="composite30Since" window="30d" class="self-start" data-testid="project-window-since" />
             </div>
             <div class="flex flex-col gap-[7px] rounded border border-border bg-surface p-[14px] shadow-card">
               <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Meeting SLO</span>
@@ -897,7 +901,12 @@ watch(() => ws.projectId, () => {
                   <span v-else class="font-mono text-[13px] text-ink-3">{{ objFmt(w30(r)?.objective) }}</span>
                 </td>
                 <!-- SLI (selected window) -->
-                <td class="border-b border-border px-[14px] py-[11px] text-right font-mono font-semibold tnum">{{ pct2(activeWin(r)?.uptime_percent) }}</td>
+                <td class="border-b border-border px-[14px] py-[11px] text-right font-mono font-semibold tnum">
+                  <span class="inline-flex flex-col items-end gap-[3px]">
+                    <span>{{ pct2(activeWin(r)?.uptime_percent) }}</span>
+                    <SinceChip v-if="activeWin(r)?.data_from" :day="activeWin(r)!.data_from!" :window="selectedWindow" class="font-normal" data-testid="window-since" />
+                  </span>
+                </td>
                 <!-- Error budget meter -->
                 <td class="border-b border-border px-[14px] py-[11px]">
                   <div v-if="budgetMeter(activeWin(r)?.error_budget)" class="flex items-center justify-end gap-[9px]">

@@ -19,31 +19,53 @@ type SLICounts struct {
 	Up           int64
 	AvgLatencyMS float64
 	P95LatencyMS float64
+	// DataFrom is the UTC day the counted data starts when the window is INCOMPLETE — no data
+	// older than the window exists in its scope — and nil when it is complete (D-0268).
+	DataFrom *time.Time
+	// LatencyFrom is the UTC day the raw latency aggregates start, set only when that is later
+	// than the first day availability covers (availability can reach back through the daily
+	// rollup; latency cannot).
+	LatencyFrom *time.Time
 }
 
 // MonitorSLI aggregates a monitor's heartbeats since `since`, excluding any that
 // fall inside a maintenance window covering the monitor (monitor-scoped or its
-// project-scoped windows).
+// project-scoped windows). Availability reaches back through the daily rollup when the
+// window is longer than raw retention; latency stays raw (D-0268). Raw aggregate and rollup
+// part are ONE statement — one snapshot (see slawindow.go).
 func (s *Store) MonitorSLI(ctx context.Context, monitorID string, since time.Time) (SLICounts, error) {
 	var c SLICounts
+	var firstRaw, firstRollup *time.Time
+	var rollTotal, rollUp int64
+	var complete bool
+	ceil, day, today := windowDays(since)
 	err := s.pool.QueryRow(ctx,
-		`SELECT count(*)::bigint,
-		        count(*) FILTER (WHERE h.up)::bigint,
-		        COALESCE(avg(h.latency_ms) FILTER (WHERE h.up), 0)::float8,
-		        COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY h.latency_ms) FILTER (WHERE h.up), 0)::float8
-		 FROM heartbeats h
-		 WHERE h.monitor_id = $1 AND h.ts >= $2
-		 AND NOT EXISTS (
-		     SELECT 1 FROM maintenance_windows mw
-		     WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
-		       AND (mw.monitor_id = $1
-		            OR (mw.monitor_id IS NULL
-		                AND mw.project_id = (SELECT project_id FROM monitors WHERE id = $1)))
-		 )`,
-		monitorID, since).Scan(&c.Total, &c.Up, &c.AvgLatencyMS, &c.P95LatencyMS)
+		`WITH scope AS (SELECT $1::uuid AS id), `+windowRollupCTEs(2, 3, 4, 5)+`,
+		 raw AS (
+		     SELECT count(*)::bigint AS total,
+		            count(*) FILTER (WHERE h.up)::bigint AS up,
+		            COALESCE(avg(h.latency_ms) FILTER (WHERE h.up), 0)::float8 AS avg_ms,
+		            COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY h.latency_ms) FILTER (WHERE h.up), 0)::float8 AS p95_ms,
+		            min(h.ts) AS first_ts
+		       FROM heartbeats h
+		      WHERE h.monitor_id = $1 AND h.ts >= $2
+		        AND NOT EXISTS (
+		            SELECT 1 FROM maintenance_windows mw
+		             WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
+		               AND (mw.monitor_id = $1
+		                    OR (mw.monitor_id IS NULL
+		                        AND mw.project_id = (SELECT project_id FROM monitors WHERE id = $1)))
+		        )
+		 )
+		 SELECT raw.total, raw.up, raw.avg_ms, raw.p95_ms, raw.first_ts, `+scopeRollupColumns+`
+		   FROM raw`,
+		monitorID, since, ceil, day, today).Scan(&c.Total, &c.Up, &c.AvgLatencyMS, &c.P95LatencyMS, &firstRaw,
+		&rollTotal, &rollUp, &firstRollup, &complete)
 	if err != nil {
 		return SLICounts{}, fmt.Errorf("store: monitor sli: %w", err)
 	}
+	c.Total, c.Up, c.DataFrom, c.LatencyFrom = windowCoverage(
+		newRollupPart(rollTotal, rollUp, firstRollup, complete), c.Total, c.Up, firstRaw)
 	return c, nil
 }
 
@@ -58,30 +80,41 @@ func (s *Store) ProjectSLI(ctx context.Context, projectID string, since time.Tim
 // EnqueueDueSLAReports compute SLIs WITHOUT acquiring a second pooled connection
 // while already holding one — the nested acquire could self-deadlock once the pool
 // is saturated (leader lock + notifiers + concurrent requests).
-type sliQuerier interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
+type sliQuerier = windowQuerier
 
 func projectSLI(ctx context.Context, q sliQuerier, projectID string, since time.Time) (SLICounts, error) {
 	var c SLICounts
+	var firstRaw, firstRollup *time.Time
+	var rollTotal, rollUp int64
+	var complete bool
+	ceil, day, today := windowDays(since)
 	err := q.QueryRow(ctx,
-		`SELECT count(*)::bigint,
-		        count(*) FILTER (WHERE h.up)::bigint,
-		        COALESCE(avg(h.latency_ms) FILTER (WHERE h.up), 0)::float8,
-		        COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY h.latency_ms) FILTER (WHERE h.up), 0)::float8
-		 FROM heartbeats h
-		 JOIN monitors m ON m.id = h.monitor_id
-		 WHERE m.project_id = $1 AND h.ts >= $2
-		 AND NOT EXISTS (
-		     SELECT 1 FROM maintenance_windows mw
-		     WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
-		       AND (mw.monitor_id = h.monitor_id
-		            OR (mw.monitor_id IS NULL AND mw.project_id = $1))
-		 )`,
-		projectID, since).Scan(&c.Total, &c.Up, &c.AvgLatencyMS, &c.P95LatencyMS)
+		`WITH scope AS (SELECT id FROM monitors WHERE project_id = $1), `+windowRollupCTEs(2, 3, 4, 5)+`,
+		 raw AS (
+		     SELECT count(*)::bigint AS total,
+		            count(*) FILTER (WHERE h.up)::bigint AS up,
+		            COALESCE(avg(h.latency_ms) FILTER (WHERE h.up), 0)::float8 AS avg_ms,
+		            COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY h.latency_ms) FILTER (WHERE h.up), 0)::float8 AS p95_ms,
+		            min(h.ts) AS first_ts
+		       FROM heartbeats h
+		       JOIN monitors m ON m.id = h.monitor_id
+		      WHERE m.project_id = $1 AND h.ts >= $2
+		        AND NOT EXISTS (
+		            SELECT 1 FROM maintenance_windows mw
+		             WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
+		               AND (mw.monitor_id = h.monitor_id
+		                    OR (mw.monitor_id IS NULL AND mw.project_id = $1))
+		        )
+		 )
+		 SELECT raw.total, raw.up, raw.avg_ms, raw.p95_ms, raw.first_ts, `+scopeRollupColumns+`
+		   FROM raw`,
+		projectID, since, ceil, day, today).Scan(&c.Total, &c.Up, &c.AvgLatencyMS, &c.P95LatencyMS, &firstRaw,
+		&rollTotal, &rollUp, &firstRollup, &complete)
 	if err != nil {
 		return SLICounts{}, fmt.Errorf("store: project sli: %w", err)
 	}
+	c.Total, c.Up, c.DataFrom, c.LatencyFrom = windowCoverage(
+		newRollupPart(rollTotal, rollUp, firstRollup, complete), c.Total, c.Up, firstRaw)
 	return c, nil
 }
 
@@ -280,23 +313,35 @@ func (s *Store) EvaluateBurnAlerts(ctx context.Context) (fired, resolved int, er
 
 	// burnWindowRate measures the maintenance-excluded burn rate over one window;
 	// ok=false when the window holds no data (no decision, keep the latch).
+	// A window can exceed raw retention (up to 7 days against a 2-day minimum), so it takes the
+	// rollup days the raw heartbeats no longer hold, exactly as the SLA reads do (D-0268), in the
+	// same single statement as its raw counts.
 	burnWindowRate := func(monitorID string, seconds int, objective float64) (float64, bool, error) {
-		var total, up int64
+		var total, up, rollTotal, rollUp int64
+		var firstRollup *time.Time
+		var complete bool
+		since := time.Now().Add(-time.Duration(seconds) * time.Second)
+		ceil, day, today := windowDays(since)
 		err := tx.QueryRow(ctx,
-			`SELECT count(*)::bigint, count(*) FILTER (WHERE h.up)::bigint
-			   FROM heartbeats h
-			  WHERE h.monitor_id = $1 AND h.ts >= now() - make_interval(secs => $2)
-			    AND NOT EXISTS (
-			        SELECT 1 FROM maintenance_windows mw
-			        WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
-			          AND (mw.monitor_id = $1
-			               OR (mw.monitor_id IS NULL
-			                   AND mw.project_id = (SELECT project_id FROM monitors WHERE id = $1)))
-			    )`,
-			monitorID, seconds).Scan(&total, &up)
+			`WITH scope AS (SELECT $1::uuid AS id), `+windowRollupCTEs(2, 3, 4, 5)+`,
+			 raw AS (
+			     SELECT count(*)::bigint AS total, count(*) FILTER (WHERE h.up)::bigint AS up
+			       FROM heartbeats h
+			      WHERE h.monitor_id = $1 AND h.ts >= $2
+			        AND NOT EXISTS (
+			            SELECT 1 FROM maintenance_windows mw
+			            WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
+			              AND (mw.monitor_id = $1
+			                   OR (mw.monitor_id IS NULL
+			                       AND mw.project_id = (SELECT project_id FROM monitors WHERE id = $1)))
+			        )
+			 )
+			 SELECT raw.total, raw.up, `+scopeRollupColumns+` FROM raw`,
+			monitorID, since, ceil, day, today).Scan(&total, &up, &rollTotal, &rollUp, &firstRollup, &complete)
 		if err != nil {
 			return 0, false, fmt.Errorf("store: burn window counts: %w", err)
 		}
+		total, up, _, _ = windowCoverage(newRollupPart(rollTotal, rollUp, firstRollup, complete), total, up, nil)
 		if total == 0 {
 			return 0, false, nil
 		}

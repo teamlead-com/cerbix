@@ -103,11 +103,16 @@ type fakeStore struct {
 	neighbourHealthErr   error
 	neighbourHealthCalls int
 	// FR-021 phase-4 fakes: the status-page projection, the page CAS counter and the strips.
-	projections            map[string]store.ServiceStatusProjection
-	serviceDaily           map[string][]store.ServiceDayPoint
-	serviceUptime          map[string]*float64
-	serviceWithheld        map[string]string
-	monitorUptime          map[string]float64
+	projections     map[string]store.ServiceStatusProjection
+	serviceDaily    map[string][]store.ServiceDayPoint
+	serviceUptime   map[string]*float64
+	serviceWithheld map[string]string
+	monitorUptime   map[string]float64
+	// sliDataFrom / sliLatencyFrom, when set, are the coverage fields every SLI read returns, and
+	// monitorUptimeSince the per-monitor uptime_since of the status-page projection (D-0268).
+	sliDataFrom            *time.Time
+	sliLatencyFrom         *time.Time
+	monitorUptimeSince     map[string]time.Time
 	pageGeneration         map[string]int64
 	projectionCalls        int
 	monitorProjectionCalls int
@@ -627,10 +632,10 @@ func (f *fakeStore) DeleteSessionsByUser(_ context.Context, userID, _ string) (i
 	return 0, nil
 }
 func (f *fakeStore) MonitorSLI(_ context.Context, _ string, _ time.Time) (store.SLICounts, error) {
-	return store.SLICounts{Total: 100, Up: 99, AvgLatencyMS: 12}, nil
+	return store.SLICounts{Total: 100, Up: 99, AvgLatencyMS: 12, DataFrom: f.sliDataFrom, LatencyFrom: f.sliLatencyFrom}, nil
 }
 func (f *fakeStore) ProjectSLI(_ context.Context, _ string, _ time.Time) (store.SLICounts, error) {
-	return store.SLICounts{Total: 200, Up: 198, AvgLatencyMS: 15}, nil
+	return store.SLICounts{Total: 200, Up: 198, AvgLatencyMS: 15, DataFrom: f.sliDataFrom, LatencyFrom: f.sliLatencyFrom}, nil
 }
 func (f *fakeStore) MonitorDailyAvailability(_ context.Context, _ string, _ time.Time) ([]store.DailyAvailability, error) {
 	return []store.DailyAvailability{{Up: 90, Total: 100, UptimePercent: 90}, {Up: 100, Total: 100, UptimePercent: 100}}, nil
@@ -1551,6 +1556,9 @@ func (f *fakeStore) MonitorPageProjections(_ context.Context, monitorIDs []strin
 				u = custom
 			}
 			p.Uptime = &u
+			if since, ok := f.monitorUptimeSince[id]; ok {
+				p.UptimeSince = &since
+			}
 		}
 		out[id] = p
 	}

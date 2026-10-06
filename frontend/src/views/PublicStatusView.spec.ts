@@ -548,3 +548,16 @@ describe("PublicStatusView service-first active incidents", () => {
     ).toHaveLength(0);
   });
 });
+
+// iter-0199 / D-0268: a monitor-backed component younger than the 90-day window states the day its
+// uptime starts, beside the number, as the approved mock shows. Components without it say nothing.
+describe("PublicStatusView uptime_since", () => {
+  it("names the start day of an incomplete 90-day uptime and nothing else", async () => {
+    const render = renderFixture();
+    (render.components[2] as Record<string, unknown>).uptime_since = "2026-08-24T00:00:00Z";
+    const wrapper = await mountView(render);
+    const marks = wrapper.findAll('[data-testid="component-uptime-since"]');
+    expect(marks.map((m) => m.text())).toEqual(["since 24.08.2026 UTC"]);
+    wrapper.unmount();
+  });
+});

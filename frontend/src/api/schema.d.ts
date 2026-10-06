@@ -8462,6 +8462,16 @@ export interface components {
             avg_latency_ms?: number;
             /** Format: double */
             p95_latency_ms?: number;
+            /**
+             * Format: date-time
+             * @description Present only when the window is INCOMPLETE — no data older than its start exists in its scope: the UTC day (midnight) the counted data starts. The numbers are still returned; they cover data_from → now, not the whole window. Windows longer than raw retention read days older than the retained raw heartbeats from the daily rollup (D-0268).
+             */
+            data_from?: string;
+            /**
+             * Format: date-time
+             * @description Present only when the latency aggregates (avg/p95, raw heartbeats only) start on a later UTC day than availability, which can reach back through the daily rollup.
+             */
+            latency_from?: string;
             /** Format: double */
             objective?: number | null;
             error_budget?: components["schemas"]["ErrorBudget"];
@@ -9691,6 +9701,11 @@ export interface components {
             unavailable?: boolean;
             /** @description PUBLIC. Why `uptime_90d` is absent, per §11.2/§11.3: `no_sli`, `nothing_sealed`, `window_precedes_materialization_era`, `storage_gap`, `zero_decidable_time`, `decidable_coverage_below_min`, `spans_definition_revisions`, `nothing_measured`. A missing number without its reason is indistinguishable from one nobody computed. */
             withheld_reason?: string;
+            /**
+             * Format: date-time
+             * @description PUBLIC. Monitor-backed components only: the UTC day (midnight) the data behind `uptime_90d` starts, present only when the monitor has no data older than the 90-day window. A number that names a window must not claim more history than it has (D-0268).
+             */
+            uptime_since?: string;
         };
         StatusPageRender: {
             slug?: string;

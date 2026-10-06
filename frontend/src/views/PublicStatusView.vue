@@ -5,6 +5,7 @@ import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import BrandGlyph from "@/components/BrandGlyph.vue";
 import BrandMark from "@/components/BrandMark.vue";
+import SinceChip from "@/components/SinceChip.vue";
 import { useTheme } from "@/composables/useTheme";
 import {
   componentMeta,
@@ -589,12 +590,20 @@ onMounted(async () => {
                 class="mt-[7px] flex justify-between gap-2 font-mono text-[11.5px] text-ink-3"
               >
                 <span>90 days ago</span>
-                <span v-if="pct(c.uptime_90d)" class="text-center"
-                  ><b class="font-semibold text-ink-2">{{
-                    pct(c.uptime_90d)
-                  }}</b>
-                  uptime</span
-                >
+                <span
+                  v-if="pct(c.uptime_90d)"
+                  class="inline-flex flex-wrap items-center justify-center gap-[6px] text-center"
+                  ><span
+                    ><b class="font-semibold text-ink-2">{{
+                      pct(c.uptime_90d)
+                    }}</b>
+                    uptime</span
+                  ><SinceChip
+                    v-if="c.uptime_since"
+                    :day="c.uptime_since"
+                    window="90-day"
+                    data-testid="component-uptime-since"
+                /></span>
                 <span>today</span>
               </div>
             </div>

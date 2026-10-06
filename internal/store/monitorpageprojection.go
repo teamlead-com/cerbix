@@ -29,10 +29,14 @@ type MonitorPageProjection struct {
 	// Uptime is the 90-day uptime percentage over non-maintenance heartbeats, or nil when the
 	// monitor produced no heartbeat at all in the window — never 0% standing in for silence.
 	Uptime *float64
-	Daily  []DailyAvailability
+	// UptimeSince is the UTC day Uptime's data starts when the window is incomplete (D-0268).
+	UptimeSince *time.Time
+	Daily       []DailyAvailability
 }
 
-// MonitorPageProjections resolves every monitor-backed component on a page in THREE statements.
+// MonitorPageProjections resolves every monitor-backed component on a page in a fixed number of
+// statements whatever it holds: identity, the 90-day aggregate (raw and rollup parts in one
+// statement), and the day strips.
 func (s *Store) MonitorPageProjections(
 	ctx context.Context, monitorIDs []string, since time.Time, withHistory bool,
 ) (map[string]MonitorPageProjection, error) {
@@ -67,28 +71,46 @@ func (s *Store) MonitorPageProjections(
 		return out, nil
 	}
 
-	// (2) The 90-day aggregate for every monitor at once.
+	// (2) The 90-day aggregate for every monitor at once — raw heartbeats in the window plus the
+	// rollup days older than raw retention, with the SAME rule the monitor's own SLA view uses
+	// (D-0268), in ONE statement so the raw counts and the rollup boundary come from one snapshot.
+	ceil, day, today := windowDays(since)
 	rows, err = s.pool.Query(ctx, `
-		SELECT h.monitor_id,
-		       count(*)::bigint,
-		       count(*) FILTER (WHERE h.up)::bigint
-		  FROM heartbeats h
-		 WHERE h.monitor_id = ANY($1) AND h.ts >= $2
-		   AND NOT EXISTS (
-		       SELECT 1 FROM maintenance_windows mw
-		        WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
-		          AND (mw.monitor_id = h.monitor_id
-		               OR (mw.monitor_id IS NULL
-		                   AND mw.project_id = (SELECT m.project_id FROM monitors m WHERE m.id = h.monitor_id)))
-		   )
-		 GROUP BY h.monitor_id`, ids, since)
+		WITH scope AS (SELECT unnest($1::uuid[]) AS id), `+windowRollupCTEs(2, 3, 4, 5)+`,
+		raw AS (
+		    SELECT h.monitor_id AS id,
+		           count(*)::bigint AS total,
+		           count(*) FILTER (WHERE h.up)::bigint AS up,
+		           min(h.ts) AS first_ts
+		      FROM heartbeats h
+		     WHERE h.monitor_id = ANY($1) AND h.ts >= $2
+		       AND NOT EXISTS (
+		           SELECT 1 FROM maintenance_windows mw
+		            WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
+		              AND (mw.monitor_id = h.monitor_id
+		                   OR (mw.monitor_id IS NULL
+		                       AND mw.project_id = (SELECT m.project_id FROM monitors m WHERE m.id = h.monitor_id)))
+		       )
+		     GROUP BY h.monitor_id
+		)
+		SELECT sc.id,
+		       COALESCE(raw.total, 0), COALESCE(raw.up, 0), raw.first_ts,
+		       COALESCE(roll.total, 0), COALESCE(roll.up, 0),
+		       (roll.first_day::timestamp AT TIME ZONE 'UTC'),
+		       COALESCE(cov.complete, false)
+		  FROM scope sc
+		  LEFT JOIN raw ON raw.id = sc.id
+		  LEFT JOIN roll ON roll.id = sc.id
+		  LEFT JOIN cov ON cov.id = sc.id`, ids, since, ceil, day, today)
 	if err != nil {
 		return nil, fmt.Errorf("store: monitor page sli: %w", err)
 	}
 	for rows.Next() {
 		var id string
-		var total, up int64
-		if err := rows.Scan(&id, &total, &up); err != nil {
+		var rawTotal, rawUp, rollTotal, rollUp int64
+		var firstRaw, firstRollup *time.Time
+		var complete bool
+		if err := rows.Scan(&id, &rawTotal, &rawUp, &firstRaw, &rollTotal, &rollUp, &firstRollup, &complete); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("store: scan monitor page sli: %w", err)
 		}
@@ -96,9 +118,11 @@ func (s *Store) MonitorPageProjections(
 		if !ok {
 			continue
 		}
+		total, up, dataFrom, _ := windowCoverage(newRollupPart(rollTotal, rollUp, firstRollup, complete), rawTotal, rawUp, firstRaw)
 		if total > 0 {
 			u := float64(up) / float64(total) * 100
 			p.Uptime = &u
+			p.UptimeSince = dataFrom
 		}
 		out[id] = p
 	}

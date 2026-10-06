@@ -4,7 +4,7 @@ All notable changes to **cerbix** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.3.5] - Unreleased
+## [v0.3.5] - 2026-10-06
 
 ### ✨ Added
 
@@ -13,6 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **Cross-brand identity and shell UX.** cerbix now uses the Sealed C default mark with custom-logo priority and contrast-safe instance accents. The SPA adds responsive navigation access, accessible overlay
   and focus behavior, atomic organization/project transitions, a stale-response-safe SearchBox, truthful Dashboard loading/no-data/error states, and explicit breadcrumb, theme and announcement semantics. Desktop
   layout, status colors, reliability formulas and backend/API contracts remain unchanged.
+
+### Changed
+
+- **Service burn rules need a short window of at least 300 s.** A service burn window ends at the sealed watermark, which trails now by the 120 s late-arrival grace plus up to a bucket, so a shorter short window could never — or only intermittently — contain sealed time. The API now refuses it with 400; monitor burn rules keep their 60 s floor. Rules stored earlier are not migrated and keep their behaviour until they are next saved (D-0267).
 
 ### 🔒 Security
 
@@ -35,6 +39,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   preventing a large retained history from consuming the Service materialization slice. This is a
   data-compatible change and requires no database migration.
 
+- **SLA windows longer than raw heartbeat retention cover the whole window.** With the default 30-day `heartbeats.retention_days`, the 90-day SLA (and any window longer than a lowered retention) silently covered only the retained days. Availability now adds the daily rollup for days whose raw heartbeats were purged — on monitor and project SLA, the weekly SLA report, the 90-day uptime of a monitor-backed status-page component, and monitor burn windows. A window with no data older than its start still shows its number and says where the data starts: the UI marks it "since DD.MM.YYYY UTC", and the API adds `data_from`, `latency_from` (latency stays raw) and the public status-page field `uptime_since` (D-0268).
+
+- **SLA "budget left" reads the budget, not all time.** An untouched 99.9 % budget showed 0 % and At risk because the view rendered `remaining_ratio` (a fraction of all time); it now shows 100 % and Meeting (D-0267).
+
+- **Late heartbeats correct every sealed bucket they reach.** A heartbeat arriving behind the service watermark now repairs every sealed bucket up to the monitor's next observation, not only its own minute, and the repair runner makes progress on long ranges instead of retrying one oversized batch; a statement timeout at the tail of a slice no longer counts as a failure (D-0267).
+
+- **A re-enabled push monitor is not instantly BAD in service reliability.** A ping from before the re-enable is no longer evidence, matching the monitor's own dead-man timer (D-0267).
+
 ### 🧪 Tests
 
 - **Gate fixtures now match schema 109.** Test rows and assertions were aligned with the persisted
@@ -43,8 +55,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Upgrade notes
 
-- This unreleased change contains no schema migration and does not require an offline database
-  upgrade. Existing installations retain their current data and watermarks.
+- This release contains no schema migration and does not require an offline database upgrade.
+  Existing installations retain their current data and watermarks.
+- Saving a service burn rule whose short window is below 300 s now returns 400; widen it to 300 s or
+  more when you next edit that target.
+- On plain PostgreSQL (no TimescaleDB), long SLA windows of large projects read noticeably slower
+  than before (measured locally: a 500-monitor project's four windows about 2.1–2.5 s instead of
+  about 1.1 s); TimescaleDB is unaffected in the same measurement (D-0268).
 
 ---
 

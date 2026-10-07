@@ -434,23 +434,44 @@ func maintenanceSpansFor(ctx context.Context, tx pgx.Tx, projectID string, membe
 // scalar answer "did we materialize this window" honestly, and what makes a stalled service
 // visible as a lagging timestamp instead of a plausible chart. Taking `MAX(bucket_start)`
 // over sealed rows would skip straight past a gap and report a window that has holes in it.
+//
+// INCREMENTAL, BOUNDED (iter-0201). The walk starts at the CURRENT watermark, not at the era
+// start, and looks at most watermarkScanBuckets ahead. An earlier version walked every bucket
+// of the era with a window function on every call; its cost grew with the era's age, and once
+// it no longer fit in the forward pass's commit reserve every slice rolled back, nothing was
+// ever committed again and the era never shrank — a permanent stall, observed on a deployed
+// instance after ~52 000 buckets (74 ms against a 60 ms reserve).
+//
+// Starting at the watermark is sound because everything before it is, by construction, whole
+// and sealed: facts behind it are never deleted (the DEFAULT-partition adoption MOVES rows in
+// one transaction), never written unsealed (a bucket behind the watermark ends before
+// now − LateArrivalGrace, so every rewrite seals it), and the one operation that invalidates
+// sealed time — a retroactive maintenance mutation — moves the watermark back itself (the
+// "Rewind the watermark" UPDATE in servicemaintenance.go, recorded as a retraction) in the same
+// transaction that queues its repair. A new era clears the watermark, so the walk restarts at
+// the era start.
 func advanceSealedThrough(ctx context.Context, tx pgx.Tx, serviceID string) error {
 	// The watermark is contiguous WITHIN THE CURRENT ERA. Walking from
 	// `materialization_start` instead would make a declared silence — a period the service
 	// said it was measuring nothing — hold the watermark forever, so a service that came back
 	// could never report again.
-	var start *time.Time
+	var era, current *time.Time
 	if err := tx.QueryRow(ctx,
-		`SELECT era_start FROM service_materialization WHERE service_id=$1`,
-		serviceID).Scan(&start); err != nil {
+		`SELECT era_start, sealed_through FROM service_materialization WHERE service_id=$1`,
+		serviceID).Scan(&era, &current); err != nil {
 		if noRows(err) {
 			return nil
 		}
 		return fmt.Errorf("store: read materialization start: %w", err)
 	}
-	if start == nil {
+	if era == nil {
 		return nil
 	}
+	start := *era
+	if current != nil && current.After(start) {
+		start = *current
+	}
+	limit := start.Add(time.Duration(watermarkScanBuckets) * domain.CanonicalBucket)
 
 	// The first gap is either the first non-sealed bucket, or the first missing one. Both
 	// are found by walking sealed buckets in order and stopping where the chain breaks.
@@ -461,13 +482,16 @@ func advanceSealedThrough(ctx context.Context, tx pgx.Tx, serviceID string) erro
 	//   * a bucket that exists but is not sealed stops it at that bucket's own start;
 	//   * a MISSING bucket stops it at the end of the last one present, which is the start
 	//     of the slot nobody filled — not at the start of the next row that does exist.
+	//
+	// With no stop inside the scan window the chain is unbroken up to its last row; when the
+	// window is full that is `limit`, and the next call continues from there.
 	var through *time.Time
 	if err := tx.QueryRow(ctx,
 		`WITH ordered AS (
 		     SELECT bucket_start, state,
 		            LAG(bucket_start) OVER (ORDER BY bucket_start) AS prev
 		       FROM service_reliability_buckets
-		      WHERE service_id = $1 AND bucket_start >= $2
+		      WHERE service_id = $1 AND bucket_start >= $2 AND bucket_start < $3
 		 ),
 		 stops AS (
 		     SELECT bucket_start AS at FROM ordered WHERE state <> 'sealed'
@@ -480,10 +504,10 @@ func advanceSealedThrough(ctx context.Context, tx pgx.Tx, serviceID string) erro
 		 SELECT COALESCE(
 		     (SELECT MIN(at) FROM stops),
 		     (SELECT MAX(bucket_start) + interval '1 minute' FROM ordered)
-		 )`, serviceID, *start).Scan(&through); err != nil {
+		 )`, serviceID, start, limit).Scan(&through); err != nil {
 		return fmt.Errorf("store: compute sealed_through: %w", err)
 	}
-	if through == nil {
+	if through == nil || (current != nil && through.Equal(*current)) {
 		return nil
 	}
 	if _, err := tx.Exec(ctx,
@@ -493,6 +517,12 @@ func advanceSealedThrough(ctx context.Context, tx pgx.Tx, serviceID string) erro
 	}
 	return nil
 }
+
+// watermarkScanBuckets bounds one watermark recompute: one day of canonical buckets, read
+// through the (service_id, bucket_start) key whatever the era's age. Far more than one forward
+// slice materializes, so the watermark keeps pace; after a retraction rewinds it, it catches
+// up one day per recompute.
+const watermarkScanBuckets = 1440
 
 // ── The forward driver ──────────────────────────────────────────────────────────────────
 //

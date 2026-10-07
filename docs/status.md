@@ -3,7 +3,14 @@
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. `DEFERRED` is not permitted. Every `DONE` links to code,
 tests, and metrics.
 
-## Latest closed iteration (iter-0200 — Security workflow back to green: frontend advisories and the govulncheck pin; OPENED AND CLOSED 2026-10-06 BY THE OWNER without an independent review; released as v0.3.6. No requirement row changes — versions and a CI pin, not behaviour. See [iter-0200](iterations/iter-0200.md))
+## Latest closed iteration (iter-0201 — service watermark recomputed incrementally, bugfix; OPENED 2026-10-06, CLOSED 2026-10-07; CLOSED / OWNER-APPROVED after independent re-review APPROVED; D-0269; released as v0.3.7)
+
+| ID | Acceptance criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| BUG-0201-1 | The forward pass keeps advancing a service whatever its era's age: the watermark recompute starts at the current watermark and examines a bounded window, so its cost no longer grows with the era and no longer exceeds the commit reserve (observed stall on a deployed instance since 2026-09-24). The contiguity definition (§10.5) is unchanged. | DONE | Implemented test-first (RED reproduced the deployed instance's error on both storage modes); `internal/store` `-race` on plain PostgreSQL green, full `-race` on TimescaleDB 32/33 with the known audit-retention cleanup flake and a clean `internal/store` re-run, `make dev-test` 77/1; review round 1 (0/1/1) addressed (late-data trigger on the materialization frontier); re-review APPROVED; closed by the OWNER 2026-10-07, released as v0.3.7 — [`iter-0201.md`](iterations/iter-0201.md); D-0269 |
+| FLAKE-0201 | `TestAuditRetentionPostgreSQLMatrix` passes reliably in full `-race` runs of `internal/store` on TimescaleDB: its probe-database cleanup (`DROP DATABASE … WITH (FORCE)`, 15 s) timed out in three of four such runs during iter-0198/iter-0201, never in isolation (passes 3/3) or on plain PostgreSQL. | TODO | Pre-existing, unrelated to the iterations that observed it; recorded in [`iter-0201.md`](iterations/iter-0201.md). |
+
+## Previous closed iteration (iter-0200 — Security workflow back to green: frontend advisories and the govulncheck pin; OPENED AND CLOSED 2026-10-06 BY THE OWNER without an independent review; released as v0.3.6. No requirement row changes — versions and a CI pin, not behaviour. See [iter-0200](iterations/iter-0200.md))
 
 | ID | Acceptance criterion | Status | Evidence |
 | --- | --- | --- | --- |

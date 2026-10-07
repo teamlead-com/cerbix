@@ -199,15 +199,19 @@ func TestSealedFactIsNotRewrittenByOrdinaryMaterialization(t *testing.T) {
 	}
 }
 
-// The watermark is defined by CONTIGUITY. A hole holds it rather than being jumped over,
-// which is what makes a stalled service visible instead of merely plausible.
+// A hole HOLDS the watermark: buckets materialized past a slot nobody filled do not carry the
+// watermark over it (§10.5, invariant 17). The hole is made the way the product makes one — a range
+// left unwritten AHEAD of the watermark — not by deleting a sealed bucket behind it: no product path
+// deletes or unseals a fact behind the watermark (iter-0201's invariant audit), and moving the
+// watermark back without a recorded retraction is exactly what invariant 17 forbids. Since iter-0201
+// the recompute walks from the current watermark (D-0269), so this is the hole case it must still see.
 func TestSealedThroughStopsAtAHole(t *testing.T) {
 	st, ctx := declStore(t)
 	f := adoptedService(t, st, ctx)
 
 	base := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Minute)
 	materializeFrom(t, st, ctx, f, base)
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 10; i++ {
 		beat(t, st, ctx, f.http, base.Add(time.Duration(i)*time.Minute+10*time.Second), true)
 	}
 	if _, err := st.MaterializeServiceRange(ctx, f.projectID, f.serviceID, base, base.Add(5*time.Minute)); err != nil {
@@ -218,19 +222,17 @@ func TestSealedThroughStopsAtAHole(t *testing.T) {
 		t.Fatalf("sealed_through = %v, want %s after five contiguous sealed buckets", through, base.Add(5*time.Minute))
 	}
 
-	// Punch a hole in the middle and recompute the watermark.
-	if _, err := st.pool.Exec(ctx,
-		`DELETE FROM service_reliability_buckets WHERE service_id=$1 AND bucket_start=$2`,
-		f.serviceID, base.Add(2*time.Minute)); err != nil {
-		t.Fatalf("punch hole: %v", err)
+	// Leave base+7 unwritten and materialize on both sides of it.
+	if _, err := st.MaterializeServiceRange(ctx, f.projectID, f.serviceID, base.Add(5*time.Minute), base.Add(7*time.Minute)); err != nil {
+		t.Fatalf("materialize before the hole: %v", err)
 	}
-	if _, err := st.MaterializeServiceRange(ctx, f.projectID, f.serviceID, base.Add(4*time.Minute), base.Add(5*time.Minute)); err != nil {
-		t.Fatalf("re-materialize: %v", err)
+	if _, err := st.MaterializeServiceRange(ctx, f.projectID, f.serviceID, base.Add(8*time.Minute), base.Add(10*time.Minute)); err != nil {
+		t.Fatalf("materialize past the hole: %v", err)
 	}
 	through = sealedThrough(t, st, ctx, f.serviceID)
-	if through == nil || !through.Equal(base.Add(2*time.Minute)) {
+	if through == nil || !through.Equal(base.Add(7*time.Minute)) {
 		t.Fatalf("sealed_through = %v, want the hole at %s — the watermark jumped a gap",
-			through, base.Add(2*time.Minute))
+			through, base.Add(7*time.Minute))
 	}
 }
 

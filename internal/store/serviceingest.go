@@ -133,29 +133,47 @@ func (s *Store) noteHeartbeatForServices(ctx context.Context, tx pgx.Tx, monitor
 
 // repairIfBehindWatermark queues a late-data recompute when the bucket is already sealed.
 //
+// The trigger is the MATERIALIZATION FRONTIER, max(sealed_through, materialized_through), not the
+// watermark alone. The frontier is where the ordinary forward pass will no longer correct a bucket
+// for this observation: it has walked past it. That is all it means — it does NOT prove every bucket
+// before it exists or is sealed (a new era can carry the cursor past uncounted buckets of the
+// previous one). Repairing such a bucket is still safe: membership is resolved as of the bucket,
+// the epoch is chosen per bucket, and materializeBucketTx decides sealed vs provisional by the grace
+// rule (and keeps a sealed fact sealed), so a repair never marks anything sealed early. Keyed on the
+// watermark alone, a late observation for a sealed fact AHEAD of a lagging watermark — after a
+// retraction it catches up one bounded walk at a time (D-0269), and a new era clears it while the
+// cursor stays — queued nothing, and the watermark later passed over a number the observation
+// contradicts (iter-0201 review).
+//
 // The range is every sealed bucket whose fact the observation can change, which is NOT bounded by
 // its own StaleAfter. Sample-and-hold makes it the member's carry-in for every later bucket until the
 // monitor's NEXT observation: inside its deadline it decides the state; past it, it turns the unknown
 // reason from `no_observation` into `stale` (provenance, which outlives raw retention); and a later
 // epoch with a longer StaleAfter makes it fresh again (iter-0198 review). So the range runs from the
 // observation's bucket to the bucket holding the next observation of the same monitor, or to the
-// watermark when there is none yet. Recomputing a bucket whose content does not change rewrites the
+// frontier when there is none yet. Recomputing a bucket whose content does not change rewrites the
 // same row and writes no audit row.
 func repairIfBehindWatermark(ctx context.Context, tx pgx.Tx, projectID, serviceID, monitorID string, bucketStart, ts time.Time) error {
-	var sealedThrough *time.Time
+	var sealedThrough, materializedThrough *time.Time
 	err := tx.QueryRow(ctx,
-		`SELECT sealed_through FROM service_materialization WHERE service_id = $1`,
-		serviceID).Scan(&sealedThrough)
+		`SELECT sealed_through, materialized_through FROM service_materialization WHERE service_id = $1`,
+		serviceID).Scan(&sealedThrough, &materializedThrough)
 	if noRows(err) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("store: read watermark for late data: %w", err)
 	}
-	if sealedThrough == nil || !bucketStart.Before(*sealedThrough) {
+	var frontier *time.Time
+	for _, t := range []*time.Time{sealedThrough, materializedThrough} {
+		if t != nil && (frontier == nil || t.After(*frontier)) {
+			frontier = t
+		}
+	}
+	if frontier == nil || !bucketStart.Before(*frontier) {
 		return nil
 	}
-	end, err := lateObservationReachEnd(ctx, tx, monitorID, ts, *sealedThrough)
+	end, err := lateObservationReachEnd(ctx, tx, monitorID, ts, *frontier)
 	if err != nil {
 		return err
 	}
@@ -163,20 +181,20 @@ func repairIfBehindWatermark(ctx context.Context, tx pgx.Tx, projectID, serviceI
 }
 
 // lateObservationReachEnd is the end of the last sealed bucket an observation at ts can change:
-// CeilToBucket of the monitor's next observation, clipped at the watermark (past it the ordinary
-// forward pass reads the observation anyway). A next observation inside a bucket still leaves this
-// one as that bucket's carry-in up to it, hence the ceiling; one exactly on a boundary begins the
-// following bucket itself, which the ceiling of a boundary leaves out. Because the next observation
-// is strictly later than ts, the result always covers ts's own bucket.
-func lateObservationReachEnd(ctx context.Context, tx pgx.Tx, monitorID string, ts, sealedThrough time.Time) (time.Time, error) {
+// CeilToBucket of the monitor's next observation, clipped at the materialization frontier (past it
+// the ordinary forward pass reads the observation anyway). A next observation inside a bucket still
+// leaves this one as that bucket's carry-in up to it, hence the ceiling; one exactly on a boundary
+// begins the following bucket itself, which the ceiling of a boundary leaves out. Because the next
+// observation is strictly later than ts, the result always covers ts's own bucket.
+func lateObservationReachEnd(ctx context.Context, tx pgx.Tx, monitorID string, ts, frontier time.Time) (time.Time, error) {
 	var next *time.Time
 	if err := tx.QueryRow(ctx,
 		`SELECT min(ts) FROM heartbeats WHERE monitor_id = $1 AND ts > $2 AND ts < $3`,
-		monitorID, ts, sealedThrough).Scan(&next); err != nil {
+		monitorID, ts, frontier).Scan(&next); err != nil {
 		return time.Time{}, fmt.Errorf("store: next observation after a late arrival: %w", err)
 	}
 	if next == nil {
-		return sealedThrough, nil
+		return frontier, nil
 	}
 	return domain.CeilToBucket(*next), nil
 }

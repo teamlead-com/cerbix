@@ -8923,3 +8923,52 @@ earliest raw heartbeat. On TimescaleDB and on small scopes that is near base; on
 probe touches every daily partition's index, and the review measured a 500-monitor project's four SLA
 windows at 2.07–2.49 s against 1.06–1.13 s on the base (status-page projection 2.41–2.53 s against
 2.14–2.20 s). Accepted for this bugfix; reducing it (e.g. a bounded probe) would be a separate change.
+
+## D-0269 — the service watermark is recomputed incrementally from itself, over a bounded window (2026-10-06)
+
+**Context.** Observed on a deployed instance (read-only investigation, iter-0201): every service's
+`sealed_through` and `materialized_through` stopped on 2026-09-24 between 17:52 and 20:09 UTC and
+never moved again, through v0.3.5 and v0.3.6. Every scheduler slice failed with `store: compute
+sealed_through: canceling statement due to statement timeout (SQLSTATE 57014)`. The forward pass
+materializes buckets until only its 60 ms commit reserve is left and then recomputes the watermark;
+the recompute walked every bucket of the era with a window function — 74 ms for the 51 820-bucket
+era measured there, 63 ms for a 33 255-bucket one. Once it no longer fit, the transaction rolled back
+whole, nothing was committed, the era never shrank, and the forward driver — which always claims the
+most-behind service — kept claiming the stalled one, starving the rest. v0.3.5's carry-in fix
+addressed a different statement of the same slice.
+
+**Decision.** The watermark's definition (§10.5, contiguity) is unchanged. Its computation starts at
+the current watermark (the era start when there is none) and examines at most 1 440 buckets
+(`watermarkScanBuckets`), stopping at the first missing or unsealed bucket; with no stop it advances
+to the window's end and the next sealing transaction continues. Correct because everything behind
+the watermark is whole and sealed by construction, and the one operation that invalidates sealed
+time — a retroactive maintenance mutation — already rewinds the watermark itself as a recorded
+retraction (§10.9).
+
+**What is given up, deliberately.** The old full walk would also notice a sealed bucket that
+VANISHED behind the watermark and silently move the watermark back to it. No product path can
+produce that (iter-0201's invariant audit), and a backwards move without a recorded retraction is
+exactly what invariant 17 forbids, so the incremental walk does not look behind itself. The one test
+that pinned the old behaviour, `TestSealedThroughStopsAtAHole`, deleted a sealed bucket behind the
+watermark with raw SQL; it now makes its hole the way the product does — a slot left unwritten ahead
+of the watermark — and keeps its name, which invariant 17's traceability row cites.
+
+**Consumer that relied on the old behaviour (review).** Late-data repair queued only for buckets
+behind `sealed_through`. With the bounded walk the watermark can trail sealed facts while it catches
+up after a retraction (and a new era clears it while the cursor stays), so a late heartbeat for such
+a fact queued nothing and the fact stayed wrong after the watermark caught up. The trigger and the
+range clip now use the materialization frontier `max(sealed_through, materialized_through)` — the
+point the forward pass has walked past, so it will not correct those buckets itself. The frontier is
+a conservative bound for WHERE repair is needed, not a proof that every bucket before it exists or
+is sealed (re-review: a new era can carry the cursor past uncounted buckets); repairing there is safe
+because membership, epoch and the seal decision are all resolved per bucket (§10.4 case 3
+amendment).
+
+**Consequences.** No migration, no configuration. The recompute's cost no longer depends on the
+era's age. After a retraction rewinds the watermark, it catches up at most one day per sealing
+transaction; with no other sealing work (the forward cursor already at the clock) a long rewind can
+take tens of minutes to close. A stalled instance should resume on its own after the upgrade: the
+forward pass materializes UP TO 240 buckets per slice — a ceiling, not a guaranteed rate — inside the
+scheduler's per-cycle service budget, and runnable repairs are served before it, so a repair backlog
+delays recovery. A 12-day backlog over four services is about 69 000 buckets; the review's idle probe
+did 1 039 buckets in eight slices (1.56 s), which is not a forecast for a loaded instance.

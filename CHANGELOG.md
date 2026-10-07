@@ -4,6 +4,18 @@ All notable changes to **cerbix** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.7] - 2026-10-07
+
+### 🩹 Fixed
+
+- **Service reliability no longer stalls on services with a long history.** The sealed-through watermark was recomputed over every bucket since the service's era began, on every scheduler slice; once that took longer than the slice's commit reserve (about 50 000 buckets — roughly five weeks of a service's history), every slice rolled back and materialization stopped for good, for every service, since the stuck one was always picked first. The recompute now starts at the current watermark and looks at most one day ahead. A stalled installation resumes on its own after upgrading (D-0269).
+
+### Upgrade notes
+
+- No schema migration, no configuration change.
+
+---
+
 ## [v0.3.6] - 2026-10-06
 
 ### 🔒 Security

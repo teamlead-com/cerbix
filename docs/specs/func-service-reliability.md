@@ -958,6 +958,18 @@ A sealed bucket is rewritten in exactly two cases, both audit-visible:
    rewritten **without** an audit row. The late-arrival record is still written, so the
    disagreement between the first and the corrected number stays explainable.
 
+   *Amendment (D-0269 / iter-0201):* "behind `sealed_through`" and the clip at `sealed_through`
+   above now read **behind the materialization frontier** `max(sealed_through,
+   materialized_through)`: the point the ordinary forward pass has already walked past, so it will not
+   correct those buckets for a late observation. The frontier does not prove that every bucket before
+   it exists or is sealed — a new era can carry the cursor past uncounted buckets of the previous
+   one — and a repair there is still safe, because membership is resolved as of the bucket, the epoch
+   is chosen per bucket, and the materializer seals a bucket only past its grace (and never unseals
+   one). The watermark itself can trail sealed facts: it catches up a bounded walk at a time after a
+   retraction (§10.5), and a new era clears it while the cursor stays. Keyed on the watermark alone, a late observation for a sealed fact ahead of a
+   lagging watermark queued nothing, and the watermark later passed over a number the observation
+   contradicts (iter-0201 review).
+
 ### 10.5 The `sealed_through` watermark
 
 **`sealed_through` is defined by CONTIGUITY, not by the newest sealed row**: it is the greatest
@@ -971,6 +983,24 @@ except under an audited operation that explicitly unseals or invalidates a range
 operation records the retraction, because a window that silently shortened is
 indistinguishable from a bug. Materialization gaps are therefore visible as a stalled watermark
 rather than as a plausible number.
+
+*Amendment (D-0269 / iter-0201):* the definition is unchanged; its **computation** is
+incremental and bounded. A sealing transaction walks from the current watermark (from the era start
+when there is none) over at most one day of canonical buckets, through the `(service_id,
+bucket_start)` key, and stops at the first missing or unsealed bucket exactly as above; with no stop
+inside the window it advances to the window's end and the next sealing transaction continues. This
+is equivalent to walking from the era start because of an invariant the rest of this document
+already establishes: everything behind the watermark is whole and sealed. Facts are never deleted
+(§10.6; the DEFAULT-partition adoption of §10.11 moves rows in one transaction), a bucket behind the
+watermark ends before `now − late_arrival_grace` so every rewrite of it seals it, and the only
+operation that invalidates sealed time — a retroactive maintenance mutation (§10.9) — moves the
+watermark back itself, as a recorded retraction, in the same transaction that queues its repair. The
+previous computation walked the whole era on every sealing transaction; its cost grew with the
+era's age until it no longer fit the forward pass's commit reserve, after which no slice ever
+committed again (observed on a deployed instance, iter-0201). The equivalence is about the
+watermark's VALUE once it has caught up; while it catches up it can trail sealed facts, so no
+consumer may read "behind the watermark" as "sealed" — late-data repair keys on the materialization
+frontier instead (§10.4 case 3).
 
 ### 10.6 Recompute, retention and backfill
 

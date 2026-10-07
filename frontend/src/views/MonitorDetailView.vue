@@ -96,22 +96,73 @@ const timeoutMs = computed(() => (monitor.value?.timeout_seconds ?? 0) * 1000);
 const stats = computed(() => panelStats(panelPoints.value, timeoutMs.value));
 
 // The ruler's hit target is a CSS-PIXEL rule, so it is measured rather than guessed from the
-// viewBox. Without a ResizeObserver the panel falls back to its designed width, which changes
-// which empty spans MERGE for interaction and nothing else.
+// viewBox. The plot exists only once checks have loaded, so it is measured when its element
+// APPEARS (a watch on the ref), not at mount: at mount there is nothing to observe, and until
+// iter-0202 the observer was never attached and every width read as the fallback. Without a
+// ResizeObserver it is measured on window resize instead. The fallback is used only before the
+// first measurement; it changes which empty spans MERGE for interaction and nothing else.
 const PLOT_FALLBACK_PX = 1072;
 const HIT_PX = 12;
+const PLOT_HEIGHT_PX = 180;
 const plotBox = ref<SVGSVGElement | null>(null);
 const plotPx = ref(PLOT_FALLBACK_PX);
 let plotRO: ResizeObserver | null = null;
-onMounted(() => {
-  if (typeof ResizeObserver === "undefined" || !plotBox.value) return;
-  plotRO = new ResizeObserver((entries) => {
-    const w = entries[0]?.contentRect.width;
-    if (w && w > 0) plotPx.value = w;
-  });
-  plotRO.observe(plotBox.value);
-});
-onUnmounted(() => plotRO?.disconnect());
+function measurePlot() {
+  const w = plotBox.value?.getBoundingClientRect().width;
+  if (w && w > 0) plotPx.value = w;
+}
+function unwatchPlot() {
+  plotRO?.disconnect();
+  plotRO = null;
+  window.removeEventListener("resize", measurePlot);
+}
+watch(
+  plotBox,
+  (el) => {
+    unwatchPlot();
+    if (!el) return;
+    measurePlot();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", measurePlot, { passive: true });
+      return;
+    }
+    plotRO = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) plotPx.value = w;
+    });
+    plotRO.observe(el);
+  },
+  { flush: "post" },
+);
+onUnmounted(unwatchPlot);
+
+// R1-3 (iter-0202): the pointer reaches the NEAREST check within POINT_HIT_PX CSS pixels of it,
+// measured on screen from the plot's live box, so the stretched viewBox and the plot's width
+// cannot distort it. One transparent layer over the plot decides, rather than a target per check:
+// overlapping targets were won by whichever was drawn last, so a neighbour could take the pointer
+// even at another dot's exact centre. Equal distances go to the EARLIER check. Beyond the radius
+// nothing is hovered — this never reaches across an empty interval to the nearest check.
+const POINT_HIT_PX = 9;
+function pointAt(ev: PointerEvent) {
+  const c = chart.value;
+  const el = plotBox.value;
+  if (!c || !el) return;
+  const r = el.getBoundingClientRect();
+  const sx = r.width / c.W;
+  const sy = r.height / c.H;
+  const px = ev.clientX - r.left;
+  const py = ev.clientY - r.top;
+  let best: PanelPoint | null = null;
+  let bestD = Infinity;
+  for (const t of c.targets) {
+    const d = Math.hypot(t.x * sx - px, t.y * sy - py);
+    if (d <= POINT_HIT_PX && d < bestD) {
+      best = t.p;
+      bestD = d;
+    }
+  }
+  if (hoverPoint.value !== best) hoverPoint.value = best;
+}
 
 const chart = computed(() => {
   const pts = panelPoints.value;
@@ -129,6 +180,8 @@ const chart = computed(() => {
     // a failure with no latency is a baseline mark: visible, and never a fabricated value
     marks: pts.filter((p) => p.latency == null).map((p) => ({ p, x: X(p.ms) })),
     ticks: pts.map((p) => ({ p, x: X(p.ms) })),
+    // Every check the pointer can reach, in time order (a baseline mark by its centre), for pointAt.
+    targets: pts.map((p) => ({ p, x: X(p.ms), y: p.latency != null ? Y(p.latency) : H - pb - 4.5 })),
     p95y: stats.value.p95 != null ? Y(stats.value.p95) : null,
     timeoutY: stats.value.timeoutInScale ? Y(timeoutMs.value) : null,
     x: X,
@@ -1071,7 +1124,8 @@ watch(
             ref="plotBox"
             :viewBox="`0 0 ${chart.W} ${chart.H}`"
             class="block w-full"
-            :style="{ height: '180px' }"
+            :style="{ height: PLOT_HEIGHT_PX + 'px' }"
+            :data-plot-px="Math.round(plotPx)"
             preserveAspectRatio="none"
             data-testid="lat-plot"
           >
@@ -1094,7 +1148,6 @@ watch(
               fill="var(--down)"
               data-testid="lat-baseline-mark"
               :data-ts="m.p.hb.ts"
-              @pointerenter="hoverPoint = m.p" @pointerleave="hoverPoint = null"
             />
             <!-- FR-032 §14: the stroke, one polyline per DEFENSIBLE segment and nothing between
                  them. Drawn before the points so a marker always sits on top of its own line.
@@ -1122,8 +1175,16 @@ watch(
               tabindex="0"
               data-testid="lat-point"
               :data-ts="d.p.hb.ts"
-              @pointerenter="hoverPoint = d.p" @pointerleave="hoverPoint = null"
               @focus="hoverPoint = d.p" @blur="hoverPoint = null"
+            />
+            <!-- The pointer's one target (iter-0202): a transparent layer over the whole plot that
+                 hovers the nearest check within POINT_HIT_PX (pointAt). A dot alone is a few pixels
+                 across, so a pointer had to sit exactly on it. Keyboard focus stays on the dots. -->
+            <rect
+              x="0" y="0" :width="chart.W" :height="chart.H"
+              fill="transparent"
+              data-testid="lat-plot-hit"
+              @pointermove="pointAt" @pointerleave="hoverPoint = null"
             />
           </svg>
           <p v-else class="py-6 text-[13px] text-ink-3">No checks recorded yet.</p>
@@ -1234,46 +1295,69 @@ watch(
         </div>
 
         <!-- Readouts. Times are local with the offset named, over the canonical UTC instant. -->
-        <!-- One cell's own words. It sits BEFORE the point readout because a window is the
-             narrower claim: a reader hovering the expectation band is asking what the ledger says
-             about that window, not what the nearest check measured. -->
-        <div v-if="hoverCell" class="mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-cell-readout">
-          <p class="text-[12.5px] text-ink-2">{{ cellLabel(hoverCell) }}</p>
-          <p class="mt-[3px] font-mono text-[11.5px] text-ink-3">{{ utcInstantLabel(isoInstant(new Date(hoverCell.ms))) }}</p>
-        </div>
-        <div v-else-if="hoverPoint" class="mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-point-readout">
-          <div class="font-mono text-[12.5px]">
-            {{ instantLabel(hoverPoint.hb.ts) }} ·
-            {{ hoverPoint.latency != null ? fmtMs(hoverPoint.latency) : "no latency recorded" }}
+        <!-- The readouts share ONE reserved slot (iter-0202). They used to be inserted below the
+             chart only while something was hovered, so the card grew and shrank on every enter and
+             leave. The slot is a one-cell grid holding what is ALWAYS there — an invisible sizer
+             shaped like the point readout, and the widest-gap line — so its height is the taller of
+             the two and depends on nothing hovered. The hovered readout is laid OVER the slot, out of
+             flow: a taller one (a long message, a sentence wrapped at phone width) runs over what
+             follows instead of pushing it. Nothing is cut. While a readout is shown the widest-gap
+             line is hidden with `visibility`, so it keeps its place in the layout.
+             Stacking: the readouts carry NO z-index. As positioned boxes they already paint over the
+             static cards that follow, and they must stay under the app's sticky top bar (z 10) when
+             scrolled beneath it — a `z-10` here tied with the bar and, later in the DOM, won. -->
+        <div class="relative grid" data-testid="lat-readout-slot">
+          <div aria-hidden="true" class="invisible col-start-1 row-start-1 mx-4 mb-3 rounded-sm border border-border-strong p-[9px_11px]">
+            <div class="font-mono text-[12.5px]">&nbsp;</div>
+            <div class="font-mono text-[11.5px]">&nbsp;</div>
+            <div class="mt-1 text-[12px]">&nbsp;</div>
           </div>
-          <div class="font-mono text-[11.5px] text-ink-3">{{ utcInstantLabel(hoverPoint.hb.ts) }}</div>
-          <div class="mt-1 text-[12px] text-ink-2">
-            <span :class="hoverPoint.hb.up ? 'text-up' : 'text-down'">{{ hoverPoint.hb.up ? "Operational" : "Down" }}</span>
-            · <span class="font-mono">{{ heartbeatCode(hoverPoint.hb as Heartbeat) }}</span>
-            · {{ hoverPoint.hb.msg || "ok" }}
+          <!-- One cell's own words. It sits BEFORE the point readout because a window is the
+               narrower claim: a reader hovering the expectation band is asking what the ledger says
+               about that window, not what the nearest check measured. -->
+          <div v-if="hoverCell" class="absolute inset-x-0 top-0 mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-cell-readout">
+            <p class="text-[12.5px] text-ink-2">{{ cellLabel(hoverCell) }}</p>
+            <p class="mt-[3px] font-mono text-[11.5px] text-ink-3">{{ utcInstantLabel(isoInstant(new Date(hoverCell.ms))) }}</p>
           </div>
-        </div>
-        <div v-else-if="hoverSpan" class="mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-span-readout">
-          <div class="font-mono text-[12.5px]">{{ spanLabel(hoverSpan) }}</div>
-          <div class="font-mono text-[11.5px] text-ink-3">
-            {{ utcInstantLabel(isoInstant(new Date(hoverSpan.fromMs))) }} → {{ utcInstantLabel(isoInstant(new Date(hoverSpan.toMs))) }}
+          <div v-else-if="hoverPoint" class="absolute inset-x-0 top-0 mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-point-readout">
+            <div class="font-mono text-[12.5px]">
+              {{ instantLabel(hoverPoint.hb.ts) }} ·
+              {{ hoverPoint.latency != null ? fmtMs(hoverPoint.latency) : "no latency recorded" }}
+            </div>
+            <div class="font-mono text-[11.5px] text-ink-3">{{ utcInstantLabel(hoverPoint.hb.ts) }}</div>
+            <div class="mt-1 text-[12px] text-ink-2">
+              <span :class="hoverPoint.hb.up ? 'text-up' : 'text-down'">{{ hoverPoint.hb.up ? "Operational" : "Down" }}</span>
+              · <span class="font-mono">{{ heartbeatCode(hoverPoint.hb as Heartbeat) }}</span>
+              · {{ hoverPoint.hb.msg || "ok" }}
+            </div>
           </div>
-          <p class="mt-1 text-[11.5px] text-ink-3">
-            <template v-if="hoverSpan.merged">
-              one focus target covering {{ hoverSpan.intervals }} adjacent intervals too narrow to focus
-              separately — its bounds are the real outer bounds, and the drawing is unchanged.
-            </template>
-            <template v-else>
-              not late, not missed, not covered, not anomalous — only that no check was recorded here.
-            </template>
+          <div v-else-if="hoverSpan" class="absolute inset-x-0 top-0 mx-4 mb-3 rounded-sm border border-border-strong bg-surface-2 p-[9px_11px]" data-testid="lat-span-readout">
+            <div class="font-mono text-[12.5px]">{{ spanLabel(hoverSpan) }}</div>
+            <div class="font-mono text-[11.5px] text-ink-3">
+              {{ utcInstantLabel(isoInstant(new Date(hoverSpan.fromMs))) }} → {{ utcInstantLabel(isoInstant(new Date(hoverSpan.toMs))) }}
+            </div>
+            <p class="mt-1 text-[11.5px] text-ink-3">
+              <template v-if="hoverSpan.merged">
+                one focus target covering {{ hoverSpan.intervals }} adjacent intervals too narrow to focus
+                separately — its bounds are the real outer bounds, and the drawing is unchanged.
+              </template>
+              <template v-else>
+                not late, not missed, not covered, not anomalous — only that no check was recorded here.
+              </template>
+            </p>
+          </div>
+          <p
+            v-if="widestGap"
+            class="col-start-1 row-start-1 mx-4 mb-3 text-[11.5px] text-ink-3"
+            :class="{ invisible: hoverCell || hoverPoint || hoverSpan }"
+            data-testid="lat-widest-gap"
+          >
+            widest interval between two recorded checks: {{ gapLabel(widestGap.toMs - widestGap.fromMs) }},
+            {{ instantLabel(isoInstant(new Date(widestGap.fromMs))) }} →
+            {{ instantLabel(isoInstant(new Date(widestGap.toMs))) }} — the panel says only that, never
+            that a check was missed.
           </p>
         </div>
-        <p v-else-if="widestGap" class="mx-4 mb-3 text-[11.5px] text-ink-3" data-testid="lat-widest-gap">
-          widest interval between two recorded checks: {{ gapLabel(widestGap.toMs - widestGap.fromMs) }},
-          {{ instantLabel(isoInstant(new Date(widestGap.fromMs))) }} →
-          {{ instantLabel(isoInstant(new Date(widestGap.toMs))) }} — the panel says only that, never
-          that a check was missed.
-        </p>
       </section>
 
       <!-- availability 90d -->

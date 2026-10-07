@@ -24,7 +24,7 @@
 //
 // FR-025 change marks ride on top exactly as before, kind-shaped and in the accent: a deploy is
 // not good or bad, what followed it is, and the cells beneath say that in the hues the facts own.
-import { computed, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 
 import { kindClip, type StripMark } from "@/lib/changes";
 import { stackSlices, type Cell, type MarkCluster, type Slice } from "@/lib/reliabilitygeometry";
@@ -124,10 +124,54 @@ function enter(cell: Cell, slices: Slice[]) {
     slices,
     pct: ((x(cell.startMs) + (x(cell.endMs) - x(cell.startMs)) / 2) / W) * 100,
   };
+  readoutAt.value = null;
+  void nextTick(placeReadout);
 }
 function leave() {
   hovered.value = null;
+  readoutAt.value = null;
 }
+
+// The readout is FIXED to the viewport, not absolute inside the strip (iter-0202). Centred on its
+// cell inside a card that clips (`overflow-hidden`), a cell near either edge lost part of its
+// readout, and a lane at the bottom of the card lost its foot. Fixed positioning is not clipped by
+// an overflow ancestor, so it is measured once rendered and kept inside the viewport: centred on
+// the cell where it fits, pushed in from an edge where it does not, and above the strip when there
+// is no room below. When neither side holds it whole, the chosen side is clamped into the viewport
+// (it then overlaps its own strip, which is pointer-transparent); one taller than the viewport is
+// pinned to the viewport's top. It stays in this component's DOM, so its content is still the
+// parent's slot.
+// A scroll or resize moves the cell under a fixed readout, so either one places it again.
+const root = ref<HTMLElement | null>(null);
+const readoutEl = ref<HTMLElement | null>(null);
+const readoutAt = ref<{ left: number; top: number } | null>(null);
+const READOUT_EDGE_PX = 8;
+const READOUT_GAP_PX = 2;
+function placeReadout() {
+  const el = readoutEl.value;
+  const box = root.value;
+  if (!hovered.value || !el || !box) return;
+  const b = box.getBoundingClientRect();
+  const r = el.getBoundingClientRect();
+  const vw = document.documentElement.clientWidth || window.innerWidth;
+  const vh = window.innerHeight;
+  const cx = b.left + (hovered.value.pct / 100) * b.width;
+  const left = Math.max(READOUT_EDGE_PX, Math.min(cx - r.width / 2, vw - READOUT_EDGE_PX - r.width));
+  let top = b.bottom + READOUT_GAP_PX;
+  if (top + r.height > vh - READOUT_EDGE_PX && b.top - READOUT_GAP_PX - r.height >= READOUT_EDGE_PX) {
+    top = b.top - READOUT_GAP_PX - r.height;
+  }
+  top = Math.max(READOUT_EDGE_PX, Math.min(top, vh - READOUT_EDGE_PX - r.height));
+  readoutAt.value = { left, top };
+}
+onMounted(() => {
+  window.addEventListener("scroll", placeReadout, { capture: true, passive: true });
+  window.addEventListener("resize", placeReadout, { passive: true });
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("scroll", placeReadout, { capture: true });
+  window.removeEventListener("resize", placeReadout);
+});
 
 const placedMarks = computed(() => {
   const out: { m: StripMark; pct: number }[] = [];
@@ -141,7 +185,7 @@ const placedMarks = computed(() => {
 </script>
 
 <template>
-  <div class="relative block" :class="placedMarks.length ? 'pt-[22px]' : ''" :data-marks="placedMarks.length || undefined">
+  <div ref="root" class="relative block" :class="placedMarks.length ? 'pt-[22px]' : ''" :data-marks="placedMarks.length || undefined">
     <svg
       :viewBox="`0 0 ${W} ${h + 6}`"
       preserveAspectRatio="none"
@@ -255,11 +299,15 @@ const placedMarks = computed(() => {
       />
     </svg>
 
-    <!-- The readout, positioned over the cell it belongs to. Content comes from the parent. -->
+    <!-- The readout, placed under (or over) the cell it belongs to and kept inside the viewport;
+         hidden for the one frame before it is measured. Content comes from the parent. -->
     <div
       v-if="hovered"
-      class="pointer-events-none absolute z-10"
-      :style="{ left: hovered.pct + '%', top: '100%', transform: 'translateX(-50%)' }"
+      ref="readoutEl"
+      class="pointer-events-none fixed z-30"
+      :style="readoutAt
+        ? { left: readoutAt.left + 'px', top: readoutAt.top + 'px' }
+        : { left: '0px', top: '0px', visibility: 'hidden' }"
       data-testid="strip-readout"
     >
       <slot name="readout" :cell="hovered.cell" :slices="hovered.slices" />

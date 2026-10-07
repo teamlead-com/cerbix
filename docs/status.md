@@ -3,7 +3,15 @@
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. `DEFERRED` is not permitted. Every `DONE` links to code,
 tests, and metrics.
 
-## Latest closed iteration (iter-0201 — service watermark recomputed incrementally, bugfix; OPENED 2026-10-06, CLOSED 2026-10-07; CLOSED / OWNER-APPROVED after independent re-review APPROVED; D-0269; released as v0.3.7)
+## Latest closed iteration (iter-0202 — hover readouts an operator could not read, bugfix; OPENED AND CLOSED 2026-10-07; CLOSED / OWNER-APPROVED after re-review 2 APPROVED; no decision record, SPA only; unreleased, CHANGELOG `[v0.3.8]`)
+
+| ID | Acceptance criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| BUG-0202-1 | A reliability-strip cell readout is never clipped by the service card and is kept inside the viewport: pushed in from an edge, above the strip when there is no room below, clamped when neither side holds it, re-placed on scroll (one taller than the viewport is pinned to its top, its foot unreadable). | DONE | `frontend/src/components/ReliabilityStrip.vue`; `e2e/tests/readouts.spec.ts` RED → GREEN, mutations M1 and round-1 A killed; `make dev-test` 86/1; closed by the OWNER 2026-10-07 — [`iter-0202.md`](iterations/iter-0202.md). Metrics: N/A. |
+| BUG-0202-2 | The pointer reaches the nearest recorded check within 9 CSS px of it (never further, ties to the earlier check) at any plot width, no readout — however long — changes the card's height, and none covers the sticky top bar. | DONE | `frontend/src/views/MonitorDetailView.vue`; `e2e/tests/readouts.spec.ts` RED → GREEN, mutations M2, M3, round-1 A, B and B2 killed, re-review-1 REDs; vitest 904; closed by the OWNER 2026-10-07 — [`iter-0202.md`](iterations/iter-0202.md). Metrics: N/A. |
+| BUG-0202-3 | The paging card's escalation-policy row lines up with the card body: the body's left gutter, a bottom padding, and the body's type size. | DONE | `frontend/src/components/ServiceAlerting.vue`; `e2e/tests/service-layout.spec.ts` RED → GREEN, mutations M4 and M5 killed; `make dev-test` 86/1; closed by the OWNER 2026-10-07 — [`iter-0202.md`](iterations/iter-0202.md). Metrics: N/A. |
+
+## Previous closed iteration (iter-0201 — service watermark recomputed incrementally, bugfix; OPENED 2026-10-06, CLOSED 2026-10-07; CLOSED / OWNER-APPROVED after independent re-review APPROVED; D-0269; released as v0.3.7)
 
 | ID | Acceptance criterion | Status | Evidence |
 | --- | --- | --- | --- |

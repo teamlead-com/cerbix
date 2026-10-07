@@ -4,6 +4,20 @@ All notable changes to **cerbix** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.8] - Unreleased
+
+### 🩹 Fixed
+
+- **Reliability readouts are no longer cut off by their card.** Hovering a bucket near either edge of a service's reliability strip or segment lane showed only part of its readout, because the card clips its contents. The readout is no longer clipped by the card and stays inside the window whenever it fits there, moving in from the edge, or above or over the strip when it has to.
+- **Response-time readouts are steady.** A recorded check on the monitor page can be hovered from a few pixels away instead of only exactly on its dot (the nearest check wins), and the card no longer grows and shrinks as the readout appears and disappears, however long the readout is.
+- **The escalation-policy row on a service's paging card lines up with the rest of the card** instead of running to its edge in larger type.
+
+### Upgrade notes
+
+- No schema migration, no configuration change.
+
+---
+
 ## [v0.3.7] - 2026-10-07
 
 ### 🩹 Fixed

@@ -367,7 +367,7 @@ async function save() {
       The paging declaration could not be read.
     </div>
 
-    <div v-else class="space-y-3 px-4 py-3 text-[12.5px]">
+    <div v-else class="space-y-3 px-4 py-3 text-[12.5px]" data-testid="alerting-body">
       <!-- A refresh that failed is SAID, not hidden behind the last green badge. -->
       <p
         v-if="unavailable"
@@ -514,8 +514,9 @@ async function save() {
        it is a different write on a different route, so a declaration that could not be READ must not
        hide a control that has nothing to do with it. Its own save, its own error, for the same
        reason — one button that half-applies is worse than two, and a shared error line could not say
-       which half failed. -->
-    <div class="flex flex-wrap items-center gap-2 border-t border-border pt-[10px]" data-testid="alerting-escalation">
+       which half failed. It sits outside the body's padded container, so it carries the body's
+       gutter and type itself (iter-0202). -->
+    <div class="flex flex-wrap items-center gap-2 border-t border-border px-4 pb-3 pt-[10px] text-[12.5px]" data-testid="alerting-escalation">
       <span class="text-ink-3">Escalation policy</span>
       <select
         class="rounded border border-border bg-surface px-1.5 py-0.5 text-[12px]"

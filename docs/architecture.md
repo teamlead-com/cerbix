@@ -416,9 +416,9 @@ erDiagram
     services {
         uuid id PK
         uuid project_id FK
-        text slug UK_project_slug
-        uuid escalation_policy_id FK_nullable
-        uuid oncall_schedule_id FK_nullable
+        text slug UK "unique per project"
+        uuid escalation_policy_id FK "nullable"
+        uuid oncall_schedule_id FK "nullable"
         bigint graph_generation
         boolean owns_paging
         bigint alert_config_generation
@@ -427,39 +427,37 @@ erDiagram
         uuid id PK
         uuid service_id FK
         uuid project_id
-        bigint revision UK_service_revision
+        bigint revision UK "unique per service"
         timestamptz effective_at
         text state
         jsonb policies
     }
     service_definition_members {
-        uuid revision_id FK
+        uuid revision_id PK, FK
         uuid project_id
-        uuid monitor_id "historical; no FK by design"
-        text role
-        PK revision_id_monitor_id_role
+        uuid monitor_id PK "historical; no FK by design"
+        text role PK
     }
     service_member_refs {
-        uuid service_id FK
+        uuid service_id PK, FK
         uuid project_id
-        uuid monitor_id FK
-        text role
-        PK service_id_monitor_id_role
+        uuid monitor_id PK, FK
+        text role PK
     }
     service_evaluation_epochs {
         uuid id PK
         uuid service_id FK
         uuid project_id
         uuid revision_id FK
-        bigint epoch_seq UK_service_epoch
+        bigint epoch_seq UK "unique per service"
         timestamptz effective_at
         jsonb snapshot
     }
     service_reliability_buckets {
-        uuid service_id FK
+        uuid service_id PK, FK
         uuid project_id
         uuid epoch_id FK
-        timestamptz bucket_start
+        timestamptz bucket_start PK
         bigint good_us
         bigint bad_us
         bigint unknown_us
@@ -468,10 +466,9 @@ erDiagram
         bigint degraded_us
         bigint down_us
         text state
-        PK service_id_bucket_start
     }
     service_materialization {
-        uuid service_id PK_FK
+        uuid service_id PK, FK
         uuid project_id
         timestamptz materialization_start
         timestamptz era_start
@@ -479,19 +476,17 @@ erDiagram
         timestamptz materialized_through_nullable
     }
     service_bucket_ingest {
-        uuid service_id FK
+        uuid service_id PK, FK
         uuid project_id
-        timestamptz bucket_start
+        timestamptz bucket_start PK
         bigint ingest_generation
-        PK service_id_bucket_start
     }
     service_late_arrivals {
-        uuid service_id FK
+        uuid service_id PK, FK
         uuid project_id
-        timestamptz bucket_start
-        uuid monitor_id
+        timestamptz bucket_start PK
+        uuid monitor_id PK
         bigint arrivals
-        PK service_id_bucket_start_monitor_id
     }
     service_repair_ranges {
         uuid id PK
@@ -504,38 +499,36 @@ erDiagram
         timestamptz lease_expires_at_nullable
     }
     service_dependencies {
-        uuid service_id FK
-        uuid depends_on_id FK
+        uuid service_id PK, FK
+        uuid depends_on_id PK, FK
         uuid project_id
-        PK service_id_depends_on_id
     }
     incidents {
         uuid id PK
         uuid project_id FK
-        uuid service_id FK_nullable
-        uuid monitor_id FK_nullable
+        uuid service_id FK "nullable"
+        uuid monitor_id FK "nullable"
         text source
         text status
         CHECK at_most_one_anchor
     }
     incident_member_snapshots {
-        uuid incident_id PK_FK
+        uuid incident_id PK, FK
         uuid project_id
         jsonb members
     }
     incident_service_impacts {
-        uuid incident_id FK
-        uuid service_id FK
+        uuid incident_id PK, FK
+        uuid service_id PK, FK
         uuid project_id
-        text role
+        text role PK
         text_array path
-        PK incident_id_service_id_role
     }
     components {
         uuid status_page_id FK
         uuid org_id FK
-        uuid source_project FK_nullable
-        uuid service_id FK_nullable
+        uuid source_project FK "nullable"
+        uuid service_id FK "nullable"
         text source
         bigint revision
     }
@@ -567,7 +560,7 @@ erDiagram
     services o|--o{ service_gate_decisions : nullable_subject
 
     project_gate_policies {
-        uuid project_id PK_FK
+        uuid project_id PK, FK
         text window_name_nullable
         text window_mode
         int schema_version
@@ -579,7 +572,7 @@ erDiagram
         timestamptz deleted_at_nullable
     }
     service_gate_policies {
-        uuid service_id PK_FK
+        uuid service_id PK, FK
         uuid project_id
         text window_name_nullable
         text window_mode
@@ -593,16 +586,16 @@ erDiagram
         uuid service_id FK
         uuid project_id
         bigint policy_revision
-        uuid actor_user_id FK_nullable
+        uuid actor_user_id FK "nullable"
         boolean via_token
-        uuid revoked_by_user_id FK_nullable
+        uuid revoked_by_user_id FK "nullable"
         text revoked_reason_nullable
     }
     service_gate_decisions {
-        uuid id UNIQUE_per_partition
-        timestamptz evaluated_at PK_part
+        uuid id PK "PRIMARY KEY (evaluated_at, id)"
+        timestamptz evaluated_at PK
         uuid project_id FK
-        uuid service_id FK_nullable
+        uuid service_id FK "nullable"
         text policy_source_nullable
         uuid policy_owner_id_nullable
         text state
@@ -656,13 +649,12 @@ erDiagram
         UNIQUE id_project_id
     }
     incident_changes {
-        uuid incident_id FK
-        uuid change_id FK
+        uuid incident_id PK, FK
+        uuid change_id PK, FK
         uuid project_id
         text role
         timestamptz occurred_at
         int lag_seconds
-        PK incident_id_change_id
     }
 ```
 
@@ -683,7 +675,7 @@ erDiagram
     monitors ||--o{ expected_runs : expected_window
 
     monitor_schedule {
-        uuid monitor_id PK_FK
+        uuid monitor_id PK, FK
         uuid project_id
         timestamptz next_due_at
         int interval_in_force
@@ -692,9 +684,9 @@ erDiagram
         timestamptz gap_truncated_before_nullable
     }
     expected_runs {
-        uuid monitor_id PK_part
+        uuid monitor_id PK
         uuid project_id
-        timestamptz due_at PK_part
+        timestamptz due_at PK
         uuid job_id_nullable
         int carrier_generation_nullable
         timestamptz reserved_at_nullable
@@ -728,8 +720,8 @@ erDiagram
 
     audit_logs {
         uuid id PK
-        uuid org_id FK_nullable
-        uuid actor_user_id FK_nullable
+        uuid org_id FK "nullable"
+        uuid actor_user_id FK "nullable"
         boolean via_token
         text action
         text target

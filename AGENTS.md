@@ -63,6 +63,9 @@ Each iteration must:
 6. Write `docs/iterations/iter-XXXX.md`.
 7. If root analysis artifacts were used, confirm transfer into canonical docs and
    removal of those artifacts.
+8. On closing the iteration, before the commit: add its user-visible effect to
+   `CHANGELOG.md` under `## [vX.Y.Z] - Unreleased` (or state in the iteration report
+   why it has none). On release, replace `Unreleased` with the date.
 
 Do not stop at planning. After the plan, proceed with implementation until the
 iteration requirements are complete or a blocker is documented.
@@ -148,6 +151,8 @@ An iteration is complete only when:
 - Required tests are green.
 - Delivery docs are synchronized: `project-description.md`, `runbook.md`,
   `status.md`, `traceability.md`, `decisions.md`, and `iterations/*.md`.
+- `CHANGELOG.md` carries the iteration's user-visible effect under the next version,
+  or the iteration report states why there is none.
 - Config is strictly validated before business logic starts.
 - Runtime paths contain no self-healing or fallback for invalid configuration.
 - Single sources of truth are defined for key rules and invariants.

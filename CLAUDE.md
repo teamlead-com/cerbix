@@ -132,3 +132,5 @@ unchanged, which is what keeps `secrets.enabled: false` meaning "nothing else ch
 ## Documentation process (spec-before-code, enforced by convention)
 
 Docs are in **English**. Every feature follows: a spec in `docs/specs/func-*.md` → (if the feature has any SPA surface: an approved UI mock **before** writing frontend code) → implementation → `-race` + E2E on a live stack → iteration report `docs/iterations/iter-NNNN.md` + decision record `docs/decisions.md` (`D-NNNN`, next free number) + a row in `docs/traceability.md` (+ `docs/overview.md` when behavior/stack changes).
+
+On closing an iteration, before the commit: add its user-visible effect to `CHANGELOG.md` under `## [vX.Y.Z] - Unreleased` (or state in the iteration report why it has none). On release, replace `Unreleased` with the date.

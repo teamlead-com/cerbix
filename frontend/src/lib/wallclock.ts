@@ -212,6 +212,25 @@ export function utcDayLabel(iso: string | null | undefined): string {
   return `${dmy(p)} UTC`;
 }
 
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/**
+ * A UTC calendar month named by its key — the status page's incident history (iter-0203). The key
+ * is a month, not an instant, so no zone conversion happens; the month boundaries are UTC ones, and
+ * the label says so like every other UTC phrase here.
+ *
+ *   utcMonthLabel("2026-09")  ->  "September 2026 UTC"
+ */
+export function utcMonthLabel(month: string | null | undefined): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(month ?? "");
+  const i = m ? Number(m[2]) - 1 : -1;
+  if (!m || i < 0 || i > 11) return ABSENT;
+  return `${MONTH_NAMES[i]} ${m[1]} UTC`;
+}
+
 /**
  * A range of UTC calendar days — a reliability segment's extent. The suffix is named ONCE: both
  * ends are UTC by construction, and repeating it is noise rather than honesty.

@@ -57,6 +57,22 @@ export function relTime(ts?: string): string {
   return `${Math.round(h / 24)}d ago`;
 }
 
+// Human-readable incident duration (started → resolved); "" when either end is missing or the
+// span is not positive. Shared by the status page's past incidents and the incident history.
+export function incidentDuration(startISO?: string | null, endISO?: string | null): string {
+  if (!startISO || !endISO) return "";
+  const ms = new Date(endISO).getTime() - new Date(startISO).getTime();
+  if (!(ms > 0)) return "";
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const rm = mins % 60;
+  if (h < 24) return rm ? `${h}h ${rm}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return rh ? `${d}d ${rh}h` : `${d}d`;
+}
+
 // ── System-authored notes in an incident's timeline ──────────────────────────────────────────
 
 /**

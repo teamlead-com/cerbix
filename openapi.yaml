@@ -2686,6 +2686,40 @@ paths:
               schema: { $ref: '#/components/schemas/StatusPageRender' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/v1/status-pages/{pageID}/history:
+    parameters:
+      - { $ref: '#/components/parameters/PageID' }
+      - in: query
+        name: month
+        required: false
+        schema: { type: string, pattern: '^[0-9]{4}-[0-9]{2}$' }
+        description: >
+          A UTC calendar month, YYYY-MM. Default: the current UTC month. Must be one of the months
+          the 90-day history touches (`months` in the response); otherwise 400 `month_outside_history`.
+          Malformed: 400 `invalid_month`.
+      - in: query
+        name: cursor
+        required: false
+        schema: { type: string }
+        description: >
+          Opaque; pass `next_cursor` from the previous response of the same month verbatim. Malformed,
+          not in the server's own spelling, outside the month or after now: 400 `invalid_cursor`.
+    get:
+      tags: [status-pages]
+      summary: Incident history of a page for an authenticated org member (any visibility)
+      description: >
+        Past incidents (resolved in the last 90 days) of one UTC month, newest first, at most 50 per
+        response, with the per-month counts of the history. Same projection as the render's
+        `recent_incidents` (func-status-pages-incidents.md §13.4).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IncidentHistory' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /api/v1/status-pages/{pageID}/feed:
     parameters:
       - { $ref: '#/components/parameters/PageID' }
@@ -3007,6 +3041,53 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/StatusPageRender' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/public/status-pages/{slug}/history:
+    parameters:
+      - in: path
+        name: slug
+        required: true
+        schema: { type: string }
+      - in: query
+        name: token
+        required: false
+        schema: { type: string }
+        description: Required for unlisted pages.
+      - in: query
+        name: month
+        required: false
+        schema: { type: string, pattern: '^[0-9]{4}-[0-9]{2}$' }
+        description: >
+          A UTC calendar month, YYYY-MM. Default: the current UTC month. Must be one of the months
+          the 90-day history touches (`months` in the response); otherwise 400 `month_outside_history`.
+          Malformed: 400 `invalid_month`.
+      - in: query
+        name: cursor
+        required: false
+        schema: { type: string }
+        description: >
+          Opaque; pass `next_cursor` from the previous response of the same month verbatim. Malformed,
+          not in the server's own spelling, outside the month or after now: 400 `invalid_cursor`.
+    get:
+      tags: [status-pages]
+      security: []
+      summary: >
+        Public (unauthenticated) incident history, with the render's visibility rules: public pages
+        to anyone, unlisted pages with the matching token, internal pages 404.
+      description: >
+        Past incidents (resolved in the last 90 days) of one UTC month, newest first, at most 50 per
+        response, redacted exactly as the public render redacts `recent_incidents`. Served through
+        the public render cache; a page above the public component limit is refused with 503.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IncidentHistory' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { description: 'history_busy: too many uncached history requests in flight; retry after the Retry-After seconds.' }
+        '503': { description: 'status_page_over_safe_limit: the page has more components than the public limit.' }
 
   /api/v1/public/status-pages/{slug}/feed:
     parameters:
@@ -6242,9 +6323,30 @@ components:
         unmeasured_count: { type: integer, description: 'How many components reported no measurement.' }
         components: { type: array, items: { $ref: '#/components/schemas/ComponentView' } }
         active_incidents: { type: array, items: { $ref: '#/components/schemas/IncidentDetail' } }
-        recent_incidents: { type: array, items: { $ref: '#/components/schemas/IncidentDetail' }, description: 'Resolved in the last 90 days, newest first; each carries its timeline and postmortem (if published).' }
+        recent_incidents: { type: array, items: { $ref: '#/components/schemas/IncidentDetail' }, description: 'At most the 10 newest of the incidents resolved in the last 90 days (resolved_at, then id, descending); each carries its timeline and postmortem (if published). The rest are served by the incident history.' }
+        recent_incidents_more: { type: boolean, description: 'True when the last 90 days hold more resolved incidents than recent_incidents carries; the rest are in the incident history.' }
         maintenance: { type: array, items: { $ref: '#/components/schemas/MaintenanceWindow' }, description: 'Active or scheduled maintenance.' }
         updated_at: { type: string, format: date-time }
+    IncidentHistory:
+      type: object
+      required: [title, month, from, to, history_from, months, incidents, next_cursor]
+      properties:
+        title: { type: string, description: "The page's title, for the history page's header." }
+        month: { type: string, description: 'The UTC month served, YYYY-MM.' }
+        from: { type: string, format: date-time, description: "The month's start, or the history's start if later." }
+        to: { type: string, format: date-time, description: "The month's end, or now if earlier." }
+        history_from: { type: string, format: date-time, description: 'Where the 90-day history begins (now − 90 days).' }
+        months:
+          type: array
+          description: Every UTC month the history touches, newest first, with its number of past incidents.
+          items:
+            type: object
+            required: [month, count]
+            properties:
+              month: { type: string }
+              count: { type: integer }
+        incidents: { type: array, items: { $ref: '#/components/schemas/IncidentDetail' }, description: 'At most 50, newest first (resolved_at, then id).' }
+        next_cursor: { type: string, nullable: true, description: 'Pass as `cursor` for the next page of this month; null on the last page.' }
     AgentToken:
       type: object
       properties:

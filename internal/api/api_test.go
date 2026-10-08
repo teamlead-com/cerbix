@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -117,9 +118,16 @@ type fakeStore struct {
 	projectionCalls        int
 	monitorProjectionCalls int
 	pageIncidentCalls      int
-	pageMaintenanceCalls   int
-	timelineCalls          int
-	postmortemCalls        int
+	historyCalls           int
+	// historyMu guards historyCalls: the limiter test runs history renders concurrently.
+	historyMu sync.Mutex
+	// historyGate, when set, holds every IncidentHistory call until it is closed or fed, and
+	// historyInside counts the calls that have arrived — the limiter test's two handles.
+	historyGate          chan struct{}
+	historyInside        *atomic.Int32
+	pageMaintenanceCalls int
+	timelineCalls        int
+	postmortemCalls      int
 	// previews and sealedThrough model the retroactive-maintenance gate.
 	previews           map[string]store.MaintenancePreview
 	sealedThrough      time.Time
@@ -1433,7 +1441,7 @@ func componentContractError(err error) contracttest.ComponentError {
 
 // The page's incident/maintenance context, batched. Each carries a call counter, because the
 // difference between "batched" and "looped" is invisible in the payload ([318] P1-1).
-func (f *fakeStore) IncidentsForPage(ctx context.Context, projectIDs []string, since time.Time) (store.PageIncidents, error) {
+func (f *fakeStore) IncidentsForPage(ctx context.Context, projectIDs []string, since, until time.Time, recentLimit int) (store.PageIncidents, error) {
 	f.pageIncidentCalls++
 	out := store.PageIncidents{Active: []domain.Incident{}, Recent: []domain.Incident{}}
 	want := map[string]bool{}
@@ -1448,12 +1456,67 @@ func (f *fakeStore) IncidentsForPage(ctx context.Context, projectIDs []string, s
 			out.Active = append(out.Active, in)
 			continue
 		}
-		if in.ResolvedAt != nil && in.ResolvedAt.After(since) {
+		if in.ResolvedAt != nil && in.ResolvedAt.After(since) && !in.ResolvedAt.After(until) {
 			out.Recent = append(out.Recent, in)
 		}
 	}
 	sort.Slice(out.Active, func(i, j int) bool { return out.Active[i].ID < out.Active[j].ID })
-	sort.Slice(out.Recent, func(i, j int) bool { return out.Recent[i].ID < out.Recent[j].ID })
+	sortHistoryOrder(out.Recent)
+	if len(out.Recent) > recentLimit {
+		out.Recent, out.RecentMore = out.Recent[:recentLimit], true
+	}
+	return out, nil
+}
+
+// sortHistoryOrder is the store's history order (resolved_at DESC, id DESC), which the real SQL
+// owns and internal/store's tests prove; the fake only mirrors it so handler tests can read order.
+func sortHistoryOrder(incs []domain.Incident) {
+	sort.Slice(incs, func(i, j int) bool {
+		a, b := incs[i], incs[j]
+		if !a.ResolvedAt.Equal(*b.ResolvedAt) {
+			return a.ResolvedAt.After(*b.ResolvedAt)
+		}
+		return a.ID > b.ID
+	})
+}
+
+// IncidentHistory is a deliberately plain mirror of the store's month query: same filters and
+// order, no snapshot. The SQL itself is proved against PostgreSQL in internal/store.
+func (f *fakeStore) IncidentHistory(ctx context.Context, projectIDs []string, since, until, monthStart, monthEnd time.Time,
+	after *store.HistoryCursor, limit int) (store.IncidentHistoryPage, error) {
+	f.historyMu.Lock()
+	f.historyCalls++
+	f.historyMu.Unlock()
+	if f.historyInside != nil {
+		f.historyInside.Add(1)
+	}
+	if f.historyGate != nil {
+		<-f.historyGate // the limiter test holds renders here
+	}
+	out := store.IncidentHistoryPage{Counts: map[string]int{}, Incidents: []domain.Incident{}}
+	want := map[string]bool{}
+	for _, id := range projectIDs {
+		want[id] = true
+	}
+	var month []domain.Incident
+	for _, in := range f.incidents {
+		if !want[in.ProjectID] || in.Status != domain.IncidentResolved || in.ResolvedAt == nil || !in.ResolvedAt.After(since) || in.ResolvedAt.After(until) {
+			continue
+		}
+		out.Counts[in.ResolvedAt.UTC().Format("2006-01")]++
+		if in.ResolvedAt.Before(monthStart) || !in.ResolvedAt.Before(monthEnd) {
+			continue
+		}
+		if after != nil && !(in.ResolvedAt.Before(after.ResolvedAt) || (in.ResolvedAt.Equal(after.ResolvedAt) && in.ID < after.ID)) {
+			continue
+		}
+		month = append(month, in)
+	}
+	sortHistoryOrder(month)
+	if len(month) > limit {
+		month, out.More = month[:limit], true
+	}
+	out.Incidents = month
 	return out, nil
 }
 

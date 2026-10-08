@@ -561,3 +561,45 @@ describe("PublicStatusView uptime_since", () => {
     wrapper.unmount();
   });
 });
+
+// iter-0203 (func-status-pages-incidents.md §13.5): the page lists at most ten past incidents and
+// links to the incident history only when the server says more exist; the link keeps the access
+// shape the visitor is using.
+describe("PublicStatusView past incidents and the incident history link", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-21T20:00:00Z"));
+    apiMock.GET.mockReset();
+    routeMock.query = {};
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    document.body.innerHTML = "";
+  });
+
+  it("shows no history link and the 90-day scope when nothing more exists", async () => {
+    const wrapper = await mountView({ ...renderFixture(), recent_incidents_more: false });
+    expect(wrapper.find('[data-testid="past-incidents-history-link"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="past-incidents-scope"]').text()).toBe("last 90 days");
+    expect(wrapper.findAll('[data-testid="past-incident-row"]').length).toBeGreaterThan(0);
+    wrapper.unmount();
+  });
+
+  it("says the list is the latest ten and links to the history when more exist", async () => {
+    const wrapper = await mountView({ ...renderFixture(), recent_incidents_more: true });
+    expect(wrapper.find('[data-testid="past-incidents-scope"]').text()).toBe("latest 10 · last 90 days");
+    const link = wrapper.find('[data-testid="past-incidents-history-link"]');
+    expect(link.exists()).toBe(true);
+    expect(link.attributes("href")).toBe("/status/public-status/history");
+    wrapper.unmount();
+  });
+
+  it("keeps an unlisted page's token on the history link", async () => {
+    routeMock.query = { token: "tok 1" };
+    const wrapper = await mountView({ ...renderFixture(), recent_incidents_more: true });
+    expect(wrapper.find('[data-testid="past-incidents-history-link"]').attributes("href")).toBe(
+      "/status/public-status/history?token=tok+1",
+    );
+    wrapper.unmount();
+  });
+});

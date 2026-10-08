@@ -172,6 +172,11 @@ type Store struct {
 	// atomicity: when set, LinkPrecedingChanges fails between the link inserts and the
 	// 🚀 note so the regression can assert that neither survives. Always nil in production.
 	changeNoteFault func() error
+	// historyBetweenReads is a TEST-ONLY seam for the incident history's one-snapshot rule
+	// (func-status-pages-incidents.md §13.4 rule 3): when set, IncidentHistory calls it between
+	// the month counts and the incident list, so a regression can write in between and assert
+	// that neither read sees it. Always nil in production.
+	historyBetweenReads func()
 	// secretsEnabled is the authoritative persistence-boundary feature gate for
 	// project inventory references. API handlers also gate the public surface, but
 	// MaC and future internal writers must fail closed here rather than bypass it.

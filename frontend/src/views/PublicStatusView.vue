@@ -4,9 +4,9 @@ import { useRoute } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import BrandGlyph from "@/components/BrandGlyph.vue";
-import BrandMark from "@/components/BrandMark.vue";
+import PastIncidentRow from "@/components/PastIncidentRow.vue";
+import PublicStatusHeader from "@/components/PublicStatusHeader.vue";
 import SinceChip from "@/components/SinceChip.vue";
-import { useTheme } from "@/composables/useTheme";
 import {
   componentMeta,
   overallStatusPresentation,
@@ -14,7 +14,6 @@ import {
 } from "@/lib/statuspage";
 import { useBranding } from "@/stores/branding";
 import { impactBadge, relTime, statusBadge } from "@/lib/incident";
-import { renderSections } from "@/lib/postmortem";
 import { utcClockLabel, utcDayLabel } from "@/lib/wallclock";
 import { isoInstant, utcDayBefore, utcDayKey } from "@/lib/datekeys";
 
@@ -24,9 +23,7 @@ type ComponentDay = components["schemas"]["ComponentDay"];
 type IncidentDetail = components["schemas"]["IncidentDetail"];
 
 const route = useRoute();
-const { theme, toggle } = useTheme();
 const branding = useBranding(); // loaded app-wide in App.vue (public endpoint)
-const themeLabel = computed(() => (theme.value === "dark" ? "Switch to light theme" : "Switch to dark theme"));
 const slug = route.params.slug as string;
 const token = (route.query.token as string) || "";
 const previewID = (route.query.preview as string) || "";
@@ -103,20 +100,15 @@ type Upd = { id?: string; status?: string; body?: string; created_at?: string };
 function lastUpdate(updates?: Upd[]): Upd | null {
   return updates && updates.length ? updates[updates.length - 1] : null;
 }
-// Human-readable incident duration (started → resolved).
-function duration(startISO?: string | null, endISO?: string | null): string {
-  if (!startISO || !endISO) return "";
-  const ms = new Date(endISO).getTime() - new Date(startISO).getTime();
-  if (!(ms > 0)) return "";
-  const mins = Math.round(ms / 60000);
-  if (mins < 60) return `${mins} min`;
-  const h = Math.floor(mins / 60);
-  const rm = mins % 60;
-  if (h < 24) return rm ? `${h}h ${rm}m` : `${h}h`;
-  const d = Math.floor(h / 24);
-  const rh = h % 24;
-  return rh ? `${d}d ${rh}h` : `${d}d`;
-}
+// The incident history of this page (§13.5). The link keeps the access shape the visitor is using:
+// an unlisted page's token, or an internal preview's page id — without it the history would 404.
+const historyHref = computed(() => {
+  const q = new URLSearchParams();
+  if (token) q.set("token", token);
+  if (previewID) q.set("preview", previewID);
+  const qs = q.toString();
+  return `/status/${encodeURIComponent(slug)}/history${qs ? `?${qs}` : ""}`;
+});
 
 // Group components by their `group` field, preserving first-seen order.
 const groups = computed(() => {
@@ -340,55 +332,7 @@ onMounted(async () => {
 
 <template>
   <div class="min-h-screen bg-bg text-ink">
-    <!-- sticky public header -->
-    <header
-      class="sticky top-0 z-10 border-b border-border bg-surface/80 backdrop-blur"
-    >
-      <div class="mx-auto flex h-[60px] max-w-[820px] items-center gap-3 px-5">
-        <BrandMark :tile="28" :glyph="16" />
-        <b class="text-[15px] font-semibold tracking-tight">{{
-          page?.title || "Status"
-        }}</b>
-        <div class="ml-auto flex items-center gap-2">
-          <button
-            class="grid h-[34px] w-[34px] place-items-center rounded-sm border border-border bg-surface text-ink-2 hover:border-border-strong hover:text-ink"
-            type="button"
-            :aria-label="themeLabel"
-            :aria-pressed="theme === 'dark'"
-            @click="toggle"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              class="h-4 w-4"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <circle cx="12" cy="12" r="4" />
-              <path
-                d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"
-              />
-            </svg>
-          </button>
-          <a
-            :href="feed('rss')"
-            class="inline-flex h-[34px] items-center gap-[7px] rounded-sm border border-border bg-surface px-[13px] text-[13px] font-medium text-ink hover:border-border-strong"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              class="h-[15px] w-[15px]"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16" />
-              <circle cx="5" cy="19" r="1.4" fill="currentColor" />
-            </svg>
-            RSS
-          </a>
-        </div>
-      </div>
-    </header>
+    <PublicStatusHeader :title="page?.title || 'Status'" :feed-href="feed('rss')" />
 
     <main class="mx-auto max-w-[820px] px-5 pb-16 pt-[26px]">
       <div
@@ -831,141 +775,36 @@ onMounted(async () => {
           </div>
         </section>
 
-        <!-- incident history (resolved, last 90 days) -->
+        <!-- past incidents: at most ten here; the rest are in the incident history (§13.5) -->
         <section
           v-if="page.recent_incidents && page.recent_incidents.length"
           data-section="past-incidents"
         >
           <div class="mb-[10px] mt-[26px] flex items-center gap-[10px]">
             <h2 class="m-0 text-[13px] font-semibold">Past incidents</h2>
-            <span class="ml-auto text-[12px] text-ink-3">last 90 days</span>
+            <span class="ml-auto text-[12px] text-ink-3" data-testid="past-incidents-scope">{{
+              page.recent_incidents_more ? "latest 10 · last 90 days" : "last 90 days"
+            }}</span>
           </div>
           <div
             class="overflow-hidden rounded-lg border border-border bg-surface shadow-card"
           >
-            <div
+            <PastIncidentRow
               v-for="(inc, incidentIndex) in page.recent_incidents"
               :key="pastKey(incidentIndex)"
-              class="border-b border-border last:border-b-0"
+              :inc="inc"
+              :header-id="pastHeaderID(incidentIndex)"
+              :panel-id="pastPanelID(incidentIndex)"
+              :expanded="isExpanded(pastKey(incidentIndex))"
+              @toggle="toggleInc(pastKey(incidentIndex))"
+            />
+            <a
+              v-if="page.recent_incidents_more"
+              :href="historyHref"
+              class="flex items-center justify-center gap-[6px] border-t border-border px-[18px] py-[11px] text-[13px] font-medium text-accent hover:bg-surface-2"
+              data-testid="past-incidents-history-link"
+              >View incident history <span aria-hidden="true">→</span></a
             >
-              <!-- collapsed row (click to expand) -->
-              <button
-                :id="pastHeaderID(incidentIndex)"
-                type="button"
-                class="flex w-full min-w-0 flex-wrap items-center gap-3 px-[18px] py-[13px] text-left hover:bg-surface-2"
-                :aria-expanded="isExpanded(pastKey(incidentIndex))"
-                :aria-controls="pastPanelID(incidentIndex)"
-                @click="toggleInc(pastKey(incidentIndex))"
-                @keydown.enter.prevent="toggleInc(pastKey(incidentIndex))"
-                @keydown.space.prevent="toggleInc(pastKey(incidentIndex))"
-              >
-                <span
-                  class="h-[8px] w-[8px] flex-none rounded-full bg-up"
-                ></span>
-                <div class="min-w-0 flex-1">
-                  <div class="text-[13.5px] font-medium">{{ inc.title }}</div>
-                  <div class="font-mono text-[11.5px] text-ink-3">
-                    resolved {{ relTime(inc.resolved_at ?? undefined)
-                    }}<template
-                      v-if="duration(inc.started_at, inc.resolved_at)"
-                    >
-                      · lasted
-                      {{ duration(inc.started_at, inc.resolved_at) }}</template
-                    >
-                    ·
-                    {{ impactBadge(inc.impact).label.toLowerCase() }}
-                    impact<template v-if="inc.postmortem">
-                      · <span class="text-accent">postmortem</span></template
-                    >
-                  </div>
-                </div>
-                <span
-                  class="rounded-full px-[9px] py-[2px] text-[11.5px] font-semibold"
-                  :class="statusBadge(inc.status).cls"
-                  >{{ statusBadge(inc.status).label }}</span
-                >
-                <svg
-                  viewBox="0 0 24 24"
-                  class="h-[15px] w-[15px] flex-none text-ink-3 transition-transform"
-                  :class="
-                    isExpanded(pastKey(incidentIndex)) ? 'rotate-180' : ''
-                  "
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                >
-                  <path d="M6 9l6 6 6-6" />
-                </svg>
-              </button>
-              <!-- expanded: postmortem if published, else the update timeline -->
-              <div
-                v-if="isExpanded(pastKey(incidentIndex))"
-                :id="pastPanelID(incidentIndex)"
-                role="region"
-                :aria-labelledby="pastHeaderID(incidentIndex)"
-                class="border-t border-border bg-surface-2 px-[18px] py-[15px]"
-              >
-                <template
-                  v-if="
-                    inc.postmortem && renderSections(inc.postmortem.body).length
-                  "
-                >
-                  <div
-                    class="mb-[10px] text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3"
-                  >
-                    Postmortem
-                  </div>
-                  <div
-                    v-for="sec in renderSections(inc.postmortem.body)"
-                    :key="sec.heading"
-                    class="mb-3 last:mb-0"
-                  >
-                    <h4
-                      class="mb-1 text-[12px] font-semibold uppercase tracking-[0.05em] text-ink-3"
-                    >
-                      {{ sec.heading }}
-                    </h4>
-                    <p
-                      class="whitespace-pre-wrap text-[13px] leading-relaxed text-ink-2"
-                    >
-                      {{ sec.content }}
-                    </p>
-                  </div>
-                </template>
-                <template v-else-if="inc.updates && inc.updates.length">
-                  <div
-                    class="mb-[10px] text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3"
-                  >
-                    Timeline
-                  </div>
-                  <div
-                    v-for="(u, updateIndex) in inc.updates"
-                    :key="updateIndex"
-                    class="border-l-2 border-border pb-[11px] pl-3 last:pb-0"
-                  >
-                    <div class="flex items-center gap-2">
-                      <span
-                        class="rounded-full px-[8px] py-[1px] text-[11px] font-semibold"
-                        :class="statusBadge(u.status).cls"
-                        >{{ statusBadge(u.status).label }}</span
-                      >
-                      <span class="font-mono text-[11px] text-ink-3">{{
-                        relTime(u.created_at)
-                      }}</span>
-                    </div>
-                    <p
-                      v-if="u.body"
-                      class="mt-[3px] whitespace-pre-wrap text-[13px] text-ink-2"
-                    >
-                      {{ u.body }}
-                    </p>
-                  </div>
-                </template>
-                <p v-else class="text-[13px] text-ink-3">
-                  No further details were published.
-                </p>
-              </div>
-            </div>
           </div>
         </section>
 

@@ -151,6 +151,13 @@ const routes: RouteRecordRaw[] = [
     component: () => import("@/views/PublicStatusView.vue"),
     meta: { public: true },
   },
+  {
+    // iter-0203: the month-paged incident history of a status page (func-status-pages-incidents.md §13.5).
+    path: "/status/:slug/history",
+    name: "public-status-history",
+    component: () => import("@/views/PublicStatusHistoryView.vue"),
+    meta: { public: true },
+  },
   { path: "/:pathMatch(.*)*", redirect: "/" },
 ];
 

@@ -176,7 +176,8 @@ type Store interface {
 	ListOpenIncidentsByProject(ctx context.Context, projectID string) ([]domain.Incident, error)
 	// The page's incident/maintenance context, batched across ALL its projects: an org page spans
 	// projects, and a per-project loop made the unauthenticated render O(projects) ([318] P1-1).
-	IncidentsForPage(ctx context.Context, projectIDs []string, since time.Time) (store.PageIncidents, error)
+	IncidentsForPage(ctx context.Context, projectIDs []string, since, until time.Time, recentLimit int) (store.PageIncidents, error)
+	IncidentHistory(ctx context.Context, projectIDs []string, since, until, monthStart, monthEnd time.Time, after *store.HistoryCursor, limit int) (store.IncidentHistoryPage, error)
 	MaintenanceForPage(ctx context.Context, projectIDs []string, now time.Time) ([]domain.MaintenanceWindow, error)
 	IncidentTimelines(ctx context.Context, incidentIDs []string) (map[string][]domain.IncidentUpdate, error)
 	PostmortemsForIncidents(ctx context.Context, incidentIDs []string) (map[string]domain.Postmortem, error)
@@ -349,9 +350,13 @@ type PushRecorder interface {
 
 // Handler holds API dependencies.
 type Handler struct {
-	store             Store
-	logger            *slog.Logger
-	renderCache       *statusPageCache
+	store       Store
+	logger      *slog.Logger
+	renderCache *statusPageCache
+	// historySlots bounds the uncached public incident-history renders in flight (iter-0203
+	// review R1-6): a cursor is any valid position, so cache keys are free to mint and the cache
+	// bounds memory, not work. One slot per render, independent of the key.
+	historySlots      chan struct{}
 	minPasswordLen    int
 	metrics           Metrics
 	results           ResultSink
@@ -419,7 +424,7 @@ func New(store Store, logger *slog.Logger, minPasswordLen int) *Handler {
 		minPasswordLen = 8
 	}
 	return &Handler{store: store, logger: logger, minPasswordLen: minPasswordLen,
-		renderCache: newStatusPageCache()}
+		renderCache: newStatusPageCache(), historySlots: make(chan struct{}, historyRenderSlots)}
 }
 
 // effectiveMinPasswordLen resolves the live policy value, falling back to the
@@ -721,6 +726,7 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("PATCH /api/v1/status-pages/{pageID}", h.updateStatusPage)
 	mux.HandleFunc("DELETE /api/v1/status-pages/{pageID}", h.deleteStatusPage)
 	mux.HandleFunc("GET /api/v1/status-pages/{pageID}/render", h.renderStatusPageAuthed)
+	mux.HandleFunc("GET /api/v1/status-pages/{pageID}/history", h.incidentHistoryAuthed)
 	mux.HandleFunc("GET /api/v1/status-pages/{pageID}/feed", h.renderFeedAuthed)
 	mux.HandleFunc("GET /api/v1/status-pages/{pageID}/subscribers", h.listSubscribers)
 	mux.HandleFunc("DELETE /api/v1/status-pages/{pageID}/subscribers/{subscriberID}", h.deleteSubscriber)
@@ -780,6 +786,7 @@ func (h *Handler) Router() *http.ServeMux {
 func (h *Handler) PublicRouter() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/public/status-pages/{slug}", h.renderStatusPagePublic)
+	mux.HandleFunc("GET /api/v1/public/status-pages/{slug}/history", h.incidentHistoryPublic)
 	mux.HandleFunc("GET /api/v1/public/status-pages/{slug}/feed", h.renderFeedPublic)
 	mux.HandleFunc("POST /api/v1/public/status-pages/{slug}/subscribers", h.subscribe)
 	mux.HandleFunc("POST /api/v1/public/subscriptions/{token}/confirm", h.confirmSubscription)

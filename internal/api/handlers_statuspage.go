@@ -302,31 +302,14 @@ func (h *Handler) renderStatusPageAuthed(w http.ResponseWriter, r *http.Request)
 // public is served to anyone, unlisted requires the matching ?token=, and
 // internal pages are hidden (404).
 func (h *Handler) renderStatusPagePublic(w http.ResponseWriter, r *http.Request) {
-	sp, err := h.store.GetStatusPageBySlug(r.Context(), r.PathValue("slug"))
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
-	if err != nil {
-		h.serverError(w, "get_status_page_by_slug", err)
-		return
-	}
-	switch sp.Visibility {
-	case domain.VisibilityPublic:
-		// served
-	case domain.VisibilityUnlisted:
-		if tok := r.URL.Query().Get("token"); tok == "" || tok != sp.UnlistedToken {
-			writeError(w, http.StatusNotFound, "not found")
-			return
-		}
-	default: // internal and anything else: hidden from the public endpoint
-		writeError(w, http.StatusNotFound, "not found")
+	sp, ok := h.publicStatusPage(w, r)
+	if !ok {
 		return
 	}
 	// §15.0's rate bound: a few seconds of shared bytes, keyed to the exact access shape so an
 	// unlisted page's render is unreachable without its token — and COALESCED, so N simultaneous
 	// cold requests cost ONE render rather than N ([318] P1-2).
-	key := statusPageCacheKey(sp.ID, true, r.URL.Query().Get("token"))
+	key := statusPageCacheKey(cacheRender, sp, true, r.URL.Query().Get("token"))
 	body, hit, err := h.renderCache.do(key, func() ([]byte, bool, error) {
 		rec := &bufferedResponse{header: http.Header{}, status: http.StatusOK}
 		h.writeStatusPageRender(rec, r, sp, true) // public: strip internal ids
@@ -339,6 +322,31 @@ func (h *Handler) renderStatusPagePublic(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeBufferedResponse(w, body, hit)
+}
+
+// publicStatusPage resolves the slug and applies the public visibility gate, for every public
+// route that serves a page's content (the render and the incident history, §13.4): public is
+// served to anyone, unlisted only with the matching ?token=, internal and anything else is 404.
+func (h *Handler) publicStatusPage(w http.ResponseWriter, r *http.Request) (domain.StatusPage, bool) {
+	sp, err := h.store.GetStatusPageBySlug(r.Context(), r.PathValue("slug"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return domain.StatusPage{}, false
+	}
+	if err != nil {
+		h.serverError(w, "get_status_page_by_slug", err)
+		return domain.StatusPage{}, false
+	}
+	switch sp.Visibility {
+	case domain.VisibilityPublic:
+		return sp, true
+	case domain.VisibilityUnlisted:
+		if tok := r.URL.Query().Get("token"); tok != "" && tok == sp.UnlistedToken {
+			return sp, true
+		}
+	}
+	writeError(w, http.StatusNotFound, "not found")
+	return domain.StatusPage{}, false
 }
 
 // dayPoint is one day of a component's 90-day availability strip.
@@ -383,14 +391,17 @@ type statusPageRender struct {
 	// Summary is the worst MEASURED status, unchanged in name and type so every shipped client
 	// keeps parsing it. SummaryState and Unmeasured are the halves it cannot express: a page can
 	// be operational AND partly unmeasured, and those two facts must not be merged (invariant 67).
-	Summary         domain.ComponentStatus     `json:"summary"`
-	SummaryState    domain.PageSummaryState    `json:"summary_state"`
-	Unmeasured      int                        `json:"unmeasured_count"`
-	Components      []componentView            `json:"components"`
-	ActiveIncidents []incidentDetailView       `json:"active_incidents"`
-	RecentIncidents []incidentDetailView       `json:"recent_incidents"`
-	Maintenance     []domain.MaintenanceWindow `json:"maintenance"`
-	UpdatedAt       time.Time                  `json:"updated_at"`
+	Summary         domain.ComponentStatus  `json:"summary"`
+	SummaryState    domain.PageSummaryState `json:"summary_state"`
+	Unmeasured      int                     `json:"unmeasured_count"`
+	Components      []componentView         `json:"components"`
+	ActiveIncidents []incidentDetailView    `json:"active_incidents"`
+	RecentIncidents []incidentDetailView    `json:"recent_incidents"`
+	// RecentIncidentsMore says the 90-day window holds more past incidents than RecentIncidents
+	// carries; the rest are served by the incident history (func-status-pages-incidents.md §13.3).
+	RecentIncidentsMore bool                       `json:"recent_incidents_more"`
+	Maintenance         []domain.MaintenanceWindow `json:"maintenance"`
+	UpdatedAt           time.Time                  `json:"updated_at"`
 }
 
 // incidentDetailView is an incident enriched for the status page: its full
@@ -561,23 +572,8 @@ func writeBufferedResponse(w http.ResponseWriter, packed []byte, hit bool) {
 // unresolved incidents across the projects the components draw from.
 func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, sp domain.StatusPage, public bool) {
 	ctx := r.Context()
-	comps, err := h.store.ListComponentsByPage(ctx, sp.ID)
-	if err != nil {
-		h.serverError(w, "list_components", err)
-		return
-	}
-	// The absolute fail-closed public ceiling (§15.0, invariant 71b). An unauthenticated render is
-	// the one surface an attacker can amplify for free, so above the bound the page refuses AS A
-	// WHOLE and names the numbers. A truncated subset would be worse than a refusal: it would look
-	// like a complete page that happens to be healthy. The AUTHENTICATED view keeps listing
-	// everything, so the operator can see and fix what the public page cannot serve.
-	if public && len(comps) > publicComponentHardCeiling {
-		h.logger.Error("status page exceeds the public safe limit",
-			slog.String("page", sp.ID), slog.Int("components", len(comps)),
-			slog.Int("limit", publicComponentHardCeiling))
-		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf(
-			"status_page_over_safe_limit: this page has %d components, above the public limit of %d",
-			len(comps), publicComponentHardCeiling))
+	comps, ok := h.pageComponents(w, r, sp, public)
+	if !ok {
 		return
 	}
 	now := time.Now()
@@ -626,7 +622,7 @@ func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, 
 	}
 	sort.Strings(projects) // deterministic argument order, so two identical pages issue identical SQL
 	historyCutoff := now.Add(-win90.Duration)
-	incidents, err := h.store.IncidentsForPage(ctx, projects, historyCutoff)
+	incidents, err := h.store.IncidentsForPage(ctx, projects, historyCutoff, now, pastIncidentsOnPage)
 	if err != nil {
 		h.serverError(w, "page_incidents", err)
 		return
@@ -660,18 +656,43 @@ func (h *Handler) writeStatusPageRender(w http.ResponseWriter, r *http.Request, 
 	}
 
 	writeJSON(w, http.StatusOK, statusPageRender{
-		Slug:            sp.Slug,
-		Title:           sp.Title,
-		Visibility:      sp.Visibility,
-		Summary:         summary.Status,
-		SummaryState:    summary.State,
-		Unmeasured:      summary.UnmeasuredCount,
-		Components:      views,
-		ActiveIncidents: activeViews,
-		RecentIncidents: recentViews,
-		Maintenance:     maints,
-		UpdatedAt:       sp.UpdatedAt,
+		Slug:                sp.Slug,
+		Title:               sp.Title,
+		Visibility:          sp.Visibility,
+		Summary:             summary.Status,
+		SummaryState:        summary.State,
+		Unmeasured:          summary.UnmeasuredCount,
+		Components:          views,
+		ActiveIncidents:     activeViews,
+		RecentIncidents:     recentViews,
+		RecentIncidentsMore: incidents.RecentMore,
+		Maintenance:         maints,
+		UpdatedAt:           sp.UpdatedAt,
 	})
+}
+
+// pageComponents reads a page's components and enforces the absolute fail-closed public ceiling
+// (§15.0, invariant 71b), for the render and the incident history alike. An unauthenticated render
+// is the one surface an attacker can amplify for free, so above the bound the page refuses AS A
+// WHOLE and names the numbers. A truncated subset would be worse than a refusal: it would look like
+// a complete page that happens to be healthy. The AUTHENTICATED view keeps listing everything, so
+// the operator can see and fix what the public page cannot serve.
+func (h *Handler) pageComponents(w http.ResponseWriter, r *http.Request, sp domain.StatusPage, public bool) ([]domain.Component, bool) {
+	comps, err := h.store.ListComponentsByPage(r.Context(), sp.ID)
+	if err != nil {
+		h.serverError(w, "list_components", err)
+		return nil, false
+	}
+	if public && len(comps) > publicComponentHardCeiling {
+		h.logger.Error("status page exceeds the public safe limit",
+			slog.String("page", sp.ID), slog.Int("components", len(comps)),
+			slog.Int("limit", publicComponentHardCeiling))
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf(
+			"status_page_over_safe_limit: this page has %d components, above the public limit of %d",
+			len(comps), publicComponentHardCeiling))
+		return nil, false
+	}
+	return comps, true
 }
 
 // randomToken returns a 128-bit hex token for unlisted status pages.

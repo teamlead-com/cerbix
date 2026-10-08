@@ -8972,3 +8972,36 @@ forward pass materializes UP TO 240 buckets per slice — a ceiling, not a guara
 scheduler's per-cycle service budget, and runnable repairs are served before it, so a repair backlog
 delays recovery. A 12-day backlog over four services is about 69 000 buckets; the review's idle probe
 did 1 039 buckets in eight slices (1.56 s), which is not a forecast for a loaded instance.
+
+## D-0270 — the status page shows ten past incidents; the rest are a month-paged history (2026-10-08)
+
+**Context.** The pilot's status page lists every incident resolved in the last 90 days, and the list
+only grows. The page is long, and the render — an endpoint any anonymous visitor can call — reads,
+enriches and serves every one of them with no bound (`store.IncidentsForPage` has no `LIMIT`).
+
+**Decision (owner, 2026-10-08).** Spec revision 2 of `func-status-pages-incidents.md` (§13):
+
+- The page lists at most **ten** past incidents and a flag that more exist; a **history page**
+  pages through the rest.
+- History is navigated by **calendar month in UTC**, with at most 50 incidents per response and a
+  keyset cursor inside a month. UTC because a month must mean the same thing to every visitor and
+  the server has no visitor time zone; the page labels months as UTC. A per-page time zone would be
+  a new setting and was declined.
+- History **depth stays 90 days** — the existing definition of a past incident. A longer public
+  history is a separate decision and was declined as unnecessary.
+- One projection serves page and history incidents, so the history cannot drift from the page's
+  redaction or its `affected_component_ids` rule.
+
+**Consequences.** `recent_incidents` changes meaning from "every past incident of 90 days" to "the
+newest ten"; `recent_incidents_more` and two history routes are added to the API. A partial index
+on resolved incidents is added. Feeds, webhooks, subscriptions and incident semantics are unchanged.
+
+**After review round 1 (iter-0203).** The lists return at most their limit per project (a
+per-project `LATERAL` top-K) and stop early on an ordered index scan — tested on realistic data,
+including a deep cursor under a generic plan; rows examined are not universally bounded, since the
+planner may choose a sequential scan on a small table (re-review 2). And the exact per-month counts read the whole 90-day window of the
+page's projects through the index — the price of exact counts, stated rather than claimed away.
+Uncached public history renders are limited to 8 in flight per process (`429 history_busy`), because
+cursors are unsigned and a caller can mint cache keys freely; signing them would need a key shared
+by every API replica, which nothing in this deployment owns. The window's upper bound is the
+handler's `now`, applied to lists and counts alike.

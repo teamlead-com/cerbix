@@ -5008,6 +5008,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/status-pages/{pageID}/history": {
+        parameters: {
+            query?: {
+                /** @description A UTC calendar month, YYYY-MM. Default: the current UTC month. Must be one of the months the 90-day history touches (`months` in the response); otherwise 400 `month_outside_history`. Malformed: 400 `invalid_month`. */
+                month?: string;
+                /** @description Opaque; pass `next_cursor` from the previous response of the same month verbatim. Malformed, not in the server's own spelling, outside the month or after now: 400 `invalid_cursor`. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                pageID: components["parameters"]["PageID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Incident history of a page for an authenticated org member (any visibility)
+         * @description Past incidents (resolved in the last 90 days) of one UTC month, newest first, at most 50 per response, with the per-month counts of the history. Same projection as the render's `recent_incidents` (func-status-pages-incidents.md §13.4).
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description A UTC calendar month, YYYY-MM. Default: the current UTC month. Must be one of the months the 90-day history touches (`months` in the response); otherwise 400 `month_outside_history`. Malformed: 400 `invalid_month`. */
+                    month?: string;
+                    /** @description Opaque; pass `next_cursor` from the previous response of the same month verbatim. Malformed, not in the server's own spelling, outside the month or after now: 400 `invalid_cursor`. */
+                    cursor?: string;
+                };
+                header?: never;
+                path: {
+                    pageID: components["parameters"]["PageID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["IncidentHistory"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/status-pages/{pageID}/feed": {
         parameters: {
             query?: {
@@ -5629,6 +5684,79 @@ export interface paths {
                     };
                 };
                 404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/status-pages/{slug}/history": {
+        parameters: {
+            query?: {
+                /** @description Required for unlisted pages. */
+                token?: string;
+                /** @description A UTC calendar month, YYYY-MM. Default: the current UTC month. Must be one of the months the 90-day history touches (`months` in the response); otherwise 400 `month_outside_history`. Malformed: 400 `invalid_month`. */
+                month?: string;
+                /** @description Opaque; pass `next_cursor` from the previous response of the same month verbatim. Malformed, not in the server's own spelling, outside the month or after now: 400 `invalid_cursor`. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Public (unauthenticated) incident history, with the render's visibility rules: public pages to anyone, unlisted pages with the matching token, internal pages 404.
+         * @description Past incidents (resolved in the last 90 days) of one UTC month, newest first, at most 50 per response, redacted exactly as the public render redacts `recent_incidents`. Served through the public render cache; a page above the public component limit is refused with 503.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Required for unlisted pages. */
+                    token?: string;
+                    /** @description A UTC calendar month, YYYY-MM. Default: the current UTC month. Must be one of the months the 90-day history touches (`months` in the response); otherwise 400 `month_outside_history`. Malformed: 400 `invalid_month`. */
+                    month?: string;
+                    /** @description Opaque; pass `next_cursor` from the previous response of the same month verbatim. Malformed, not in the server's own spelling, outside the month or after now: 400 `invalid_cursor`. */
+                    cursor?: string;
+                };
+                header?: never;
+                path: {
+                    slug: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["IncidentHistory"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
+                /** @description history_busy: too many uncached history requests in flight; retry after the Retry-After seconds. */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description status_page_over_safe_limit: the page has more components than the public limit. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         put?: never;
@@ -9718,12 +9846,44 @@ export interface components {
             unmeasured_count?: number;
             components?: components["schemas"]["ComponentView"][];
             active_incidents?: components["schemas"]["IncidentDetail"][];
-            /** @description Resolved in the last 90 days, newest first; each carries its timeline and postmortem (if published). */
+            /** @description At most the 10 newest of the incidents resolved in the last 90 days (resolved_at, then id, descending); each carries its timeline and postmortem (if published). The rest are served by the incident history. */
             recent_incidents?: components["schemas"]["IncidentDetail"][];
+            /** @description True when the last 90 days hold more resolved incidents than recent_incidents carries; the rest are in the incident history. */
+            recent_incidents_more?: boolean;
             /** @description Active or scheduled maintenance. */
             maintenance?: components["schemas"]["MaintenanceWindow"][];
             /** Format: date-time */
             updated_at?: string;
+        };
+        IncidentHistory: {
+            /** @description The page's title, for the history page's header. */
+            title: string;
+            /** @description The UTC month served, YYYY-MM. */
+            month: string;
+            /**
+             * Format: date-time
+             * @description The month's start, or the history's start if later.
+             */
+            from: string;
+            /**
+             * Format: date-time
+             * @description The month's end, or now if earlier.
+             */
+            to: string;
+            /**
+             * Format: date-time
+             * @description Where the 90-day history begins (now − 90 days).
+             */
+            history_from: string;
+            /** @description Every UTC month the history touches, newest first, with its number of past incidents. */
+            months: {
+                month: string;
+                count: number;
+            }[];
+            /** @description At most 50, newest first (resolved_at, then id). */
+            incidents: components["schemas"]["IncidentDetail"][];
+            /** @description Pass as `cursor` for the next page of this month; null on the last page. */
+            next_cursor: string | null;
         };
         AgentToken: {
             /** Format: uuid */

@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // [318] P1-2 — the TTL map is only half a rate bound. These pin the half that was missing: the
@@ -115,10 +117,34 @@ func TestRenderCacheDoesNotStoreRefusals(t *testing.T) {
 // Different access shapes never share bytes, which is what keeps an unlisted page's render
 // unreachable without its token.
 func TestRenderCacheKeysSeparateAccessShapes(t *testing.T) {
-	pub := statusPageCacheKey("page", true, "")
-	tok := statusPageCacheKey("page", true, "secret")
-	authed := statusPageCacheKey("page", false, "")
+	unlisted := domain.StatusPage{ID: "page", Visibility: domain.VisibilityUnlisted}
+	pub := statusPageCacheKey(cacheRender, unlisted, true, "")
+	tok := statusPageCacheKey(cacheRender, unlisted, true, "secret")
+	authed := statusPageCacheKey(cacheRender, unlisted, false, "")
 	if pub == tok || pub == authed || tok == authed {
 		t.Fatalf("keys collide: public=%q token=%q authenticated=%q", pub, tok, authed)
+	}
+}
+
+// iter-0203 review R1-1: a key built by CONCATENATING `|`-separated fields let a caller-chosen
+// token spell another endpoint's key — `?token=|history|2026-10|` on the render was the history's
+// key, and the next visitor's history request was served the page render. Fields are now encoded
+// as a JSON array (a delimiter inside a field is escaped, so no field can forge a boundary), the
+// endpoint is its own field, and a PUBLIC page's token — which nothing checks — is not part of the
+// key at all, so arbitrary tokens cannot cycle the cache either.
+func TestCacheKeysCannotBeForgedAcrossEndpointsOrByAnUnusedToken(t *testing.T) {
+	public := domain.StatusPage{ID: "page", Visibility: domain.VisibilityPublic}
+	render := statusPageCacheKey(cacheRender, public, true, "|history|2026-10|")
+	history := statusPageCacheKey(cacheHistory, public, true, "", "2026-10", "")
+	if render == history {
+		t.Fatalf("a render key spelled the history key: %q", render)
+	}
+	if statusPageCacheKey(cacheRender, public, true, "anything") != statusPageCacheKey(cacheRender, public, true, "") {
+		t.Fatalf("a public page's unused token is part of its cache key: arbitrary tokens make new entries")
+	}
+	a := statusPageCacheKey(cacheHistory, public, true, "", "2026-10", "x|y")
+	b := statusPageCacheKey(cacheHistory, public, true, "", "2026-10|x", "y")
+	if a == b {
+		t.Fatalf("moving a delimiter between fields produced the same key: %q", a)
 	}
 }

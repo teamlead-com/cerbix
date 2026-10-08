@@ -735,3 +735,17 @@ The owner approved revision 4 and authorized its implementation inside iter-0187
 preserves the artifact's additive Dashboard placement and canonical styling. The one honest technical
 gap remains visible in the product: worker-region liveness exists, scheduler-issued-run diagnostics do
 not, so a long wait cannot be called a scheduler outage from current facts.
+
+## FR-039 — incident history mock approved (iter-0203, 2026-10-08)
+
+Source: [`mock-status-incident-history.html`](mock-status-incident-history.html), revision 1, also
+published to the owner as an artifact for review. Six screens at desktop and 430 px in both themes:
+the status page with more than ten past incidents (ten rows, `latest 10 · last 90 days`, a final
+*View incident history →* row), the page with ten or fewer (unchanged from today), and the history
+page's current month, *Show more*, an empty month and the oldest, partial month. It adds no colour
+and no new row grammar: history rows are the page's past-incident accordion rows, relative times
+included. The month navigator is the one new control — month tiles with counts (up to five; four in the mock), newest first,
+`aria-current` on the shown month, ← newer and → older, a 2 × 2 grid at 430 px, and a line saying
+months are UTC while times are local. The owner approved revision 1 on 2026-10-08. An open
+question — absolute resolution dates in history rows — was raised and not taken up, so history rows
+stay identical to the page's.

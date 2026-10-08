@@ -1,8 +1,11 @@
 package api
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
+
+	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
 // FR-021 §15.0 — the short-TTL public render cache, "as the rate bound" ([314] P1-7).
@@ -115,12 +118,31 @@ func (c *statusPageCache) do(key string, render func() (body []byte, cacheable b
 	return call.body, false, call.err
 }
 
-// statusPageCacheKey binds cached bytes to the access shape that produced them. The token is part
-// of the key, so an unlisted page's bytes are unreachable without it.
-func statusPageCacheKey(pageID string, public bool, token string) string {
+// The endpoints that share the render cache. The endpoint is a FIELD of the key, never a suffix.
+const (
+	cacheRender  = "render"
+	cacheHistory = "history"
+)
+
+// statusPageCacheKey binds cached bytes to the endpoint and the access shape that produced them.
+//
+// An unlisted page's token is part of the key, so its bytes are unreachable without it. A public
+// page's token is checked by nothing, so it is NOT part of the key: otherwise every invented token
+// would be a new entry (iter-0203 review R1-1). The fields are encoded as a JSON array, so a
+// caller-chosen value containing a delimiter cannot spell another key — concatenating `|`-separated
+// fields let `?token=|history|<month>|` on the render produce the history's key.
+func statusPageCacheKey(endpoint string, sp domain.StatusPage, public bool, token string, parts ...string) string {
 	shape := "authed"
 	if public {
 		shape = "public"
 	}
-	return pageID + "|" + shape + "|" + token
+	if sp.Visibility != domain.VisibilityUnlisted {
+		token = ""
+	}
+	fields := append([]string{endpoint, sp.ID, shape, token}, parts...)
+	b, err := json.Marshal(fields)
+	if err != nil { // a []string always marshals; refuse to share bytes if it ever did not
+		panic("status page cache key: " + err.Error())
+	}
+	return string(b)
 }

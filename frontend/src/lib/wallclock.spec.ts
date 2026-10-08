@@ -7,7 +7,7 @@ import {
   utcCellExtentLabel, utcClockLabel, utcClockRangeLabel,
   utcCompactInstantLabel, utcDayClockLabel, utcDayLabel, utcDayRangeLabel,
   localInputRangeZoneHint, localInputZoneHint, utcDayInputHint,
-  utcExtentLabel, utcInstantLabel, utcMillisLabel, utcSecondsLabel,
+  utcExtentLabel, utcInstantLabel, utcMillisLabel, utcMonthLabel, utcSecondsLabel,
 } from "./wallclock";
 
 // func-truthful-rendering §8 (FR-031 / NFR-025a, D-0235): identity is UTC, presentation is local,
@@ -237,7 +237,7 @@ describe("the mechanism's shape", () => {
       "utcCellExtentLabel", "utcClockLabel", "utcClockRangeLabel",
       "utcCompactInstantLabel", "utcDayClockLabel", "utcDayInputHint", "utcDayLabel",
       "utcDayRangeLabel", "utcExtentLabel", "utcInstantLabel", "utcMillisLabel",
-      "utcSecondsLabel",
+      "utcMonthLabel", "utcSecondsLabel",
     ]);
     // Every one of them has a caller. `clockSecondsLabel` in `lib/changes.ts` was exported,
     // documented as the honest one because it ended in ` Z`, and called by nothing in the
@@ -475,6 +475,7 @@ describe("the mechanism's shape", () => {
       utcDayClockLabel: () => utcDayClockLabel(A),
       utcDayLabel: () => utcDayLabel(A),
       utcDayRangeLabel: () => utcDayRangeLabel(A, B),
+      utcMonthLabel: () => utcMonthLabel("2026-08"),
     };
     const CANONICAL: Record<string, () => string> = {
       utcExtentLabel: () => utcExtentLabel(A, B),

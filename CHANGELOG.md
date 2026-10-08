@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [v0.3.8] - Unreleased
 
+### ✨ Added
+
+- **Incident history on status pages.** A status page now lists its ten most recent past incidents, and a **View incident history** link opens a history page that walks the last 90 days month by month (calendar months in UTC), up to 50 incidents at a time with **Show more**. Unlisted pages keep their token through the link. The page no longer grows with every resolved incident: what a page or history response carries is bounded, its incident lists stop early on the new index, and uncached public history requests are limited (HTTP 429 with `Retry-After` beyond the limit). The per-month counts still read the 90-day window (D-0270).
+
+### Changed
+
+- **API: `recent_incidents` on a status page render holds at most the 10 newest past incidents**, with a new `recent_incidents_more` flag; the rest are served by `GET /api/v1/public/status-pages/{slug}/history` and `GET /api/v1/status-pages/{pageID}/history`. A client that read `recent_incidents` as "every incident resolved in the last 90 days" should page through the history instead. Feeds, webhooks and subscriptions are unchanged.
+
 ### 🩹 Fixed
 
 - **Reliability readouts are no longer cut off by their card.** Hovering a bucket near either edge of a service's reliability strip or segment lane showed only part of its readout, because the card clips its contents. The readout is no longer clipped by the card and stays inside the window whenever it fits there, moving in from the edge, or above or over the strip when it has to.
@@ -14,7 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Upgrade notes
 
-- No schema migration, no configuration change.
+- One schema migration (00110): an index on resolved incidents, applied automatically on startup. No configuration change.
 
 ---
 

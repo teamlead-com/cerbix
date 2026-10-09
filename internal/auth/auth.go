@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -85,6 +86,13 @@ type Authenticator struct {
 	decoyHash         string         // argon2id hash verified for unknown users (anti-enumeration timing)
 	mailer            *mailer.Mailer // optional; enables self-service password reset
 	policy            PolicySource   // optional; instance-wide auth policy
+
+	// last_seen_at refresh throttle (iter-0205): when this process last stamped each user.
+	// The SQL guard in store.TouchUserSeen is what bounds writes across processes; this only
+	// spares the round trip. clock is overridden by tests.
+	seenMu sync.Mutex
+	seenAt map[string]time.Time
+	clock  func() time.Time
 }
 
 // PolicySource supplies the effective instance-wide auth policy (implemented by

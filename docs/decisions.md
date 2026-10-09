@@ -9035,3 +9035,28 @@ the pilot's endpoints is to be measured after deployment. What remains is
 the scan of the window's heartbeats themselves (hundreds of thousands of rows for 30–90 days); moving
 counts and p95 to pre-aggregated data is a separate, designed change, not this one. No migration, no
 configuration; the API addition is backward compatible.
+
+## D-0272 — "last active" is a stamp on the user, not a reading of their sessions (2026-10-09)
+
+**Context.** The owner saw "never" in the Last active column for users who had signed in. The
+column was `max(sessions.created_at)`; sessions live 24 h by default, the scheduler purges expired
+ones and sign-out deletes its own, so any user without a live session read "never", and a user
+with one read the time of that sign-in, not of their activity.
+
+**Decision.** A column of its own, `users.last_seen_at` (migration `00111`). `CreateSession` — the
+one store call every sign-in path goes through — stamps it in the same statement. A request
+authenticated by a session cookie refreshes it when it is older than 5 minutes: the API process
+skips users it stamped less than 5 minutes ago, and the SQL refuses to move a younger stamp, so
+several API processes cannot multiply the writes. The refresh is best effort and never denies a
+request; a failed one is retried on the next request. Machine credentials (service-account bearer
+tokens, client-credentials JWTs) do not move it. Writing it leaves `updated_at` alone. The
+migration backfills from each user's newest remaining session and never overwrites a stamp.
+
+**Consequences.** Both lists read the column; "last active" survives sign-out, expiry and the
+purge. History purged before the upgrade cannot be recovered: those users read "never" until
+their next sign-in. At most one `UPDATE users` per active user per 5 minutes per API process
+(rejected by the SQL guard when another process already wrote it). The bound is on writes, not on
+freshness: a process remembers an attempt the SQL guard refused, so the shown time can lag real
+activity by up to two intervals (~10 minutes). Each API process keeps one small map entry per
+user it has seen since it started, without eviction — a deleted user's entry lives until the
+process restarts.

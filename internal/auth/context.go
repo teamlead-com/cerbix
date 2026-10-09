@@ -31,6 +31,7 @@ type Store interface {
 	CountUsers(ctx context.Context) (int64, error)
 	ApiTokenByHash(ctx context.Context, hash string) (domain.ApiToken, error)
 	TouchApiToken(ctx context.Context, id string) error
+	TouchUserSeen(ctx context.Context, userID string) error
 	GetOIDCSettings(ctx context.Context) (domain.OIDCSettings, error)
 }
 

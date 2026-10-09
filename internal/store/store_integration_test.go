@@ -1233,10 +1233,10 @@ func TestOrgMembersEnrichmentAndMutation(t *testing.T) {
 		t.Fatalf("admin enrichment = %+v", byUser[admin.ID])
 	}
 	if byUser[editor.ID].LastActiveAt == nil {
-		t.Fatal("editor should have a last_active_at from the session")
+		t.Fatal("editor signed in: last_active_at (users.last_seen_at) should be set")
 	}
 	if byUser[admin.ID].LastActiveAt != nil {
-		t.Fatal("admin has no session, last_active_at should be nil")
+		t.Fatal("admin never signed in: last_active_at (users.last_seen_at) should be nil")
 	}
 
 	// Admin count reflects the single org admin.

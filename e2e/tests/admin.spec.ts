@@ -82,6 +82,62 @@ test.describe("users administration", () => {
     }
   });
 
+  // iter-0205 (func-admin-users.md "Last active"): signing out must not erase "last active". The
+  // fixture user signs in through SSO in a context of its own (never the shared admin session),
+  // signs out, and the admin's user list must still show THIS sign-in — not "never", and not the
+  // older sign-in auth.setup left behind (which is all the old max(sessions.created_at) could see).
+  test("users page: last active survives the user's sign-out", async ({ page, browser }) => {
+    test.skip((process.env.CERBIX_TOPOLOGY ?? "single") !== "single", "needs the Keycloak profile of the single stack");
+    const lastActiveOf = async () =>
+      (await apiGet(page, "/api/v1/admin/users")).find((u: any) => u.email === "testuser@example.com")?.last_active_at ?? null;
+    // Read before signing in: on the old code, after the sign-out this is all that is left (the
+    // session auth.setup created), so the strict "later than before" below fails whatever the timing.
+    const before = await lastActiveOf();
+    const signInStarted = Date.now() - 2_000; // slack for clock skew between the runner and the API
+    // An EMPTY storage state is required: inside a test, browser.newContext() inherits the
+    // project's `use` options — the admin's stored session — and the logout below would then end
+    // the session every other spec shares.
+    const context = await browser.newContext({
+      baseURL: process.env.CERBIX_URL || "http://localhost:8080",
+      storageState: { cookies: [], origins: [] },
+    });
+    try {
+      const oidcPage = await context.newPage();
+      await oidcPage.goto("/login");
+      // A fresh context has no IdP cookie, so Keycloak always shows its form (as in auth.setup).
+      await oidcPage.locator("button", { hasText: /SSO|Keycloak/ }).click();
+      await oidcPage.waitForURL(/realms\/cerbix/, { timeout: 15_000 });
+      await oidcPage.fill("#username", "testuser@example.com");
+      await oidcPage.fill("#password", "password");
+      await oidcPage.click("#kc-login");
+      await oidcPage.waitForURL((url) => !url.href.includes("realms"), { timeout: 15_000 });
+      const me = await oidcPage.request.get("/api/v1/me");
+      expect(me.ok(), "fixture user signed in").toBeTruthy();
+      // Never sign out anyone but the fixture user.
+      expect(JSON.stringify(await me.json()), "this context is the fixture user, not the shared admin").toContain("testuser@example.com");
+      const out = await oidcPage.request.post("/auth/logout", { maxRedirects: 0 });
+      expect([200, 204, 302, 303], `logout status ${out.status()}`).toContain(out.status());
+      expect((await oidcPage.request.get("/api/v1/me")).status(), "fixture user signed out").toBe(401);
+    } finally {
+      await context.close();
+    }
+
+    const users = await apiGet(page, "/api/v1/admin/users");
+    const guinea = users.find((u: any) => u.email === "testuser@example.com");
+    expect(guinea, "fixture user listed").toBeTruthy();
+    expect(guinea.last_active_at, "last active after sign-out").toBeTruthy();
+    // Soft, so both report: the strict one is the timing-proof check, the other the readable one.
+    if (before !== null) {
+      expect.soft(Date.parse(guinea.last_active_at), "last active moved past the earlier reading").toBeGreaterThan(Date.parse(before));
+    }
+    expect.soft(Date.parse(guinea.last_active_at), "last active is this test's sign-in").toBeGreaterThanOrEqual(signInStarted);
+
+    await page.goto("/settings?tab=users");
+    const row = page.locator("tr", { hasText: "testuser@example.com" }).first();
+    await expect(row).toBeVisible();
+    await expect(row.locator("td", { hasText: /^never$/ })).toHaveCount(0);
+  });
+
   test("guards: self-demote and self-delete are 400", async ({ page }) => {
     const me = await apiGet(page, "/api/v1/me");
     const patch = await apiSend(page, "patch", `/api/v1/admin/users/${me.user.id}`, { is_global_admin: false });

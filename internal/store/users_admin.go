@@ -16,7 +16,7 @@ func (s *Store) ListAllUsers(ctx context.Context, q string) ([]domain.AdminUser,
 	rows, err := s.pool.Query(ctx,
 		`SELECT u.id, COALESCE(u.oidc_sub, ''), u.email, u.display_name, u.is_global_admin,
 		        u.password_hash IS NOT NULL, u.created_at, u.updated_at,
-		        (SELECT max(created_at) FROM sessions se WHERE se.user_id = u.id) AS last_active
+		        u.last_seen_at
 		   FROM users u
 		  WHERE $1 = '' OR u.email ILIKE '%' || $1 || '%' OR u.display_name ILIKE '%' || $1 || '%'
 		  ORDER BY u.created_at, u.email`, q)

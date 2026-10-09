@@ -23,11 +23,14 @@ func HashToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// CreateSession persists a session for userID, keyed by the hash of the raw token.
+// CreateSession persists a session for userID, keyed by the hash of the raw token. Every sign-in
+// path creates its session here, so this is also where users.last_seen_at is stamped — in the
+// same statement (iter-0205).
 func (s *Store) CreateSession(ctx context.Context, userID, token string, expiresAt time.Time) (Session, error) {
 	var sess Session
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)
+		`WITH seen AS (UPDATE users SET last_seen_at = now() WHERE id = $2)
+		 INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)
 		 RETURNING id, user_id, created_at, expires_at`,
 		HashToken(token), userID, expiresAt).
 		Scan(&sess.ID, &sess.UserID, &sess.CreatedAt, &sess.ExpiresAt)
@@ -75,6 +78,24 @@ func (s *Store) DeleteSessionsByUser(ctx context.Context, userID, exceptToken st
 		return 0, fmt.Errorf("store: delete sessions by user: %w", err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+// UserSeenRefresh is how stale users.last_seen_at must be before a request refreshes it
+// (iter-0205, func-admin-users.md "Last active").
+const UserSeenRefresh = 5 * time.Minute
+
+// TouchUserSeen refreshes users.last_seen_at for a request made with a session, but only when the
+// stamp is absent or older than UserSeenRefresh — the guard is in the SQL, so several API
+// processes cannot multiply the writes. updated_at is left alone: being seen is not an edit.
+func (s *Store) TouchUserSeen(ctx context.Context, userID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE users SET last_seen_at = now()
+		  WHERE id = $1 AND (last_seen_at IS NULL OR last_seen_at < now() - $2 * interval '1 second')`,
+		userID, int(UserSeenRefresh/time.Second))
+	if err != nil {
+		return fmt.Errorf("store: touch user seen: %w", err)
+	}
+	return nil
 }
 
 // DeleteExpiredSessions removes sessions past their expiry and returns the count.

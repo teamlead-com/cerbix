@@ -3,7 +3,13 @@
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. `DEFERRED` is not permitted. Every `DONE` links to code,
 tests, and metrics.
 
-## Latest closed iteration (iter-0204 — dashboard and status page load time, bugfix; OPENED 2026-10-08, CLOSED 2026-10-09; CLOSED / OWNER-APPROVED after re-review 2 APPROVED; D-0271; unreleased, CHANGELOG `[v0.3.9]`; see [iter-0204](iterations/iter-0204.md))
+## Latest closed iteration (iter-0205 — "last active" forgot users, bugfix; OPENED 2026-10-09, CLOSED 2026-10-10; CLOSED / OWNER-APPROVED after review round 1 APPROVED, P3s applied; D-0272; unreleased, CHANGELOG `[v0.3.9]`; see [iter-0205](iterations/iter-0205.md))
+
+| ID | Acceptance criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| BUG-0205-1 | "Last active" on the instance user list and the organization member list is the user's own `last_seen_at`: stamped by every sign-in, refreshed by session-authenticated requests at most once per 5 minutes (per process and by an SQL guard across processes), never moved by machine credentials or by its own failure, kept through sign-out, session expiry and the expired-session purge, and backfilled by migration `00111` from the newest remaining session. | DONE | `internal/store/migrations/00111_users_last_seen.sql`, `internal/store/sessions.go` (`CreateSession`, `TouchUserSeen`), `internal/auth/middleware.go` `refreshSeen`; `TestLastActiveSurvivesTheSessionsThatStampedIt`, `TestTouchUserSeenRefreshesOnlyAStaleStamp`, `TestLastSeenMigrationBackfillsFromTheNewestSession` (both storage modes), `TestSessionRequestsRefreshLastSeenAtMostEveryFiveMinutes`, E2E `admin.spec.ts` (RED on `main`, GREEN on the branch); review round 1 APPROVED, seven P3s applied; closed by the OWNER 2026-10-10 — [`iter-0205.md`](iterations/iter-0205.md). Metrics: N/A. |
+
+## Previous closed iteration (iter-0204 — dashboard and status page load time, bugfix; OPENED 2026-10-08, CLOSED 2026-10-09; CLOSED / OWNER-APPROVED after re-review 2 APPROVED; D-0271; unreleased, CHANGELOG `[v0.3.9]`; see [iter-0204](iterations/iter-0204.md))
 
 | ID | Acceptance criterion | Status | Evidence |
 | --- | --- | --- | --- |

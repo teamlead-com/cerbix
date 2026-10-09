@@ -15,7 +15,8 @@ Settings → **Administration** → Users (see `func-settings-members` for the I
 1. `GET /api/v1/admin/users?q=` — every user with:
    - user fields (id, email, display_name, is_global_admin, created_at),
    - `auth_type`: `local` (password_hash set), `oidc` (oidc_sub set), or `both`,
-   - `last_active_at` (max session created_at, as in `ListOrgMembers`),
+   - `last_active_at` (the user's `last_seen_at`, as in `ListOrgMembers` — see "Last active"
+     below),
    - `memberships`: array of `{org_id, org_name, project_id?, project_name?, role}` —
      empty array for org-less users (LEFT JOIN, never hides a user).
    - `q` filters by email/display_name substring (case-insensitive).
@@ -71,6 +72,30 @@ nullable; `RecordAudit` maps an empty org to NULL. New actions: `user.global_adm
   membership call per org, each with its own role; failures are reported per org and the
   failed picks stay in the form.
 - 403 → existing friendly-message pattern (non-admins never see the tab anyway).
+
+## Last active (iter-0205, D-0272)
+
+`last_active_at` on the instance user list (`GET /admin/users`) and on an organization's member
+list (`ListOrgMembers`) is `users.last_seen_at`, a column of its own (migration `00111`). It
+used to be derived as `max(sessions.created_at)`, which forgot a user as soon as their sessions
+were gone — a session lives 24 h by default, the scheduler purges expired ones, and logout
+deletes its own — so a user who had signed in days ago, or had signed out, read "never".
+
+- **Set on sign-in.** Creating a session stamps `last_seen_at = now()` in the same statement,
+  for every sign-in path — they all create their session through one store call
+  (`CreateSession`).
+- **Refreshed by use.** A request authenticated by a session cookie refreshes it, at most once
+  per 5 minutes per user: the API process skips users it stamped less than 5 minutes ago, and
+  the SQL refuses to move a stamp younger than that, so several API processes cannot multiply
+  the writes. The refresh is best effort: a failure is logged and never denies the request.
+- **Not refreshed by machines.** A service-account bearer token has its own `last_used_at`; an
+  OIDC client-credentials JWT is not an interactive sign-in. Neither moves `last_seen_at`.
+- **Never removed with sessions.** Logout, session expiry and the expired-session purge leave
+  it alone.
+- **Backfill.** The migration sets it from each user's newest remaining session. A user whose
+  sessions were all purged before the upgrade reads "never" until they next sign in — that
+  history no longer exists anywhere.
+- Writing it does not change `users.updated_at`.
 
 ## Out of scope
 

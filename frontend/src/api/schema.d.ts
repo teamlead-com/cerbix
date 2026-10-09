@@ -8218,7 +8218,10 @@ export interface components {
              * @enum {string}
              */
             auth_type?: "local" | "oidc" | "both" | "none";
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description When the user last signed in or used a session (refreshed at most every 5 minutes); null when the user never signed in, or every session of theirs was gone before the column was introduced.
+             */
             last_active_at?: string | null;
             /** @description Empty for users outside any organization. */
             memberships?: components["schemas"]["AdminUserMembership"][];
@@ -8327,7 +8330,7 @@ export interface components {
             display_name?: string;
             /**
              * Format: date-time
-             * @description Most recent session; absent if never signed in.
+             * @description When the user last signed in or used a session (refreshed at most every 5 minutes); null when the user never signed in, or every session of theirs was gone before the column was introduced.
              */
             last_active_at?: string | null;
         };

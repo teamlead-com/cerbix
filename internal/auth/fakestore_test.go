@@ -23,6 +23,8 @@ type fakeStore struct {
 	passwords   map[string]string                // userID -> hash (SetPassword)
 	apiTokens   map[string]domain.ApiToken       // by token hash
 	touched     []string                         // token ids touched
+	seenTouched []string                         // user ids whose last_seen_at was refreshed
+	seenErr     error                            // TouchUserSeen fails with this when set
 	oidc        *domain.OIDCSettings             // nil = no DB override
 	nextID      int
 }
@@ -188,6 +190,16 @@ func (f *fakeStore) TouchApiToken(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.touched = append(f.touched, id)
+	return nil
+}
+
+func (f *fakeStore) TouchUserSeen(_ context.Context, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.seenErr != nil {
+		return f.seenErr
+	}
+	f.seenTouched = append(f.seenTouched, userID)
 	return nil
 }
 

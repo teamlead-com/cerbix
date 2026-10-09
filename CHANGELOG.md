@@ -14,10 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### 🩹 Fixed
 
 - **"Today" no longer depends on the database session's time zone.** The live "today" figure in the daily availability strips (status page, project and monitor) started at midnight in the PostgreSQL session's `TimeZone` instead of UTC midnight. On a database whose time zone is east of UTC, today also counted the last hours of yesterday — already counted in yesterday's bar; west of UTC, today lost its first hours. It now starts at UTC midnight, like the daily bars. Installs whose PostgreSQL time zone is UTC are unaffected.
+- **"Last active" no longer forgets users.** The instance user list and the organization member list showed "never" for almost everyone: the column was derived from the user's current sessions, which a sign-out, the 24-hour session expiry or the expired-session cleanup removes. Users now carry their own last-seen time, set when they sign in and refreshed while they use the UI (at most every 5 minutes). Service-account tokens and client-credentials JWTs do not count as activity (D-0272).
 
 ### Upgrade notes
 
-- No schema migration, no configuration change.
+- **One schema migration, `00111`**: adds a nullable `users.last_seen_at` column (no table rewrite; the usual coordinated upgrade applies) and fills it from each user's newest remaining session. Users whose sessions were all removed before the upgrade show "never" until they next sign in — that history no longer exists.
+- No configuration change.
 
 ---
 

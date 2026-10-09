@@ -75,12 +75,12 @@ func (s *Store) ListMembershipsByOrg(ctx context.Context, orgID string) ([]domai
 }
 
 // ListOrgMembers returns an org's memberships enriched with each user's
-// identity (email, display name) and last-seen time (most recent session).
+// identity (email, display name) and last-seen time (users.last_seen_at, iter-0205).
 func (s *Store) ListOrgMembers(ctx context.Context, orgID string) ([]domain.Member, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT m.id, m.user_id, m.org_id, m.project_id, m.role, m.created_at,
 		        u.email, u.display_name,
-		        (SELECT max(created_at) FROM sessions se WHERE se.user_id = m.user_id) AS last_active
+		        u.last_seen_at
 		   FROM memberships m JOIN users u ON u.id = m.user_id
 		  WHERE m.org_id = $1
 		  ORDER BY m.project_id NULLS FIRST, u.display_name, u.email`,

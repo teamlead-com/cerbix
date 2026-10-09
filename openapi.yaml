@@ -4899,7 +4899,7 @@ components:
               type: string
               enum: [local, oidc, both, none]
               description: How the account can sign in (password, OIDC, or both).
-            last_active_at: { type: string, format: date-time, nullable: true }
+            last_active_at: { type: string, format: date-time, nullable: true, description: 'When the user last signed in or used a session (refreshed at most every 5 minutes); null when the user never signed in, or every session of theirs was gone before the column was introduced.' }
             memberships:
               type: array
               description: Empty for users outside any organization.
@@ -4996,7 +4996,7 @@ components:
         created_at: { type: string, format: date-time }
         email: { type: string }
         display_name: { type: string }
-        last_active_at: { type: string, format: date-time, nullable: true, description: 'Most recent session; absent if never signed in.' }
+        last_active_at: { type: string, format: date-time, nullable: true, description: 'When the user last signed in or used a session (refreshed at most every 5 minutes); null when the user never signed in, or every session of theirs was gone before the column was introduced.' }
     AddMember:
       type: object
       required: [role]

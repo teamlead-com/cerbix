@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/teamlead-com/cerbix/internal/authz"
 	"github.com/teamlead-com/cerbix/internal/domain"
@@ -35,6 +36,7 @@ func (a *Authenticator) RequireAuth(next http.Handler) http.Handler {
 					http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 					return
 				}
+				a.refreshSeen(r.Context(), sess.UserID)
 				ctx := WithSessionToken(WithPrincipal(r.Context(), principal), c.Value)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
@@ -71,6 +73,33 @@ func (a *Authenticator) RequireAuth(next http.Handler) http.Handler {
 
 		unauthorized(w)
 	})
+}
+
+// refreshSeen stamps users.last_seen_at for a request made with a session, at most once per
+// store.UserSeenRefresh per user from this process (iter-0205, func-admin-users.md "Last
+// active"). Best effort: a failure is logged, never denies the request, and is not remembered —
+// the next request tries again. Machine credentials do not come through here.
+func (a *Authenticator) refreshSeen(ctx context.Context, userID string) {
+	now := time.Now()
+	if a.clock != nil {
+		now = a.clock()
+	}
+	a.seenMu.Lock()
+	last, ok := a.seenAt[userID]
+	a.seenMu.Unlock()
+	if ok && now.Sub(last) < store.UserSeenRefresh {
+		return
+	}
+	if err := a.store.TouchUserSeen(ctx, userID); err != nil {
+		a.logger.Warn("user_seen_touch_failed", "error", err.Error())
+		return
+	}
+	a.seenMu.Lock()
+	if a.seenAt == nil {
+		a.seenAt = map[string]time.Time{}
+	}
+	a.seenAt[userID] = now
+	a.seenMu.Unlock()
 }
 
 // principalFromToken hashes a presented bearer token, looks it up, and builds a

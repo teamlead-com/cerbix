@@ -34,6 +34,50 @@ type MonitorPageProjection struct {
 	Daily       []DailyAvailability
 }
 
+// monitorPageDailySQL is the page's strips: rollup days since $2 plus today from raw, $1 monitors.
+var monitorPageDailySQL = `
+		WITH scope AS (SELECT unnest($1::uuid[]) AS id),
+		` + maintenanceWindowsCTE("scope", todayStartUTC) + `
+		SELECT monitor_id, day, up, total FROM (
+		    SELECT hd.monitor_id, hd.day, hd.up, hd.total
+		      FROM heartbeats_daily hd
+		     WHERE hd.monitor_id = ANY($1) AND hd.day >= $2::date
+		       AND hd.day < (now() AT TIME ZONE 'UTC')::date
+		    UNION ALL
+		    SELECT h.monitor_id, (now() AT TIME ZONE 'UTC')::date AS day,
+		           count(*) FILTER (WHERE h.up)::bigint, count(*)::bigint
+		      FROM heartbeats h
+		     WHERE h.monitor_id = ANY($1) AND h.ts >= ` + todayStartUTC + `
+		       AND ` + maintenanceExcluded + `
+		     GROUP BY h.monitor_id
+		    HAVING count(*) > 0
+		) d ORDER BY monitor_id, day`
+
+// monitorPageSLISQL is the page's 90-day aggregate for every monitor: $1 monitors, $2 window
+// start, $3-$5 windowDays.
+var monitorPageSLISQL = `
+		WITH scope AS (SELECT unnest($1::uuid[]) AS id), ` + windowRollupCTEs(2, 3, 4, 5) + `,
+		` + maintenanceWindowsCTE("scope", "$2") + `,
+		raw AS (
+		    SELECT h.monitor_id AS id,
+		           count(*)::bigint AS total,
+		           count(*) FILTER (WHERE h.up)::bigint AS up,
+		           min(h.ts) AS first_ts
+		      FROM heartbeats h
+		     WHERE h.monitor_id = ANY($1) AND h.ts >= $2
+		       AND ` + maintenanceExcluded + `
+		     GROUP BY h.monitor_id
+		)
+		SELECT sc.id,
+		       COALESCE(raw.total, 0), COALESCE(raw.up, 0), raw.first_ts,
+		       COALESCE(roll.total, 0), COALESCE(roll.up, 0),
+		       (roll.first_day::timestamp AT TIME ZONE 'UTC'),
+		       COALESCE(cov.complete, false)
+		  FROM scope sc
+		  LEFT JOIN raw ON raw.id = sc.id
+		  LEFT JOIN roll ON roll.id = sc.id
+		  LEFT JOIN cov ON cov.id = sc.id`
+
 // MonitorPageProjections resolves every monitor-backed component on a page in a fixed number of
 // statements whatever it holds: identity, the 90-day aggregate (raw and rollup parts in one
 // statement), and the day strips.
@@ -75,33 +119,7 @@ func (s *Store) MonitorPageProjections(
 	// rollup days older than raw retention, with the SAME rule the monitor's own SLA view uses
 	// (D-0268), in ONE statement so the raw counts and the rollup boundary come from one snapshot.
 	ceil, day, today := windowDays(since)
-	rows, err = s.pool.Query(ctx, `
-		WITH scope AS (SELECT unnest($1::uuid[]) AS id), `+windowRollupCTEs(2, 3, 4, 5)+`,
-		raw AS (
-		    SELECT h.monitor_id AS id,
-		           count(*)::bigint AS total,
-		           count(*) FILTER (WHERE h.up)::bigint AS up,
-		           min(h.ts) AS first_ts
-		      FROM heartbeats h
-		     WHERE h.monitor_id = ANY($1) AND h.ts >= $2
-		       AND NOT EXISTS (
-		           SELECT 1 FROM maintenance_windows mw
-		            WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
-		              AND (mw.monitor_id = h.monitor_id
-		                   OR (mw.monitor_id IS NULL
-		                       AND mw.project_id = (SELECT m.project_id FROM monitors m WHERE m.id = h.monitor_id)))
-		       )
-		     GROUP BY h.monitor_id
-		)
-		SELECT sc.id,
-		       COALESCE(raw.total, 0), COALESCE(raw.up, 0), raw.first_ts,
-		       COALESCE(roll.total, 0), COALESCE(roll.up, 0),
-		       (roll.first_day::timestamp AT TIME ZONE 'UTC'),
-		       COALESCE(cov.complete, false)
-		  FROM scope sc
-		  LEFT JOIN raw ON raw.id = sc.id
-		  LEFT JOIN roll ON roll.id = sc.id
-		  LEFT JOIN cov ON cov.id = sc.id`, ids, since, ceil, day, today)
+	rows, err = s.pool.Query(ctx, monitorPageSLISQL, ids, since, ceil, day, today)
 	if err != nil {
 		return nil, fmt.Errorf("store: monitor page sli: %w", err)
 	}
@@ -133,27 +151,7 @@ func (s *Store) MonitorPageProjections(
 
 	// (3) The strips: completed days from the rollup UNION today from raw, exactly the two sources
 	// `MonitorDailyAvailability` uses per monitor — the same numbers, one statement.
-	rows, err = s.pool.Query(ctx, `
-		SELECT monitor_id, day, up, total FROM (
-		    SELECT hd.monitor_id, hd.day, hd.up, hd.total
-		      FROM heartbeats_daily hd
-		     WHERE hd.monitor_id = ANY($1) AND hd.day >= $2::date
-		       AND hd.day < (now() AT TIME ZONE 'UTC')::date
-		    UNION ALL
-		    SELECT h.monitor_id, (now() AT TIME ZONE 'UTC')::date AS day,
-		           count(*) FILTER (WHERE h.up)::bigint, count(*)::bigint
-		      FROM heartbeats h
-		     WHERE h.monitor_id = ANY($1) AND h.ts >= (now() AT TIME ZONE 'UTC')::date
-		       AND NOT EXISTS (
-		           SELECT 1 FROM maintenance_windows mw
-		            WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
-		              AND (mw.monitor_id = h.monitor_id
-		                   OR (mw.monitor_id IS NULL
-		                       AND mw.project_id = (SELECT m.project_id FROM monitors m WHERE m.id = h.monitor_id)))
-		       )
-		     GROUP BY h.monitor_id
-		    HAVING count(*) > 0
-		) d ORDER BY monitor_id, day`, ids, since)
+	rows, err = s.pool.Query(ctx, monitorPageDailySQL, ids, since)
 	if err != nil {
 		return nil, fmt.Errorf("store: monitor page daily: %w", err)
 	}

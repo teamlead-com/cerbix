@@ -3,7 +3,16 @@
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. `DEFERRED` is not permitted. Every `DONE` links to code,
 tests, and metrics.
 
-## Latest closed iteration (iter-0203 — a bounded status page and a paginated incident history; OPENED AND CLOSED 2026-10-08; CLOSED / OWNER-APPROVED after re-review 3 APPROVED; D-0270; unreleased, CHANGELOG `[v0.3.8]`; see [iter-0203](iterations/iter-0203.md))
+## Latest closed iteration (iter-0204 — dashboard and status page load time, bugfix; OPENED 2026-10-08, CLOSED 2026-10-09; CLOSED / OWNER-APPROVED after re-review 2 APPROVED; D-0271; unreleased, CHANGELOG `[v0.3.9]`; see [iter-0204](iterations/iter-0204.md))
+
+| ID | Acceptance criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| BUG-0204-1 | Every heartbeat reader that excludes maintenance windows reads `maintenance_windows` a bounded number of times per statement, never once per heartbeat, and excludes exactly what it excluded before. | DONE | `internal/store/maintexclusion.go`; `TestMaintenanceWindowsAreReadOncePerStatementNotPerHeartbeat` (RED → GREEN; two volumes, bound by scope since round 1), `TestMaintenanceExclusionIsTheSameRuleForEveryReader`, six mutations killed, both storage modes; re-review 2 APPROVED; closed by the OWNER 2026-10-09 — [`iter-0204.md`](iterations/iter-0204.md). Metrics: N/A. |
+| BUG-0204-3 | The live "today" rows (monitor, project, status-page strips) count heartbeats from UTC midnight whatever the PostgreSQL session's `TimeZone`, and the maintenance windows they exclude are pruned at the same boundary. | DONE | `todayStartUTC` in `internal/store/rollup.go`, `monitorpageprojection.go`; `TestTodayReadersStartAtUTCMidnightWhateverTheSessionTimeZone` (Asia/Tokyo and America/Los_Angeles sessions, RED → GREEN, four mutations killed, both storage modes) — [`iter-0204.md`](iterations/iter-0204.md) review round 1; re-review 2 APPROVED; closed by the OWNER 2026-10-09. Metrics: N/A. |
+| BUG-0204-2 | The SLA endpoints compute only the windows a caller names (`?window=`), and the dashboard names `30d`. | DONE | `internal/api/handlers_sla.go` `requestedSLAWindows`; `TestSLAWindowParameter*` (RED → GREEN); vitest; re-review 2 APPROVED; closed by the OWNER 2026-10-09 — [`iter-0204.md`](iterations/iter-0204.md). Metrics: N/A. |
+| FLAKE-0204 | `TestGateMaintCrashAfterEveryRemovalStatementConverges/after_drop.gate` passes reliably: after convergence the table still exists, detached (`state:detached`), "want the table gone and the registry dropped". Seen in the full `-race` run on TimescaleDB during iter-0204 (and by its reviewer); in isolation at `-race -count=10` 2 of 10 on this branch and **1 of 10 on `f5240f5` (v0.3.8)** — pre-existing, in gate-maintenance code this iteration does not touch. A sibling of the `after_drop.commit` flake in [`roadmap.md`](roadmap.md). | TODO | Recorded in [`iter-0204.md`](iterations/iter-0204.md). |
+
+## Previous closed iteration (iter-0203 — a bounded status page and a paginated incident history; OPENED AND CLOSED 2026-10-08; CLOSED / OWNER-APPROVED after re-review 3 APPROVED; D-0270; unreleased, CHANGELOG `[v0.3.8]`; see [iter-0203](iterations/iter-0203.md))
 
 | ID | Acceptance criterion | Status | Evidence |
 | --- | --- | --- | --- |

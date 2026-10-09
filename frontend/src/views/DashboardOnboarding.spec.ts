@@ -147,6 +147,29 @@ describe("Dashboard onboarding", () => {
     expect(wrapper.findAll('[data-testid="monitor-card"]')).toHaveLength(1);
   });
 
+  // iter-0204: the dashboard reads the 30d window of each SLA response and nothing else, so it
+  // asks for that window only — the other three cost the pilot most of each request.
+  it("asks the SLA endpoints for the 30d window only", async () => {
+    apiMock.GET.mockImplementation((path: string) =>
+      Promise.resolve(response(path)),
+    );
+    const wrapper = mount(DashboardView, {
+      global: {
+        stubs: { RouterLink: { props: ["to"], template: "<a><slot /></a>" } },
+      },
+    });
+    await flushPromises();
+    const slaCalls = apiMock.GET.mock.calls.filter(([path]: [string]) => path.endsWith("/sla"));
+    expect(slaCalls.map(([path]: [string]) => path).sort()).toEqual([
+      "/api/v1/monitors/{monitorID}/sla",
+      "/api/v1/projects/{projectID}/sla",
+    ]);
+    for (const [, opts] of slaCalls) {
+      expect(opts.params.query).toEqual({ window: ["30d"] });
+    }
+    wrapper.unmount();
+  });
+
   it("discards a delayed project A load after project B becomes current", async () => {
     let resolveProjectA!: (value: ReturnType<typeof response>) => void;
     const projectAMonitors = new Promise<ReturnType<typeof response>>(

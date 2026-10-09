@@ -1886,7 +1886,17 @@ paths:
         '429': { $ref: '#/components/responses/ChangeTooManyRequests' }
 
   /api/v1/projects/{projectID}/sla:
-    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - in: query
+        name: window
+        required: false
+        style: form
+        explode: true
+        schema: { type: array, items: { type: string, enum: ['24h', '7d', '30d', '90d'] } }
+        description: >
+          The standard windows to compute (repeatable or comma-separated); returned in standard order.
+          Absent: all four. An unknown or empty name is refused with 400 `invalid_window` (iter-0204).
     get:
       tags: [sla]
       summary: Project-level SLI over standard windows
@@ -1896,6 +1906,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ProjectSLA' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/projects/{projectID}/sla-target:
@@ -2075,7 +2086,17 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/monitors/{monitorID}/sla:
-    parameters: [ { $ref: '#/components/parameters/MonitorID' } ]
+    parameters:
+      - { $ref: '#/components/parameters/MonitorID' }
+      - in: query
+        name: window
+        required: false
+        style: form
+        explode: true
+        schema: { type: array, items: { type: string, enum: ['24h', '7d', '30d', '90d'] } }
+        description: >
+          The standard windows to compute (repeatable or comma-separated); returned in standard order.
+          Absent: all four. An unknown or empty name is refused with 400 `invalid_window` (iter-0204).
     get:
       tags: [sla]
       summary: Monitor SLI over standard windows, with error budget if a target is set
@@ -2085,6 +2106,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MonitorSLA' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/monitors/{monitorID}/availability:

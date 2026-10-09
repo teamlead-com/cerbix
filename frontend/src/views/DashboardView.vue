@@ -165,8 +165,10 @@ async function loadMonitorExtras(m: Monitor): Promise<{
   sloConfigured: boolean;
 }> {
   const [slaRes, hbRes] = await Promise.all([
+    // The card reads the 30d window only; computing the other three cost the pilot ~70% of this
+    // request (iter-0204).
     api.GET("/api/v1/monitors/{monitorID}/sla", {
-      params: { path: { monitorID: m.id! } },
+      params: { path: { monitorID: m.id! }, query: { window: ["30d"] } },
     }),
     api.GET("/api/v1/monitors/{monitorID}/heartbeats", {
       params: { path: { monitorID: m.id! }, query: { limit: 48 } },
@@ -294,7 +296,7 @@ async function load(forceWorkspace = false, allowAutoOpen = true) {
         params: { path: { projectID } },
       }),
       api.GET("/api/v1/projects/{projectID}/sla", {
-        params: { path: { projectID } },
+        params: { path: { projectID }, query: { window: ["30d"] } },
       }),
       api.GET("/api/v1/projects/{projectID}/availability", {
         params: { path: { projectID }, query: { days: 90 } },

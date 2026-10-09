@@ -14,6 +14,19 @@ type DailyAvailability struct {
 	UptimePercent float64   `json:"uptime_percent"`
 }
 
+// rollupDailySQL fills heartbeats_daily for [$1, $2).
+var rollupDailySQL = `WITH scope AS (SELECT id FROM monitors),
+		 ` + maintenanceWindowsCTE("scope", "$1") + `
+		 INSERT INTO heartbeats_daily (monitor_id, day, up, total)
+		 SELECT h.monitor_id,
+		        (h.ts AT TIME ZONE 'UTC')::date AS day,
+		        count(*) FILTER (WHERE h.up)::bigint,
+		        count(*)::bigint
+		 FROM heartbeats h
+		 WHERE h.ts >= $1 AND h.ts < $2
+		   AND ` + maintenanceExcluded + `
+		 GROUP BY h.monitor_id, day`
+
 // RollupDailyAvailability recomputes per-(monitor, day) heartbeat aggregates for
 // the completed days in [from, to), excluding maintenance windows. It deletes and
 // re-inserts the range in one transaction so a day that dropped to zero (e.g. a
@@ -31,22 +44,7 @@ func (s *Store) RollupDailyAvailability(ctx context.Context, from, to time.Time)
 		from, to); err != nil {
 		return fmt.Errorf("store: rollup clear range: %w", err)
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO heartbeats_daily (monitor_id, day, up, total)
-		 SELECT h.monitor_id,
-		        (h.ts AT TIME ZONE 'UTC')::date AS day,
-		        count(*) FILTER (WHERE h.up)::bigint,
-		        count(*)::bigint
-		 FROM heartbeats h
-		 WHERE h.ts >= $1 AND h.ts < $2
-		   AND NOT EXISTS (
-		       SELECT 1 FROM maintenance_windows mw
-		       WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
-		         AND (mw.monitor_id = h.monitor_id
-		              OR (mw.monitor_id IS NULL
-		                  AND mw.project_id = (SELECT project_id FROM monitors WHERE id = h.monitor_id)))
-		   )
-		 GROUP BY h.monitor_id, day`,
+	if _, err := tx.Exec(ctx, rollupDailySQL,
 		from, to); err != nil {
 		return fmt.Errorf("store: rollup insert: %w", err)
 	}
@@ -93,20 +91,18 @@ func (s *Store) MonitorDailyAvailability(ctx context.Context, monitorID string, 
 	return out, nil
 }
 
-func (s *Store) monitorTodayAvailability(ctx context.Context, monitorID string) (DailyAvailability, bool, error) {
-	var d DailyAvailability
-	err := s.pool.QueryRow(ctx,
-		`SELECT (now() AT TIME ZONE 'UTC')::date,
+// monitorTodaySQL is a monitor's live availability for today: $1 monitor.
+var monitorTodaySQL = `WITH scope AS (SELECT $1::uuid AS id),
+		 ` + maintenanceWindowsCTE("scope", todayStartUTC) + `
+		 SELECT (now() AT TIME ZONE 'UTC')::date,
 		        count(*) FILTER (WHERE h.up)::bigint, count(*)::bigint
 		 FROM heartbeats h
-		 WHERE h.monitor_id = $1 AND h.ts >= (now() AT TIME ZONE 'UTC')::date
-		   AND NOT EXISTS (
-		       SELECT 1 FROM maintenance_windows mw
-		       WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
-		         AND (mw.monitor_id = $1
-		              OR (mw.monitor_id IS NULL
-		                  AND mw.project_id = (SELECT project_id FROM monitors WHERE id = $1)))
-		   )`, monitorID).Scan(&d.Day, &d.Up, &d.Total)
+		 WHERE h.monitor_id = $1 AND h.ts >= ` + todayStartUTC + `
+		   AND ` + maintenanceExcluded
+
+func (s *Store) monitorTodayAvailability(ctx context.Context, monitorID string) (DailyAvailability, bool, error) {
+	var d DailyAvailability
+	err := s.pool.QueryRow(ctx, monitorTodaySQL, monitorID).Scan(&d.Day, &d.Up, &d.Total)
 	if err != nil {
 		return DailyAvailability{}, false, fmt.Errorf("store: monitor today availability: %w", err)
 	}
@@ -116,6 +112,15 @@ func (s *Store) monitorTodayAvailability(ctx context.Context, monitorID string) 
 	d.UptimePercent = float64(d.Up) / float64(d.Total) * 100
 	return d, true, nil
 }
+
+// projectTodaySQL is a project's live availability for today: $1 project.
+var projectTodaySQL = `WITH scope AS (SELECT id FROM monitors WHERE project_id = $1),
+		 ` + maintenanceWindowsCTE("scope", todayStartUTC) + `
+		 SELECT (now() AT TIME ZONE 'UTC')::date,
+		        count(*) FILTER (WHERE h.up)::bigint, count(*)::bigint
+		 FROM heartbeats h JOIN monitors m ON m.id = h.monitor_id
+		 WHERE m.project_id = $1 AND h.ts >= ` + todayStartUTC + `
+		   AND ` + maintenanceExcluded
 
 // ProjectDailyAvailability returns a project's per-day availability (summed over
 // its monitors), completed days from the rollup plus today from raw.
@@ -134,16 +139,7 @@ func (s *Store) ProjectDailyAvailability(ctx context.Context, projectID string, 
 		return nil, err
 	}
 	var d DailyAvailability
-	err = s.pool.QueryRow(ctx,
-		`SELECT (now() AT TIME ZONE 'UTC')::date,
-		        count(*) FILTER (WHERE h.up)::bigint, count(*)::bigint
-		 FROM heartbeats h JOIN monitors m ON m.id = h.monitor_id
-		 WHERE m.project_id = $1 AND h.ts >= (now() AT TIME ZONE 'UTC')::date
-		   AND NOT EXISTS (
-		       SELECT 1 FROM maintenance_windows mw
-		       WHERE mw.starts_at <= h.ts AND `+maintEffectiveEnd+` > h.ts
-		         AND (mw.monitor_id = h.monitor_id OR (mw.monitor_id IS NULL AND mw.project_id = $1))
-		   )`, projectID).Scan(&d.Day, &d.Up, &d.Total)
+	err = s.pool.QueryRow(ctx, projectTodaySQL, projectID).Scan(&d.Day, &d.Up, &d.Total)
 	if err != nil {
 		return nil, fmt.Errorf("store: project today availability: %w", err)
 	}

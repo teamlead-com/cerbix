@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/authz"
@@ -32,14 +33,46 @@ type windowSLA struct {
 
 // monitorSLA reports SLI per standard window, with the SLO error budget where a
 // target is set.
+// requestedSLAWindows reads `?window=` (repeatable, comma-separated) into the standard windows to
+// compute, in standard order and without duplicates; no parameter means all of them (iter-0204).
+// A caller that reads one window — the dashboard reads 30d — no longer pays for four. An unknown
+// name, or an empty one, is refused before anything is computed.
+func requestedSLAWindows(w http.ResponseWriter, r *http.Request) ([]sla.Window, bool) {
+	raw, present := r.URL.Query()["window"]
+	if !present {
+		return sla.StandardWindows, true
+	}
+	want := map[string]bool{}
+	for _, v := range raw {
+		for _, name := range strings.Split(v, ",") {
+			if _, ok := sla.WindowByName(name); !ok {
+				writeError(w, http.StatusBadRequest, "invalid_window: window must be one of 24h, 7d, 30d, 90d")
+				return nil, false
+			}
+			want[name] = true
+		}
+	}
+	out := make([]sla.Window, 0, len(want))
+	for _, win := range sla.StandardWindows {
+		if want[win.Name] {
+			out = append(out, win)
+		}
+	}
+	return out, true
+}
+
 func (h *Handler) monitorSLA(w http.ResponseWriter, r *http.Request) {
 	mon, _, ok := h.monitorAccess(w, r, authz.ActionProjectRead)
 	if !ok {
 		return
 	}
+	requested, ok := requestedSLAWindows(w, r)
+	if !ok {
+		return
+	}
 	now := time.Now()
-	windows := make([]windowSLA, 0, len(sla.StandardWindows))
-	for _, win := range sla.StandardWindows {
+	windows := make([]windowSLA, 0, len(requested))
+	for _, win := range requested {
 		c, err := h.store.MonitorSLI(r.Context(), mon.ID, now.Add(-win.Duration))
 		if err != nil {
 			h.serverError(w, "monitor_sli", err)
@@ -128,9 +161,13 @@ func (h *Handler) projectSLA(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	requested, ok := requestedSLAWindows(w, r)
+	if !ok {
+		return
+	}
 	now := time.Now()
-	windows := make([]windowSLA, 0, len(sla.StandardWindows))
-	for _, win := range sla.StandardWindows {
+	windows := make([]windowSLA, 0, len(requested))
+	for _, win := range requested {
 		c, err := h.store.ProjectSLI(r.Context(), proj.ID, now.Add(-win.Duration))
 		if err != nil {
 			h.serverError(w, "project_sli", err)

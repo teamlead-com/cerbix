@@ -9005,3 +9005,33 @@ Uncached public history renders are limited to 8 in flight per process (`429 his
 cursors are unsigned and a caller can mint cache keys freely; signing them would need a key shared
 by every API replica, which nothing in this deployment owns. The window's upper bound is the
 handler's `now`, applied to lists and counts alike.
+
+## D-0271 — heartbeat readers exclude maintenance through a materialized window set; SLA requests name their windows (2026-10-08)
+
+**Context.** The pilot's dashboard and status page took about 1 s and 1.5–2 s to load. Read-only
+measurement on the pilot (iter-0204), `EXPLAIN ANALYZE` of the statements rebuilt from the code: the
+status page's monitor projection took 1 500 ms and 1.57 million shared buffer accesses, the project
+SLA's 30d window 488 ms and 1.38 million — in both, more than 99% of the accesses were to a correlated
+`NOT EXISTS` against `maintenance_windows` that the planner ran as an index probe per heartbeat
+(521 396 and 686 885 probes) while the table held one window. The
+project SLA endpoint also computed four windows for a dashboard that shows one.
+
+**Decision.** (1) One owner for the exclusion's shape: every heartbeat reader selects its scope's
+windows into a `MATERIALIZED` CTE, materialized once per SQL statement, and tests heartbeats
+against it, so the reads of `maintenance_windows` no longer grow with the heartbeats; the rule itself
+is unchanged and
+pinned by an equivalence test over all eight readers (boundaries, cancellation, project vs monitor
+windows, other project, other monitor). (2) The SLA endpoints accept `?window=`; the dashboard
+requests `30d`. (3) The "today" rows start at the UTC day boundary as a timestamptz
+(`todayStartUTC`) in both the heartbeat filter and the window pruning — found in review round 1: the
+heartbeat filter compared `ts` with a UTC DATE, read as midnight in the session's zone (the pilot's
+PostgreSQL runs in Europe/Moscow, so its "today" began at 21:00Z the day before).
+
+**Consequences.** Hand-written prototypes of the new statements' shape, measured read-only on the
+pilot with `EXPLAIN ANALYZE` (not the shipped statements and not an endpoint benchmark): the monitor
+projection 1 500 → 440 ms (~1.57 M → ~10 k shared buffer accesses), the project SLA 30d window
+488 → 266 ms; with `window=30d` the project SLA computes one window instead of four. The effect on
+the pilot's endpoints is to be measured after deployment. What remains is
+the scan of the window's heartbeats themselves (hundreds of thousands of rows for 30–90 days); moving
+counts and p95 to pre-aggregated data is a separate, designed change, not this one. No migration, no
+configuration; the API addition is backward compatible.

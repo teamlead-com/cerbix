@@ -18,6 +18,29 @@ of maintenance windows.
 Code: `internal/sla/sla.go` (pure functions), `internal/store/sla.go`
 (`MonitorSLI`/`ProjectSLI` with `NOT EXISTS` over maintenance), migration `00005_sla.sql`.
 
+**How the exclusion is evaluated (iter-0204, D-0271).** The rule above is unchanged: a heartbeat of
+monitor `m` at `ts` is excluded when a window `w` has `starts_at <= ts < min(ends_at,
+cancel_effective_at)` and is either `m`'s own window or a project window of `m`'s project
+(`archived_at` is not consulted). Every reader that aggregates heartbeats — `MonitorSLI`,
+`ProjectSLI`, the burn windows, the status page's monitor projection and strips, the daily rollup and
+the live "today" rows — first selects the windows of its own monitors into one materialized set
+(`internal/store/maintexclusion.go`) and tests each heartbeat against that set, so
+the windows are materialized once per SQL statement and the reads of `maintenance_windows` no longer
+grow with the number of heartbeats. The pilot measured the old shape at 1.4–1.6 million shared buffer
+accesses for one statement, with one window in the table.
+
+**Where "today" starts (iter-0204 review round 1).** The live "today" row of every daily series
+(monitor, project, status-page strips) counts heartbeats from the start of the current **UTC** day —
+the same boundary as the `heartbeats_daily` rows before it — whatever the PostgreSQL session's
+`TimeZone`. Before iter-0204 it compared `ts` with a UTC *date*, which PostgreSQL reads as midnight in
+the session's zone.
+
+**Which windows an SLA request computes (iter-0204).** `GET /monitors/{id}/sla` and
+`GET /projects/{id}/sla` take an optional `window` (repeatable or comma-separated, standard names):
+only those windows are computed and returned, in standard order; absent, all four, as before; an
+unknown or empty name is `400 invalid_window`, refused before anything is computed. The dashboard
+asks for `30d`, the only window it shows.
+
 ## Storage and computation
 
 - SLI is computed by **direct SQL aggregates over `heartbeats`** (`count`, `FILTER (WHERE up)`,

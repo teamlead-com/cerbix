@@ -118,7 +118,9 @@ type fakeStore struct {
 	projectionCalls        int
 	monitorProjectionCalls int
 	pageIncidentCalls      int
-	historyCalls           int
+	// sliCalls counts MonitorSLI and ProjectSLI calls: one per computed SLA window (iter-0204).
+	sliCalls     int
+	historyCalls int
 	// historyMu guards historyCalls: the limiter test runs history renders concurrently.
 	historyMu sync.Mutex
 	// historyGate, when set, holds every IncidentHistory call until it is closed or fed, and
@@ -640,9 +642,11 @@ func (f *fakeStore) DeleteSessionsByUser(_ context.Context, userID, _ string) (i
 	return 0, nil
 }
 func (f *fakeStore) MonitorSLI(_ context.Context, _ string, _ time.Time) (store.SLICounts, error) {
+	f.sliCalls++
 	return store.SLICounts{Total: 100, Up: 99, AvgLatencyMS: 12, DataFrom: f.sliDataFrom, LatencyFrom: f.sliLatencyFrom}, nil
 }
 func (f *fakeStore) ProjectSLI(_ context.Context, _ string, _ time.Time) (store.SLICounts, error) {
+	f.sliCalls++
 	return store.SLICounts{Total: 200, Up: 198, AvgLatencyMS: 15, DataFrom: f.sliDataFrom, LatencyFrom: f.sliLatencyFrom}, nil
 }
 func (f *fakeStore) MonitorDailyAvailability(_ context.Context, _ string, _ time.Time) ([]store.DailyAvailability, error) {

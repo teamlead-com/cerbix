@@ -4,6 +4,23 @@ All notable changes to **cerbix** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.9] - Unreleased
+
+### ⚡ Performance
+
+- **Dashboard and status pages load faster.** Every availability figure that leaves out maintenance windows — monitor and project SLA, burn alerts, the status page's 90-day uptime and strips, the daily rollup — used to check each heartbeat against the maintenance table separately; on a live install that check was nearly all of the database work behind a status page. The windows that apply are now collected once per SQL statement, so that work no longer grows with the number of heartbeats. The figures are unchanged (D-0271). How much faster a page gets depends on the install; on the pilot, prototypes of the new statements measured about 3× faster for the status page's uptime query (not an end-to-end page benchmark).
+- **The dashboard asks only for what it shows.** `GET /monitors/{id}/sla` and `GET /projects/{id}/sla` accept `?window=` (for example `?window=30d`) and then compute only those windows; without it they return all four, as before. The dashboard requests `30d`.
+
+### 🩹 Fixed
+
+- **"Today" no longer depends on the database session's time zone.** The live "today" figure in the daily availability strips (status page, project and monitor) started at midnight in the PostgreSQL session's `TimeZone` instead of UTC midnight. On a database whose time zone is east of UTC, today also counted the last hours of yesterday — already counted in yesterday's bar; west of UTC, today lost its first hours. It now starts at UTC midnight, like the daily bars. Installs whose PostgreSQL time zone is UTC are unaffected.
+
+### Upgrade notes
+
+- No schema migration, no configuration change.
+
+---
+
 ## [v0.3.8] - 2026-10-08
 
 ### ✨ Added

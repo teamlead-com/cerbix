@@ -3202,7 +3202,10 @@ export interface paths {
     };
     "/api/v1/projects/{projectID}/sla": {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description The standard windows to compute (repeatable or comma-separated); returned in standard order. Absent: all four. An unknown or empty name is refused with 400 `invalid_window` (iter-0204). */
+                window?: ("24h" | "7d" | "30d" | "90d")[];
+            };
             header?: never;
             path: {
                 projectID: components["parameters"]["ProjectID"];
@@ -3212,7 +3215,10 @@ export interface paths {
         /** Project-level SLI over standard windows */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    /** @description The standard windows to compute (repeatable or comma-separated); returned in standard order. Absent: all four. An unknown or empty name is refused with 400 `invalid_window` (iter-0204). */
+                    window?: ("24h" | "7d" | "30d" | "90d")[];
+                };
                 header?: never;
                 path: {
                     projectID: components["parameters"]["ProjectID"];
@@ -3230,6 +3236,7 @@ export interface paths {
                         "application/json": components["schemas"]["ProjectSLA"];
                     };
                 };
+                400: components["responses"]["BadRequest"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -3621,7 +3628,10 @@ export interface paths {
     };
     "/api/v1/monitors/{monitorID}/sla": {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description The standard windows to compute (repeatable or comma-separated); returned in standard order. Absent: all four. An unknown or empty name is refused with 400 `invalid_window` (iter-0204). */
+                window?: ("24h" | "7d" | "30d" | "90d")[];
+            };
             header?: never;
             path: {
                 monitorID: components["parameters"]["MonitorID"];
@@ -3631,7 +3641,10 @@ export interface paths {
         /** Monitor SLI over standard windows, with error budget if a target is set */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    /** @description The standard windows to compute (repeatable or comma-separated); returned in standard order. Absent: all four. An unknown or empty name is refused with 400 `invalid_window` (iter-0204). */
+                    window?: ("24h" | "7d" | "30d" | "90d")[];
+                };
                 header?: never;
                 path: {
                     monitorID: components["parameters"]["MonitorID"];
@@ -3649,6 +3662,7 @@ export interface paths {
                         "application/json": components["schemas"]["MonitorSLA"];
                     };
                 };
+                400: components["responses"]["BadRequest"];
                 404: components["responses"]["NotFound"];
             };
         };

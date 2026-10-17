@@ -18,7 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Upgrade notes
 
-- **One schema migration, `00111`**: adds a nullable `users.last_seen_at` column (no table rewrite; the usual coordinated upgrade applies) and fills it from each user's newest remaining session. Users whose sessions were all removed before the upgrade show "never" until they next sign in — that history no longer exists.
+- **One schema migration, `00111`**: adds a nullable `users.last_seen_at` column (no table rewrite; applied automatically when any role starts, under a brief exclusive lock on `users`) and fills it from each user's newest remaining session. Users whose sessions were all removed before the upgrade show "never" until they next sign in — that history no longer exists.
 - No configuration change.
 
 ---

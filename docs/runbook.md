@@ -1495,7 +1495,11 @@ because visibility is membership and the list narrows actions only). Rules of th
 - the list is immutable: `PATCH`/`PUT` of a token are 405. A pipeline that needs one more action gets a
   NEW token — tokens are cheap, audit is not;
 - the list is in the token's read model and in the `token.create` audit row; recording a change is NOT an
-  audit event (the row itself names `token:<name>` for as long as it exists).
+  audit event (the row itself names `token:<name>` for as long as it exists);
+- `project:manage` in a token's list grants the token NOTHING: the project member endpoints
+  (`/api/v1/projects/{id}/members`, iter-0206) refuse every machine principal — `cbx_` tokens and
+  client-credentials JWTs — with 403, so a leaked token can never grant a person lasting access. The chip
+  stays in the form only because the allow-list is validated against the server's action catalogue.
 
 A stolen CI token can record fake changes and ask the gate — nothing else. A fake change blocks nothing
 and pages nobody: the timeline is a record, not a control; every row names the token; rate limits cap it.

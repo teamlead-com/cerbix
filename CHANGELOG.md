@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [v0.3.9] - Unreleased
 
+### ✨ Added
+
+- **A Project Admin manages the members of their own project.** Settings → Project → **Members** (visible to Org Admins, global admins and the Project Admin of the current project) lists the project's members — change a role, remove someone, invite by email with a project role (Project Admin, Editor or Viewer) — and shows, read-only, who reaches the project through the organization. New endpoints `GET/POST /api/v1/projects/{id}/members` and `PATCH/DELETE /api/v1/projects/{id}/members/{membershipId}`. A Project Admin cannot touch organization-wide memberships, grant an organization role or reach another project. API tokens and client-credentials service accounts are refused on these endpoints (403); the `project:manage` action still grants a token nothing (D-0273).
+
 ### ⚡ Performance
 
 - **Dashboard and status pages load faster.** Every availability figure that leaves out maintenance windows — monitor and project SLA, burn alerts, the status page's 90-day uptime and strips, the daily rollup — used to check each heartbeat against the maintenance table separately; on a live install that check was nearly all of the database work behind a status page. The windows that apply are now collected once per SQL statement, so that work no longer grows with the number of heartbeats. The figures are unchanged (D-0271). How much faster a page gets depends on the install; on the pilot, prototypes of the new statements measured about 3× faster for the status page's uptime query (not an end-to-end page benchmark).
@@ -15,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - **"Today" no longer depends on the database session's time zone.** The live "today" figure in the daily availability strips (status page, project and monitor) started at midnight in the PostgreSQL session's `TimeZone` instead of UTC midnight. On a database whose time zone is east of UTC, today also counted the last hours of yesterday — already counted in yesterday's bar; west of UTC, today lost its first hours. It now starts at UTC midnight, like the daily bars. Installs whose PostgreSQL time zone is UTC are unaffected.
 - **"Last active" no longer forgets users.** The instance user list and the organization member list showed "never" for almost everyone: the column was derived from the user's current sessions, which a sign-out, the 24-hour session expiry or the expired-session cleanup removes. Users now carry their own last-seen time, set when they sign in and refreshed while they use the UI (at most every 5 minutes). Service-account tokens and client-credentials JWTs do not count as activity (D-0272).
+- **Changing or removing a member that was removed a moment earlier answers 404, not 500.** The organization member endpoints returned an internal error when the membership disappeared between the check and the write (for example deleted together with its project). Adding a project member now tells a duplicate (409) from an unknown user (400) instead of one generic 400. Audit entries of project-scoped memberships name the project.
 
 ### Upgrade notes
 

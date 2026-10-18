@@ -138,6 +138,86 @@ test.describe("users administration", () => {
     await expect(row.locator("td", { hasText: /^never$/ })).toHaveCount(0);
   });
 
+  // iter-0206 (FR-040, func-project-members.md): a Project Admin manages the members of their own
+  // project. The Keycloak fixture user is made project_admin of the E2E project by the admin session
+  // (through the new project endpoint), signs in in a context of its OWN — an empty storageState, so
+  // it is never the shared admin session — and, on Settings → Project → Members, adds
+  // admin@cerbix.local (on a fresh database the only other provisioned user) as viewer, changes the
+  // role, and removes them. Everything granted here is removed in `finally`.
+  test("project admin manages the members of their own project", async ({ page, browser }) => {
+    test.skip((process.env.CERBIX_TOPOLOGY ?? "single") !== "single", "needs the Keycloak profile of the single stack");
+    const { orgID, projectID } = await firstProject(page);
+    const membersPath = `/api/v1/projects/${projectID}/members`;
+    const cleanup = async () => {
+      const list = await apiGet(page, membersPath);
+      for (const m of list.members ?? []) {
+        if (m.email === "testuser@example.com" || m.email === "admin@cerbix.local") {
+          await apiSend(page, "delete", `${membersPath}/${m.id}`);
+        }
+      }
+    };
+    await cleanup();
+    const grant = await apiSend(page, "post", membersPath, { email: "testuser@example.com", role: "project_admin" });
+    expect(grant.status(), "the admin grants project_admin on the E2E project").toBe(201);
+
+    const context = await browser.newContext({
+      baseURL: process.env.CERBIX_URL || "http://localhost:8080",
+      storageState: { cookies: [], origins: [] },
+    });
+    try {
+      // The E2E workspace is pinned BEFORE any page loads. Setting it after sign-in raced the SPA:
+      // the dashboard's workspace init finished later and wrote back the user's first organization
+      // (a retained dev database can give the fixture user other memberships).
+      await context.addInitScript(
+        ([o, p]) => {
+          localStorage.setItem("cerbix.org", o);
+          localStorage.setItem("cerbix.project", p);
+        },
+        [orgID, projectID] as [string, string],
+      );
+      const pa = await context.newPage();
+      await pa.goto("/login");
+      await pa.locator("button", { hasText: /SSO|Keycloak/ }).click();
+      await pa.waitForURL(/realms\/cerbix/, { timeout: 15_000 });
+      await pa.fill("#username", "testuser@example.com");
+      await pa.fill("#password", "password");
+      await pa.click("#kc-login");
+      await pa.waitForURL((url) => !url.href.includes("realms"), { timeout: 15_000 });
+      const me = await pa.request.get("/api/v1/me");
+      expect(JSON.stringify(await me.json()), "this context is the fixture user").toContain("testuser@example.com");
+
+      await pa.goto("/settings?tab=projectmembers");
+      await expect(pa.getByText("E2E Harness").first(), "the SPA is on the E2E workspace").toBeVisible({ timeout: 15_000 });
+      await expect(pa.getByTestId("project-members")).toBeVisible({ timeout: 15_000 });
+      await expect(pa.getByTestId("project-member-testuser@example.com")).toBeVisible();
+
+      await pa.getByTestId("project-invite-toggle").click();
+      const roles = await pa.getByTestId("project-invite-role").locator("option").evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value));
+      expect(roles).toEqual(["project_admin", "editor", "viewer"]);
+      await pa.getByTestId("project-invite-email").fill("admin@cerbix.local");
+      await pa.getByTestId("project-invite-role").selectOption("viewer");
+      await pa.getByTestId("project-invite-send").click();
+      const row = pa.getByTestId("project-member-admin@cerbix.local");
+      await expect(row).toBeVisible();
+
+      await row.getByTestId("project-member-role").selectOption("editor");
+      await expect
+        .poll(async () => (await pa.request.get(membersPath).then((r) => r.json())).members.find((m: any) => m.email === "admin@cerbix.local")?.role)
+        .toBe("editor");
+
+      await row.getByTestId("project-member-remove").click();
+      await row.getByTestId("project-member-confirm-remove").click();
+      await expect(row).toHaveCount(0);
+
+      // The organization Members tab is unchanged for them: they lack org:manage.
+      await pa.goto("/settings?tab=members");
+      await expect(pa.getByText("You need org-admin rights to view members.")).toBeVisible();
+    } finally {
+      await context.close();
+      await cleanup();
+    }
+  });
+
   test("guards: self-demote and self-delete are 400", async ({ page }) => {
     const me = await apiGet(page, "/api/v1/me");
     const patch = await apiSend(page, "patch", `/api/v1/admin/users/${me.user.id}`, { is_global_admin: false });

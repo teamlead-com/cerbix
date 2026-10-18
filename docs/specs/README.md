@@ -61,6 +61,7 @@ exists in the product. They diverge in both directions — an area can ship on t
 | `func-geo-worker-pools.md` | Geo-distributed probers, region-aware worker pools | written | shipped; current AMQP queue-family/default-exchange topology re-verified in documentation-only iter-0194 |
 | `func-admin-users.md` | Instance-wide Users administration for the Global Admin | written | shipped |
 | `func-settings-members.md` | Members moved into Settings, the Administration group | written | shipped |
+| `func-project-members.md` | A project admin manages the members of their own project (FR-040) | written | shipped (iter-0206) |
 | `func-hardening.md` | Hardening package from the 2026-08 deep audit | written | shipped |
 | `func-audit-gaps.md` | Audit gap package: saved-but-never-used functionality | written | shipped |
 | `func-audit-gaps-2.md` | Audit gap package 2, the second layer | written | shipped |

@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Project Members</title>
+<style>
+/* Tokens VERBATIM from frontend/src/style.css (the block every approved mock carries). This change
+   adds NO new colour: the project Members tab reuses the organization Members panel's table, role
+   pills and invite form. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --focus:#7d79ff;
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+.wrap{max-width:1180px; margin:0 auto; padding:24px 16px 64px}
+.top{display:flex; align-items:center; gap:12px; margin-bottom:18px}
+.top h1{font-size:19px; font-weight:650; letter-spacing:-.01em}
+.crumb{font-size:12.5px; color:var(--ink-3)}
+.states{display:flex; flex-wrap:wrap; gap:6px; margin:0 0 18px}
+.states button{height:30px; padding:0 12px; border-radius:999px; border:1px solid var(--border); background:var(--surface);
+  color:var(--ink-2); font:inherit; font-size:12.5px; cursor:pointer}
+.states button[aria-pressed="true"]{background:var(--accent); color:var(--accent-ink); border-color:var(--accent)}
+.layout{display:grid; grid-template-columns:220px 1fr; gap:24px}
+@media (max-width:860px){ .layout{grid-template-columns:1fr} }
+.side{display:flex; flex-direction:column; gap:16px}
+.group h4{font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-3); margin:0 0 6px; font-weight:600}
+.group a{display:block; padding:6px 10px; border-radius:6px; color:var(--ink-2); text-decoration:none; font-size:13px}
+.group a.on{background:var(--accent-weak); color:var(--accent); font-weight:600}
+.group a.new::after{content:"NEW"; margin-left:8px; font-size:9.5px; font-weight:700; letter-spacing:.05em; color:var(--accent);
+  border:1px solid var(--note-border); border-radius:999px; padding:0 6px}
+.card{background:var(--surface); border:1px solid var(--border); border-radius:10px; box-shadow:var(--shadow)}
+.head{display:flex; flex-wrap:wrap; align-items:flex-start; gap:14px; margin-bottom:16px}
+.head h2{font-size:15px; font-weight:600}
+.head p{margin-top:3px; font-size:13px; color:var(--ink-3)}
+.head b{color:var(--ink-2); font-weight:600}
+.btn{height:34px; padding:0 13px; border-radius:6px; border:0; background:var(--accent); color:var(--accent-ink);
+  font:inherit; font-size:13px; font-weight:500; cursor:pointer}
+.btn.ghost{background:transparent; color:var(--ink-2); border:1px solid var(--border)}
+.btn.danger{background:var(--down); color:#fff; height:26px; font-size:12px; padding:0 9px}
+.btn.small{height:26px; font-size:12px; padding:0 9px}
+.ml-auto{margin-left:auto}
+.invite{display:grid; grid-template-columns:2fr 1fr auto; gap:12px; align-items:end; padding:16px}
+@media (max-width:640px){ .invite{grid-template-columns:1fr} }
+label{display:flex; flex-direction:column; gap:6px}
+label span{font-size:11.5px; font-weight:600; color:var(--ink-2)}
+input,select{height:38px; border-radius:6px; border:1px solid var(--border); background:var(--surface-2); color:var(--ink);
+  padding:0 11px; font:inherit; font-size:13px}
+.scopefix{grid-column:1 / -1; font-size:12px; color:var(--ink-3); margin-top:-4px}
+.err{border-top:1px solid var(--border); padding:8px 16px; font-size:12.5px; color:var(--down)}
+.sec{margin-top:16px}
+.sechead{display:flex; align-items:center; gap:10px; padding:14px 16px 12px}
+.sechead h3{font-size:13px; font-weight:600}
+.count{font-size:12px; color:var(--ink-3)}
+table{width:100%; border-collapse:collapse; font-size:13px}
+th{font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); text-align:left; padding:10px 16px;
+  border-bottom:1px solid var(--border); font-weight:600}
+td{padding:11px 16px; border-bottom:1px solid var(--border)}
+tr:last-child td{border-bottom:0}
+.who{display:flex; align-items:center; gap:11px}
+.av{width:32px; height:32px; border-radius:50%; display:grid; place-items:center; color:#fff; font-size:11.5px; font-weight:600; flex:none}
+.who b{display:flex; align-items:center; gap:6px; font-size:13px}
+.who small{display:block; font-size:11px; color:var(--ink-3)}
+.you{font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--accent); background:var(--accent-weak);
+  border-radius:999px; padding:1px 6px}
+.role{display:inline-flex; align-items:center; gap:7px; height:26px; padding:0 10px; border:1px solid var(--border); border-radius:999px; font-size:12.5px; font-weight:500}
+.role i{width:8px; height:8px; border-radius:2px; display:inline-block}
+td select{height:30px; font-size:12.5px; background:var(--surface)}
+.right{text-align:right}
+.trash{background:none; border:0; color:var(--ink-3); cursor:pointer; padding:2px}
+.confirm{font-size:12px; color:var(--ink-3); margin-right:8px}
+.inh{background:var(--surface-2)}
+.inh td{color:var(--ink-2)}
+.managed{font-size:12px; color:var(--ink-3); padding:0 16px 14px}
+.note{margin-top:14px; padding:10px 14px; border:1px dashed var(--note-border); background:var(--note-bg); border-radius:8px;
+  font-size:12.5px; color:var(--ink-2)}
+.note b{color:var(--note)}
+.toast{display:flex; gap:10px; align-items:center; padding:10px 14px; border-radius:8px; border:1px solid var(--border);
+  background:var(--surface); box-shadow:var(--shadow); font-size:13px; margin-bottom:16px}
+.toast i{width:8px; height:8px; border-radius:50%; background:var(--up)}
+.muted{color:var(--ink-3)}
+[hidden]{display:none !important}
+</style>
+
+<div class="wrap">
+  <div class="top">
+    <h1>Settings</h1>
+    <span class="crumb mono">Acme · Checkout API</span>
+  </div>
+
+  <div class="states" role="group" aria-label="Mock state">
+    <button type="button" data-state="pa" aria-pressed="true">Project Admin view</button>
+    <button type="button" data-state="invite">Invite open · duplicate (409)</button>
+    <button type="button" data-state="self">Removing yourself</button>
+    <button type="button" data-state="after">After removing yourself</button>
+  </div>
+
+  <div class="layout">
+    <nav class="side" aria-label="Settings">
+      <div class="group">
+        <h4>Project</h4>
+        <a href="#">Notification channels</a>
+        <a href="#">Incoming alerts</a>
+        <a href="#">Secrets</a>
+        <a href="#">Release gate</a>
+        <a href="#" class="on new" id="tab-members">Members</a>
+      </div>
+      <div class="group">
+        <h4>Organization</h4>
+        <a href="#">Members</a>
+        <a href="#">API tokens</a>
+        <a href="#">Webhooks</a>
+      </div>
+      <div class="group">
+        <h4>Account</h4>
+        <a href="#">Security</a>
+      </div>
+    </nav>
+
+    <main>
+      <!-- state: after removing yourself -->
+      <div id="after" hidden>
+        <div class="toast"><i></i>You no longer manage the members of <b>Checkout API</b>. Your other access is unchanged.</div>
+        <div class="card" style="padding:16px">
+          <h2 style="font-size:15px; font-weight:600">Notification channels</h2>
+          <p class="muted" style="font-size:13px; margin-top:4px">The settings page reopens on the first tab you can still see. No error is shown.</p>
+        </div>
+        <div class="note"><b>After removal.</b> The principal is rebuilt on every request, so the next call would be
+          <span class="mono">403</span>. The SPA refreshes the session after the removal succeeds, drops the Project → Members tab
+          and moves to the first visible tab with this notice — instead of rendering a "forbidden" panel.</div>
+      </div>
+
+      <div id="panel">
+        <div class="head">
+          <div>
+            <h2>Members</h2>
+            <p>People with access to <b>Checkout API</b>.</p>
+          </div>
+          <button class="btn ml-auto" type="button" id="invite-btn">+ Invite to project</button>
+        </div>
+
+        <section class="card" id="invite" hidden>
+          <div class="invite">
+            <label><span>Email</span><input class="mono" type="email" value="dana@example.com"></label>
+            <label><span>Role</span>
+              <select><option>Project Admin</option><option selected>Editor</option><option>Viewer</option></select>
+            </label>
+            <button class="btn" type="button" style="height:38px">Add to project</button>
+            <p class="scopefix">Grants access to <b>Checkout API</b> only. Organization-wide roles are managed by an Org Admin.</p>
+          </div>
+          <div class="err">dana@example.com is already a member of this project.</div>
+        </section>
+
+        <section class="card sec">
+          <div class="sechead"><h3>Project members</h3><span class="count mono">3</span></div>
+          <table>
+            <thead><tr><th>Member</th><th>Role</th><th>Last active</th><th class="right">Actions</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><div class="who"><span class="av" style="background:#0d9aa8">MK</span>
+                  <span><b>Mira Kovacs <span class="you">you</span></b><small class="mono">mira@example.com</small></span></div></td>
+                <td><select><option selected>Project Admin</option><option>Editor</option><option>Viewer</option></select></td>
+                <td class="mono muted">just now</td>
+                <td class="right" id="self-cell">
+                  <button class="trash" type="button" aria-label="Remove from the project" title="Remove from Checkout API"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/></svg></button>
+                </td>
+              </tr>
+              <tr>
+                <td><div class="who"><span class="av" style="background:#e0399f">TB</span>
+                  <span><b>Theo Brandt</b><small class="mono">theo@example.com</small></span></div></td>
+                <td><select><option>Project Admin</option><option selected>Editor</option><option>Viewer</option></select></td>
+                <td class="mono muted">3h ago</td>
+                <td class="right"><button class="trash" type="button" aria-label="Remove from the project"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/></svg></button></td>
+              </tr>
+              <tr>
+                <td><div class="who"><span class="av" style="background:#b97800">LN</span>
+                  <span><b>Lena Novak</b><small class="mono">lena@example.com</small></span></div></td>
+                <td><select><option>Project Admin</option><option>Editor</option><option selected>Viewer</option></select></td>
+                <td class="mono muted">never</td>
+                <td class="right"><button class="trash" type="button" aria-label="Remove from the project"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/></svg></button></td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="card sec">
+          <div class="sechead"><h3>Access through the organization</h3><span class="count mono">2</span><span class="muted ml-auto" style="font-size:12px">read-only</span></div>
+          <p class="managed">These people reach every project in <b>Acme</b>. Their access is managed by an Org Admin in Organization → Members.</p>
+          <table>
+            <thead><tr><th>Member</th><th>Organization role</th></tr></thead>
+            <tbody>
+              <tr class="inh">
+                <td><div class="who"><span class="av" style="background:#5854f2">AR</span>
+                  <span><b>Ana Ruiz</b><small class="mono">ana@example.com</small></span></div></td>
+                <td><span class="role" style="color:#7c5cff; border-color:#7c5cff4d"><i style="background:#7c5cff"></i>Org Admin</span></td>
+              </tr>
+              <tr class="inh">
+                <td><div class="who"><span class="av" style="background:#12a05c">TB</span>
+                  <span><b>Theo Brandt</b><small class="mono">theo@example.com</small></span></div></td>
+                <td><span class="role"><i style="background:#55556a"></i>Editor</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <div class="note"><b>Mock notes.</b> The tab is visible to an Org Admin, a global admin and a Project Admin of the current
+          project only. The invite form has no Scope field — the project is fixed — and offers project roles only (no Org Admin).
+          The inherited list shows role, name and email only: no membership id, no last active, no actions. A person with both an
+          organization role and a project role appears in both lists (Theo above). The role table on the organization Members tab
+          is unchanged; its "Manage project members &amp; settings" row now matches what a Project Admin can do.</div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script>
+const btns = [...document.querySelectorAll('.states button')];
+const invite = document.getElementById('invite');
+const panel = document.getElementById('panel');
+const after = document.getElementById('after');
+const tab = document.getElementById('tab-members');
+const selfCell = document.getElementById('self-cell');
+const trash = selfCell.innerHTML;
+function show(state) {
+  btns.forEach(b => b.setAttribute('aria-pressed', String(b.dataset.state === state)));
+  invite.hidden = state !== 'invite';
+  panel.hidden = state === 'after';
+  after.hidden = state !== 'after';
+  tab.hidden = state === 'after';
+  selfCell.innerHTML = state === 'self'
+    ? '<span class="confirm">Remove yourself? You will no longer manage this project\'s members.</span>' +
+      '<button class="btn danger" type="button">Remove</button> <button class="btn ghost small" type="button">Cancel</button>'
+    : trash;
+}
+btns.forEach(b => b.addEventListener('click', () => show(b.dataset.state)));
+document.getElementById('invite-btn').addEventListener('click', () => show('invite'));
+</script>
+</html>

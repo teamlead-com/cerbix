@@ -181,7 +181,12 @@ type fakeStore struct {
 		Payload []byte
 	}
 	audit []domain.AuditEntry
-	totp  map[string]struct {
+
+	// iter-0206: model a membership deleted (or cascaded with its project) between the handler's
+	// gate and its write, and a project deleted between the gate and the INSERT.
+	membershipVanishesOnWrite bool
+	projectVanishesOnCreate   bool
+	totp                      map[string]struct {
 		secret  string
 		enabled bool
 	}
@@ -366,7 +371,82 @@ func (f *fakeStore) GetMembership(_ context.Context, id string) (domain.Membersh
 	}
 	return domain.Membership{}, store.ErrNotFound
 }
+
+// Project-scoped member methods (iter-0206). They filter by project the way the SQL does; the
+// store tests on a real database are what hold the SQL scope itself.
+func (f *fakeStore) ListProjectMembers(_ context.Context, projectID string) ([]domain.Member, error) {
+	p := f.projects[projectID]
+	var out []domain.Member
+	for _, m := range f.members[p.OrgID] {
+		if m.ProjectID == projectID {
+			u := f.users[m.UserID]
+			out = append(out, domain.Member{Membership: m, Email: u.Email, DisplayName: u.DisplayName})
+		}
+	}
+	return out, nil
+}
+func (f *fakeStore) ListProjectInheritedMembers(_ context.Context, projectID string) ([]domain.InheritedMember, error) {
+	p := f.projects[projectID]
+	var out []domain.InheritedMember
+	for _, m := range f.members[p.OrgID] {
+		if m.ProjectID == "" {
+			u := f.users[m.UserID]
+			out = append(out, domain.InheritedMember{Role: m.Role, Email: u.Email, DisplayName: u.DisplayName})
+		}
+	}
+	return out, nil
+}
+func (f *fakeStore) CreateProjectMembership(_ context.Context, projectID, userID string, role domain.Role) (domain.Membership, error) {
+	p, ok := f.projects[projectID]
+	if !ok || f.projectVanishesOnCreate {
+		return domain.Membership{}, store.ErrNotFound
+	}
+	if _, ok := f.users[userID]; !ok {
+		return domain.Membership{}, store.ErrUnknownUser
+	}
+	for _, m := range f.members[p.OrgID] {
+		if m.ProjectID == projectID && m.UserID == userID {
+			return domain.Membership{}, store.ErrConflict
+		}
+	}
+	m := domain.Membership{ID: "m-new-" + userID, UserID: userID, OrgID: p.OrgID, ProjectID: projectID, Role: role}
+	if err := m.Validate(); err != nil {
+		return domain.Membership{}, err
+	}
+	f.members[p.OrgID] = append(f.members[p.OrgID], m)
+	return m, nil
+}
+func (f *fakeStore) UpdateProjectMembershipRole(_ context.Context, projectID, id string, role domain.Role) (domain.Membership, error) {
+	if f.membershipVanishesOnWrite {
+		return domain.Membership{}, store.ErrNotFound
+	}
+	p := f.projects[projectID]
+	for i, m := range f.members[p.OrgID] {
+		if m.ID == id && m.ProjectID == projectID {
+			f.members[p.OrgID][i].Role = role
+			return f.members[p.OrgID][i], nil
+		}
+	}
+	return domain.Membership{}, store.ErrNotFound
+}
+func (f *fakeStore) DeleteProjectMembership(_ context.Context, projectID, id string) (domain.Membership, error) {
+	if f.membershipVanishesOnWrite {
+		return domain.Membership{}, store.ErrNotFound
+	}
+	p := f.projects[projectID]
+	list := f.members[p.OrgID]
+	for i, m := range list {
+		if m.ID == id && m.ProjectID == projectID {
+			f.members[p.OrgID] = append(list[:i:i], list[i+1:]...)
+			return m, nil
+		}
+	}
+	return domain.Membership{}, store.ErrNotFound
+}
 func (f *fakeStore) UpdateMembershipRole(_ context.Context, id string, role domain.Role) (domain.Membership, error) {
+	if f.membershipVanishesOnWrite {
+		return domain.Membership{}, store.ErrNotFound
+	}
 	for orgID, list := range f.members {
 		for i, m := range list {
 			if m.ID == id {
@@ -378,6 +458,9 @@ func (f *fakeStore) UpdateMembershipRole(_ context.Context, id string, role doma
 	return domain.Membership{}, store.ErrNotFound
 }
 func (f *fakeStore) DeleteMembership(_ context.Context, id string) error {
+	if f.membershipVanishesOnWrite {
+		return store.ErrNotFound
+	}
 	for orgID, list := range f.members {
 		for i, m := range list {
 			if m.ID == id {

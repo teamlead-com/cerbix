@@ -8,6 +8,7 @@ import AgentTokensPanel from "@/components/settings/AgentTokensPanel.vue";
 import DangerZonePanel from "@/components/settings/DangerZonePanel.vue";
 import InstanceAuditPanel from "@/components/settings/InstanceAuditPanel.vue";
 import MembersPanel from "@/components/settings/MembersPanel.vue";
+import ProjectMembersPanel from "@/components/settings/ProjectMembersPanel.vue";
 import OrgDangerZonePanel from "@/components/settings/OrgDangerZonePanel.vue";
 import SecretsPanel from "@/components/settings/SecretsPanel.vue";
 import ProjectGatePolicy from "@/components/settings/ProjectGatePolicy.vue";
@@ -37,12 +38,16 @@ const session = useSession();
 // Channels are project-write; API tokens and webhooks are org-manage.
 const canWriteChannels = computed(() => session.canProjectWrite(ws.orgId, ws.projectId));
 const canManageOrg = computed(() => session.isOrgAdmin(ws.orgId));
+// The project Members tab (iter-0206, FR-040): Org Admin, global admin, or a Project Admin of
+// the CURRENT project — mirrors the backend's project:manage gate.
+const canManageProject = computed(() => !!ws.projectId && session.canProjectAdmin(ws.orgId, ws.projectId));
 
 type Tab =
   | "channels"
   | "incoming"
   | "secrets"
   | "gatepolicy"
+  | "projectmembers"
   | "authentication"
   | "branding"
   | "alerting"
@@ -72,6 +77,9 @@ const tabs = computed<{ key: Tab; label: string; scope: string }[]>(() => [
   { key: "incoming", label: "Incoming alerts", scope: "project" },
   { key: "secrets", label: "Secrets", scope: "project" },
   { key: "gatepolicy", label: "Release gate", scope: "project" },
+  ...(canManageProject.value
+    ? ([{ key: "projectmembers", label: "Members", scope: "project" }] as { key: Tab; label: string; scope: string }[])
+    : []),
   // Deleting a project is an org-manage action, so only org admins see it.
   ...(canManageOrg.value
     ? ([{ key: "danger", label: "Danger zone", scope: "project" }] as { key: Tab; label: string; scope: string }[])
@@ -92,8 +100,13 @@ const tab = ref<Tab>("channels");
 // Deep links: /settings?tab=members. Invalid or forbidden keys fall back to the default.
 const route = useRoute();
 const queryTab = route.query.tab;
-if (typeof queryTab === "string" && tabs.value.some((t) => t.key === queryTab)) {
-  tab.value = queryTab as Tab;
+// A deep-linked tab that depends on the workspace (the project Members tab needs the current
+// project) is not in the list yet while the workspace loads; it is remembered and selected the
+// moment it appears (see the tabs watcher below), instead of being dropped at mount (iter-0206).
+let requestedTab = typeof queryTab === "string" ? queryTab : "";
+if (requestedTab && tabs.value.some((t) => t.key === requestedTab)) {
+  tab.value = requestedTab as Tab;
+  requestedTab = "";
 }
 
 // Group the nav by scope so the (now ~10) settings don't sprawl across one row.
@@ -870,6 +883,47 @@ async function copy(v: string) {
   }
 }
 
+// After the signed-in user changed or removed their OWN project membership, the session is
+// rebuilt; if they no longer manage the project the tab disappears and Settings moves to the
+// first tab still visible, with a notice instead of a "forbidden" panel (mock state 4).
+const selfNotice = ref("");
+const projectMembersKey = ref(0);
+async function onProjectMembersSelfChanged() {
+  const projectName = ws.projectName || "this project";
+  const orgId = ws.orgId;
+  const projectId = ws.projectId;
+  await session.fetchMe();
+  if (canManageProject.value) {
+    projectMembersKey.value++;
+    return;
+  }
+  // If no remaining membership reaches the project, the workspace is re-read: the SPA must not
+  // stay on a project the user can no longer see (every project tab would answer 404).
+  const stillSeesProject =
+    session.isGlobalAdmin ||
+    session.memberships.some((m) => m.org_id === orgId && (!m.project_id || m.project_id === projectId));
+  if (!stillSeesProject) {
+    await ws.init(true);
+    selfNotice.value = `You no longer have access to ${projectName}.`;
+  } else {
+    selfNotice.value = `You no longer manage the members of ${projectName}. Your other access is unchanged.`;
+  }
+  tab.value = tabs.value[0]?.key ?? "security";
+}
+// A tab can vanish under the user (project switch, role change): fall back to the first one.
+watch(tabs, (list) => {
+  if (requestedTab && list.some((t) => t.key === requestedTab)) {
+    tab.value = requestedTab as Tab;
+    requestedTab = "";
+    return;
+  }
+  if (!list.some((t) => t.key === tab.value)) tab.value = list[0]?.key ?? "security";
+});
+// A tab the user picks by hand supersedes a deep link still waiting for the workspace.
+watch(tab, () => {
+  if (tab.value !== requestedTab) requestedTab = "";
+});
+
 onMounted(load);
 watch(() => ws.orgId, load);
 watch(() => ws.projectId, () => tab.value === "channels" && loadChannels());
@@ -915,6 +969,11 @@ watch(tab, loadActive);
         </div>
       </div>
 
+      <div v-if="selfNotice" class="mb-4 flex items-center gap-[10px] rounded border border-border bg-surface px-4 py-[10px] text-[13px] shadow-card" data-testid="self-notice">
+        <span class="h-2 w-2 flex-none rounded-full bg-up"></span>
+        <span class="min-w-0 flex-1">{{ selfNotice }}</span>
+        <button type="button" class="text-[12px] text-ink-3 hover:text-ink" @click="selfNotice = ''">Dismiss</button>
+      </div>
       <div v-if="activeError" class="mb-5 rounded border border-border bg-surface p-4 text-[13px] text-ink-3 shadow-card">{{ activeError }}</div>
 
       <!-- ── Channels ── -->
@@ -1294,6 +1353,9 @@ watch(tab, loadActive);
 
       <!-- ── Members (org-scoped, self-loading panel) ── -->
       <MembersPanel v-else-if="tab === 'members'" />
+
+      <!-- ── Project members (project-scoped, project admin, self-loading panel; iter-0206) ── -->
+      <ProjectMembersPanel v-else-if="tab === 'projectmembers'" :key="projectMembersKey" @self-changed="onProjectMembersSelfChanged" />
 
       <!-- ── Users (instance-wide, global admin, self-loading panel) ── -->
       <UsersPanel v-else-if="tab === 'users'" />

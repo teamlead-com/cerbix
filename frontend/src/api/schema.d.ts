@@ -938,6 +938,156 @@ export interface paths {
         };
         trace?: never;
     };
+    "/api/v1/projects/{projectID}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List the project's members and the org-level access it inherits (project admin)
+         * @description Requires project:manage on the project (Org Admin, global admin, Project Admin of the project). Machine principals (API tokens, OIDC client-credentials) are refused with 403 on every project member endpoint, whatever the project. An unknown or invisible project is 404; a visible one the caller cannot manage is 403.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ProjectMembers"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        /** Add a member to the project with a project role (project admin) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AddProjectMember"];
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Membership"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/members/{membershipID}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+                membershipID: components["parameters"]["MembershipID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove a member from the project (project admin) */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    membershipID: components["parameters"]["MembershipID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description No Content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /**
+         * Change a project member's role (project admin)
+         * @description Only a project-scoped membership of THIS project is addressable; any other id (an org-level membership, another project's, another org's, an unknown one) is 404.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                    membershipID: components["parameters"]["MembershipID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateProjectMember"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Membership"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        trace?: never;
+    };
     "/api/v1/projects/{projectID}": {
         parameters: {
             query?: never;
@@ -8346,6 +8496,30 @@ export interface components {
         };
         UpdateMember: {
             role: components["schemas"]["Role"];
+        };
+        /** @enum {string} */
+        ProjectRole: "project_admin" | "editor" | "viewer";
+        ProjectMembers: {
+            /** @description The project-scoped memberships of this project. */
+            members: components["schemas"]["Member"][];
+            /** @description The org-level memberships of the project's organization, read-only. */
+            inherited: components["schemas"]["InheritedMember"][];
+        };
+        /** @description Who reaches the project through the organization — role, email and name only. */
+        InheritedMember: {
+            role: components["schemas"]["Role"];
+            email: string;
+            display_name: string;
+        };
+        /** @description Identify the member by user_id or email (the user must have signed in at least once). No project_id or org_id — the project is the path's. */
+        AddProjectMember: {
+            /** Format: uuid */
+            user_id?: string;
+            email?: string;
+            role: components["schemas"]["ProjectRole"];
+        };
+        UpdateProjectMember: {
+            role: components["schemas"]["ProjectRole"];
         };
         /** @enum {string} */
         Role: "org_admin" | "project_admin" | "editor" | "viewer";

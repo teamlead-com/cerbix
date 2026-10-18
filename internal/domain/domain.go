@@ -110,6 +110,15 @@ type Member struct {
 	LastActiveAt *time.Time `json:"last_active_at,omitempty"`
 }
 
+// InheritedMember is an org-level membership as a project admin sees it on their project's member
+// list (iter-0206, FR-040): who reaches the project through the organization — role, email and
+// name only, nothing a project admin could act on.
+type InheritedMember struct {
+	Role        Role   `json:"role"`
+	Email       string `json:"email"`
+	DisplayName string `json:"display_name"`
+}
+
 // Scope returns the scope implied by whether ProjectID is set.
 func (m Membership) Scope() Scope {
 	if m.ProjectID == "" {

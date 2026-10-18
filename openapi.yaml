@@ -407,6 +407,75 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/v1/projects/{projectID}/members:
+    parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
+    get:
+      tags: [projects]
+      summary: List the project's members and the org-level access it inherits (project admin)
+      description: >-
+        Requires project:manage on the project (Org Admin, global admin, Project Admin of the project).
+        Machine principals (API tokens, OIDC client-credentials) are refused with 403 on every project
+        member endpoint, whatever the project. An unknown or invisible project is 404; a visible one the
+        caller cannot manage is 403.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectMembers' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [projects]
+      summary: Add a member to the project with a project role (project admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddProjectMember' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Membership' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/projects/{projectID}/members/{membershipID}:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectID' }
+      - { $ref: '#/components/parameters/MembershipID' }
+    patch:
+      tags: [projects]
+      summary: Change a project member's role (project admin)
+      description: >-
+        Only a project-scoped membership of THIS project is addressable; any other id (an org-level
+        membership, another project's, another org's, an unknown one) is 404.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateProjectMember' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Membership' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [projects]
+      summary: Remove a member from the project (project admin)
+      responses:
+        '204': { description: No Content }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /api/v1/projects/{projectID}:
     parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
     get:
@@ -5011,6 +5080,44 @@ components:
       required: [role]
       properties:
         role: { $ref: '#/components/schemas/Role' }
+    ProjectRole:
+      type: string
+      enum: [project_admin, editor, viewer]
+    ProjectMembers:
+      type: object
+      required: [members, inherited]
+      properties:
+        members:
+          type: array
+          description: The project-scoped memberships of this project.
+          items: { $ref: '#/components/schemas/Member' }
+        inherited:
+          type: array
+          description: The org-level memberships of the project's organization, read-only.
+          items: { $ref: '#/components/schemas/InheritedMember' }
+    InheritedMember:
+      type: object
+      description: Who reaches the project through the organization — role, email and name only.
+      required: [role, email, display_name]
+      properties:
+        role: { $ref: '#/components/schemas/Role' }
+        email: { type: string }
+        display_name: { type: string }
+    AddProjectMember:
+      type: object
+      required: [role]
+      additionalProperties: false
+      description: Identify the member by user_id or email (the user must have signed in at least once). No project_id or org_id — the project is the path's.
+      properties:
+        user_id: { type: string, format: uuid }
+        email: { type: string }
+        role: { $ref: '#/components/schemas/ProjectRole' }
+    UpdateProjectMember:
+      type: object
+      required: [role]
+      additionalProperties: false
+      properties:
+        role: { $ref: '#/components/schemas/ProjectRole' }
     Role:
       type: string
       enum: [org_admin, project_admin, editor, viewer]

@@ -44,7 +44,8 @@ export const useSession = defineStore("session", {
     // Whether the caller may ADMINISTER a project (FR-024 D12 `gate:override`; D-0207 item 3):
     // a global admin, an org-level org_admin, or a project-level project_admin. The ONE
     // predicate that separates editor from project_admin — components take its answer and
-    // never compare role strings themselves. Mirrors backend ActionProjectAdmin.
+    // never compare role strings themselves. Mirrors backend ActionProjectManage (which also
+    // gates a project's member management, iter-0206).
     canProjectAdmin:
       (s) =>
       (orgID: string, projectID: string): boolean => {

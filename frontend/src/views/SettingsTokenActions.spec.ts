@@ -31,6 +31,7 @@ vi.mock("@/stores/session", () => ({
   useSession: () => ({
     canProjectWrite: () => true,
     isOrgAdmin: () => true,
+    canProjectAdmin: () => false, // iter-0206: SettingsView reads it for the project Members tab
     isGlobalAdmin: false,
     totpEnabled: false,
     user: { email: "admin@cerbix.local" },

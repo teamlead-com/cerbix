@@ -353,11 +353,16 @@ func (h *Handler) updateMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated, err := h.store.UpdateMembershipRole(r.Context(), m.ID, role)
+	if errors.Is(err, store.ErrNotFound) {
+		// Removed (or cascaded with its project) between memberAccess and the write (iter-0206).
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
 	if err != nil {
 		h.serverError(w, "update_member", err)
 		return
 	}
-	h.audit(r, m.OrgID, "member.role_change", string(role)+" · user "+updated.UserID)
+	h.audit(r, m.OrgID, "member.role_change", memberAuditTarget(updated))
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -381,11 +386,15 @@ func (h *Handler) removeMember(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := h.store.DeleteMembership(r.Context(), m.ID); err != nil {
+	if err := h.store.DeleteMembership(r.Context(), m.ID); errors.Is(err, store.ErrNotFound) {
+		// Removed (or cascaded with its project) between memberAccess and the write (iter-0206).
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	} else if err != nil {
 		h.serverError(w, "remove_member", err)
 		return
 	}
-	h.audit(r, m.OrgID, "member.remove", "user "+m.UserID)
+	h.audit(r, m.OrgID, "member.remove", memberRemoveAuditTarget(m))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -440,7 +449,7 @@ func (h *Handler) addMember(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "could not create membership")
 		return
 	}
-	h.audit(r, orgID, "member.add", string(created.Role)+" · user "+created.UserID)
+	h.audit(r, orgID, "member.add", memberAuditTarget(created))
 	h.logEvent(r, "member_added", "org_id", orgID, "target_user_id", created.UserID, "role", string(created.Role))
 	writeJSON(w, http.StatusCreated, created)
 }

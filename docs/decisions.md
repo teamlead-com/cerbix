@@ -9060,3 +9060,34 @@ freshness: a process remembers an attempt the SQL guard refused, so the shown ti
 activity by up to two intervals (~10 minutes). Each API process keeps one small map entry per
 user it has seen since it started, without eviction — a deleted user's entry lives until the
 process restarts.
+
+## D-0273 — a project admin manages the members of their own project; machines never do (2026-10-17)
+
+**Context.** The Members page's role table promised a Project Admin "Manage project members &
+settings", and `authz.ActionProjectManage` was documented as "manage a project's members and
+settings", but every member endpoint required `org:manage`: only an Org Admin could grant anyone
+access to a project. No handler checked `project:manage` at all. The owner decided that a Project
+Admin manages the members of their own project (spec `func-project-members.md`, revision 2, approved
+after two independent review rounds).
+
+**Decision.** Four project-scoped endpoints, `/api/v1/projects/{projectID}/members[/{membershipID}]`,
+gated by the existing `projectAccess(project:manage)` BEFORE any membership is loaded (so an editor
+probing ids always gets 403), and held again in the SQL (`WHERE … AND project_id = $2`). Only
+project-scoped rows of the path's project are addressable; org-level rows, other projects' and other
+orgs' are 404. Only project roles can be granted. Machine principals (`cbx_` tokens and
+client-credentials JWTs, `ViaToken`) are refused with 403 on all four, before the project gate: the
+action had never been honoured, and letting tokens through would have given every existing
+project-scoped `project_admin` token the power to grant people access that outlives the token. The
+list returns the project's members and, read-only, the org-level memberships as role, email and name
+only. Adding a member tells a duplicate (409), an unknown user (400) and a vanished project (404)
+apart. The org endpoints answer 404 instead of 500 when a membership vanished between check and write
+(a pre-existing defect fixed here), and both paths write one audit target shape that names the project
+for project-scoped memberships.
+
+**Consequences.** A Project Admin can appoint another Project Admin, demote or remove themselves (the
+UI confirms and then leaves the tab with a notice); there is no "last project admin" lock because an
+Org Admin or a global admin can always manage the project. Every Project Admin of every organization
+can now learn whether an email is a user of the instance ("no user with that email"), as an Org Admin
+already could; accepted, no rate limit in this iteration. The `project:manage` token chip stays and is
+documented as granting nothing. A Project Admin does not see the org audit log, so the history of
+their project's members is visible to Org Admins only.

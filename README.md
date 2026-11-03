@@ -7,7 +7,7 @@
 # cerbix
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Go](https://img.shields.io/badge/Go-1.25-00ADD8.svg)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](https://go.dev)
 [![Single binary](https://img.shields.io/badge/deploy-single%20binary-success.svg)](#quickstart)
 [![OpenAPI 3.0](https://img.shields.io/badge/OpenAPI-3.0.3-green.svg)](openapi.yaml)
 [![Security Policy](https://img.shields.io/badge/security-policy-informational.svg)](SECURITY.md)
@@ -142,7 +142,7 @@ distributed deployment:
 | `worker` | Stateless prober pool (AMQP). | RabbitMQ |
 | `agent` | HTTP-pull prober for a geo with no broker access (outbound HTTPS only). | — (DB-less/broker-less) |
 
-Stack: Go (module floor 1.25.13), Vue 3 + Vite + TypeScript (embedded via `go:embed`),
+Stack: Go (module floor 1.26.10), Vue 3 + Vite + TypeScript (embedded via `go:embed`),
 PostgreSQL (pgx + embedded goose migrations), RabbitMQ (distributed roles only). No nginx —
 the binary serves the SPA; put Traefik / your ingress in front for TLS.
 
@@ -238,12 +238,12 @@ compatibility policy:
 
 | Path | Toolchain used |
 | --- | --- |
-| Go module and CI release binaries | Go 1.25.13 from `go.mod`; CI reads `go-version-file: go.mod`. |
-| Docker image backend stage | `golang:1.27.0-bookworm`. |
+| Go module and CI release binaries | Go 1.26.10 from `go.mod`; CI reads `go-version-file: go.mod`. |
+| Docker image backend stage | `golang:1.27.3-bookworm`. |
 | `make spa-snapshot`, `frontend/Makefile`, and CI frontend/security jobs | Node 22. |
 | Docker image SPA stage | `node:26-alpine`. |
 
-The repository does not currently state that the Go 1.25.13/1.27 or Node 22/26 differences are
+The repository does not currently state that the Go 1.26.10/1.27.3 or Node 22/26 differences are
 intentional policy; aligning or formalizing those pins is a separate follow-up. The supported repository
 workflow does not require host Node.js: use `make spa-snapshot` for the committed SPA and then `make build`.
 

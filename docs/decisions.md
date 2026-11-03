@@ -9124,3 +9124,24 @@ first halves prove an open older transaction closes it. A transaction 25 hours o
 fails the test loudly, with its holder named — that is a leak, not a flake. The shared test database
 across packages remains the setting that produces holders; isolating packages' databases is not done
 here.
+
+## D-0275 — the Go floor moves to 1.26.10 and the image builds on Go 1.27.3 (2026-11-03)
+
+**Context.** The Security workflow had been red on `main` since 2026-10-08. `govulncheck` reported 13
+vulnerabilities with call paths from cerbix's code, all in the Go standard library of the go.mod
+toolchain (Go 1.25.13 — `net/http`, `net/http/internal/http2`, `crypto/tls`, `crypto/x509`,
+`html/template`, `net/textproto`); four of them also in `golang.org/x/net` v0.58.0. The fixes exist only in Go 1.26.9 /
+1.26.10 and 1.27.2 / 1.27.3; none was published for 1.25. The release image's own toolchain,
+`golang:1.27.0-bookworm`, was affected by all 13 as well (iter-0208, RED).
+
+**Decision.** `go.mod` declares `go 1.26.10` — the lowest release of a supported line that fixes all
+thirteen — and the Docker build stage uses `golang:1.27.3-bookworm`. `golang.org/x/net` v0.62.0 (it also
+clears two uncalled advisories of v0.60.0), `golang.org/x/crypto` v0.58.0 (the Go 1.26 bump iter-0200
+left for later). The Security workflow's scanner is pinned to `govulncheck` v1.9.0, which installs on
+the go.mod toolchain. The go.mod floor is not raised to 1.27: a floor states the minimum a source build
+needs, and 1.26.10 is that minimum.
+
+**Consequences.** Building from source needs Go 1.26.10 or later (with the default `GOTOOLCHAIN=auto`,
+an older local Go downloads it). CI binaries build on 1.26.10, the image on 1.27.3; both lines are
+patched, and the two pins remain different, as before. One uncalled advisory stays open:
+GO-2026-5932 in `golang.org/x/crypto`, fixed so far only in an untagged revision.

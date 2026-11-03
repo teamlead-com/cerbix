@@ -90,7 +90,7 @@ Package map (`internal/`): `config` `logging` `metrics` `httpsrv` · `auth` `aut
 - **Real-binary e2e** — build + run `cerbix serve --role=all` against a container Postgres; the pattern
   in recent iteration reports (login → act → assert DB/metrics) is the template.
 
-Everything runs in Docker (Go 1.25). Frontend is **Docker-only** (no host Node); `docker build` needs
+Everything runs in Docker (Go 1.26). Frontend is **Docker-only** (no host Node); `docker build` needs
 `--network=host` on this host.
 
 ## 6. Common tasks

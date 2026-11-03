@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [v0.3.9] - Unreleased
 
+### 🔒 Security
+
+- **Go toolchain and `golang.org/x/net` patched.** `govulncheck` found 13 vulnerabilities reachable from cerbix's code in the Go standard library (`net/http`, HTTP/2, `crypto/tls`, `crypto/x509`, `html/template`, `net/textproto`) and in `golang.org/x/net`. Release binaries now build on Go 1.26.10 and the Docker image on Go 1.27.3, both of which fix all of them; `golang.org/x/net` is 0.62.0 and `golang.org/x/crypto` 0.58.0. Binaries and images of earlier versions, including the Go 1.27.0 image, carry these vulnerabilities — upgrading replaces them (D-0275).
+- **`vite` 8.3.5.** Clears a high-severity advisory set in `vite` 8.2.0–8.2.2 and `launch-editor` flagged by `npm audit` on the production dependency tree. The embedded SPA is rebuilt with it.
+
 ### ✨ Added
 
 - **A Project Admin manages the members of their own project.** Settings → Project → **Members** (visible to Org Admins, global admins and the Project Admin of the current project) lists the project's members — change a role, remove someone, invite by email with a project role (Project Admin, Editor or Viewer) — and shows, read-only, who reaches the project through the organization. New endpoints `GET/POST /api/v1/projects/{id}/members` and `PATCH/DELETE /api/v1/projects/{id}/members/{membershipId}`. A Project Admin cannot touch organization-wide memberships, grant an organization role or reach another project. API tokens and client-credentials service accounts are refused on these endpoints (403); the `project:manage` action still grants a token nothing (D-0273).
@@ -25,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - **One schema migration, `00111`**: adds a nullable `users.last_seen_at` column (no table rewrite; applied automatically when any role starts, under a brief exclusive lock on `users`) and fills it from each user's newest remaining session. Users whose sessions were all removed before the upgrade show "never" until they next sign in — that history no longer exists.
 - No configuration change.
+- **Building from source needs Go 1.26.10 or later** (was 1.25.13). With the default `GOTOOLCHAIN=auto` an older Go downloads 1.26.10 by itself.
 
 ---
 

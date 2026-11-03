@@ -3,7 +3,14 @@
 Statuses: `TODO`, `IN_PROGRESS`, `DONE`. `DEFERRED` is not permitted. Every `DONE` links to code,
 tests, and metrics.
 
-## Latest closed iteration (iter-0207 — the four flaky store tests; OPENED 2026-10-18, CLOSED 2026-11-03; CLOSED / OWNER-APPROVED after review round 3 APPROVED, P3s applied; D-0274; test infrastructure only, no CHANGELOG entry; see [iter-0207](iterations/iter-0207.md))
+## Latest closed iteration (iter-0208 — Security workflow back to green: the Go toolchain, `x/net` and `vite`; OPENED 2026-11-03, CLOSED 2026-11-03; CLOSED / OWNER-APPROVED after review round 1 (documentation only) addressed; D-0275; unreleased, CHANGELOG `[v0.3.9]`; see [iter-0208](iterations/iter-0208.md))
+
+| ID | Acceptance criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| AC-0208-1 | `govulncheck` on the go.mod toolchain reports no vulnerability called from cerbix's code: the go.mod floor is Go 1.26.10 (all 13 stdlib findings of 1.25.13 fixed), `golang.org/x/net` ≥ v0.60.0, and the scanner pin installs on that toolchain (`v1.9.0`); the Docker image builds on Go 1.27.3, which fixes the same 13 that its previous 1.27.0 carried. | DONE | RED and GREEN reproduced locally under the CI toolchain and flags — [`iter-0208.md`](iterations/iter-0208.md); D-0275. Independent review round 1 CHANGES REQUIRED (documentation only), addressed; closed by the OWNER 2026-11-03. Metrics: N/A. |
+| AC-0208-2 | `npm audit --omit=dev --audit-level=high` passes: `vite` ≥ 8.3.5 in the production tree (through `vue-router`), with the SPA rebuilt, tested and re-embedded. | DONE | RED and GREEN reproduced locally — [`iter-0208.md`](iterations/iter-0208.md). Independent review round 1 CHANGES REQUIRED (documentation only), addressed; closed by the OWNER 2026-11-03. Metrics: N/A. |
+
+## Previous closed iteration (iter-0207 — the four flaky store tests; OPENED 2026-10-18, CLOSED 2026-11-03; CLOSED / OWNER-APPROVED after review round 3 APPROVED, P3s applied; D-0274; test infrastructure only, no CHANGELOG entry; see [iter-0207](iterations/iter-0207.md))
 
 The four FLAKE rows below (in the sections of the iterations that recorded them) are DONE by this
 iteration: causes established and fixed in the test infrastructure — [`iter-0207.md`](iterations/iter-0207.md).

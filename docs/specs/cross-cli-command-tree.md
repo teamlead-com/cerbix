@@ -140,7 +140,7 @@ go list -m -versions github.com/spf13/cobra
 ```
 
 `v1.10.2` is the newest stable version in that result. Its module declares `go 1.15`, so it is
-compatible with cerbix's `go 1.25.13` module floor. The final version is pinned in `go.mod` and
+compatible with cerbix's module floor (`go 1.25.13` when this was written; `go 1.26.10` since iter-0208). The final version is pinned in `go.mod` and
 `go.sum`; `@latest` is not part of the implementation procedure.
 
 Viper is prohibited both as a direct dependency and as a cerbix configuration abstraction. After the

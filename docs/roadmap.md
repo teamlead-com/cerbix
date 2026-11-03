@@ -275,7 +275,14 @@ These are named in specs as follow-up REQUIREMENTS rather than non-goals. None i
 
 ## 5. Standing work with no end state
 
-- **Dependencies** — a sweep roughly monthly, under iter-0159's rules.
+- **Dependencies** — a sweep roughly monthly, under iter-0159's rules. **Open from iter-0208:**
+  the development-only npm advisories (12 at 2026-11-03: 10 moderate, 2 critical) — three
+  (`vitest`, `tinypool`, `@vitest/mocker`) need `vitest` 5.1.0 per `npm audit` (a major upgrade
+  of the test runner), and nine grow from `minimatch` < 11.0.1 via `eslint`, `openapi-typescript`
+  (`@redocly/openapi-core`) and `js-beautify` (`editorconfig`, `glob`), which no `vitest` bump
+  clears; and GO-2026-5932 in `golang.org/x/crypto`
+  waits for a tagged release carrying its fix. Neither is in the Security gate nor in a shipped
+  artifact.
 - **Releases** — a tag when a requirement closes or a migration lands, so the gap the v0.1.6 item
   fixed does not rebuild. **Both upgrade notes this list was holding are DISCHARGED**: the URL-userinfo
   refusal shipped with its note in `v0.1.7` (D-0145 addendum), and the literal-in-a-credential-header

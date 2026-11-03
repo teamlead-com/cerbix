@@ -99,7 +99,7 @@ cerbix version
 > `gh release download vX.Y.Z -R teamlead-com/cerbix` fetches the same assets if you
 > prefer the GitHub CLI to curl.
 > Or build from source at the repo root: `make build` (binary lands in `bin/cerbix`;
-> requires Go 1.25.13+ and the committed SPA snapshot in `internal/web/dist`; after a
+> requires Go 1.26.10+ and the committed SPA snapshot in `internal/web/dist`; after a
 > frontend change, refresh it first with `make spa-snapshot`, which needs Docker but no host Node.js).
 
 ### 2. Prepare PostgreSQL

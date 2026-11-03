@@ -76,7 +76,7 @@ We welcome feature requests! When proposing a new feature or architectural chang
 cerbix is structured as a Go + Vue 3 monorepo:
 
 ```text
-├── backend/                  # Go 1.25 backend module
+├── backend/                  # Go 1.26 backend module
 │   ├── cmd/cerbix/           # CLI entrypoint (main.go)
 │   ├── internal/             # Core service packages (api, auth, prober, scheduler, worker, etc.)
 │   └── packaging/            # Default config example (config.example.yaml)
@@ -102,7 +102,7 @@ cerbix is structured as a Go + Vue 3 monorepo:
 
 ### Prerequisites
 
-- **Go**: Version 1.25 or higher
+- **Go**: Version 1.26.10 or higher
 - **Node.js**: Version 20 or higher & `npm`
 - **Docker & Docker Compose**: For running PostgreSQL and RabbitMQ
 - **PostgreSQL**: Version 16 or higher

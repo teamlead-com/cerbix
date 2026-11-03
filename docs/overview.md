@@ -455,7 +455,7 @@ The reference point is company conventions (Go services `example-svc`), plus les
 
 | Component | Why chosen | Role in cerbix |
 |---|---|---|
-| **Go 1.25** | Company convention; static binary, cheap concurrency (goroutines), simple deployment. | The entire backend; one binary for all roles. |
+| **Go 1.26** | Company convention; static binary, cheap concurrency (goroutines), simple deployment. | The entire backend; one binary for all roles. |
 | **stdlib `net/http` (ServeMux 1.22+)** | Method+path routing landed in the stdlib — no external router needed, fewer dependencies. | HTTP routing for API/auth/public. |
 | **Postgres + `pgx/v5`** | Reliable relational database; pgx is a fast native driver with pooling. | State, heartbeats, settings, sessions. |
 | **TimescaleDB (adaptive)** | Hypertable+compression "for growth" without a hard dependency: RDS/plain PG work without the extension. | Extension present → `heartbeats` = **hypertable** (daily chunks on-demand, native compression segmentby=monitor: ~10–20× disk, retention via `drop_chunks`); absent → **regular RANGE partitions** (daily) with manual maintenance. The mode is detected at startup (migration 00043 guarded); the `heartbeats_daily` rollup is identical in both. Revisit trigger for a dedicated TSDB: >100k monitors / intervals <10s / raw retention >1 year. |
@@ -479,12 +479,12 @@ are intentional policy:
 
 | Context | Verified source and pin |
 |---|---|
-| Go module/source floor and CI binaries | [`go.mod`](../go.mod) declares Go 1.25.13; the build, test and security workflows use `go-version-file: go.mod`. |
+| Go module/source floor and CI binaries | [`go.mod`](../go.mod) declares Go 1.26.10; the build, test and security workflows use `go-version-file: go.mod`. |
 | Local/CI SPA snapshot and frontend tooling | [`Makefile`](../Makefile) and [`frontend/Makefile`](../frontend/Makefile) run Node 22 in Docker locally; the frontend/security CI jobs use Node 22 through `actions/setup-node` on hosted runners. |
-| Docker release image | [`docker/Dockerfile`](../docker/Dockerfile) uses `node:26-alpine` for the SPA and `golang:1.27.0-bookworm` for the backend stage; [`image.yml`](../.github/workflows/image.yml) builds that root-context file. |
+| Docker release image | [`docker/Dockerfile`](../docker/Dockerfile) uses `node:26-alpine` for the SPA and `golang:1.27.3-bookworm` for the backend stage; [`image.yml`](../.github/workflows/image.yml) builds that root-context file. |
 | Canonical supported workflow | Run `make spa-snapshot` after frontend changes, then `make build` or an image target. Host Node.js is not required. |
 
-Formal alignment of the Go 1.25.13/1.27 and Node 22/26 pins is a documented follow-up, not an
+Formal alignment of the Go 1.26.10/1.27.3 and Node 22/26 pins is a documented follow-up, not an
 assumption about intent.
 
 The shipped shell and branding contract uses **Sealed C** by default, gives a configured custom logo

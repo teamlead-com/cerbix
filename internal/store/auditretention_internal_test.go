@@ -295,7 +295,14 @@ func auditRetentionTestStore(t *testing.T) (*Store, string, context.Context) {
 	}
 	t.Cleanup(func() {
 		st.Close()
-		dropCtx, dropCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		// DROP DATABASE waits for an immediate checkpoint (IPC/CheckpointStart, CheckpointDone)
+		// while the checkpointer fsyncs (IO/DataFileSync). On the test containers that took
+		// 12.6 s in one probe of six and passed 15 s in another (FLAKE-0201, iter-0207), and the
+		// iter-0207 review sampled a DROP DATABASE … WITH (FORCE) of up to 56 s in a full run:
+		// the bound was too tight for a checkpoint, not a hang. Two minutes is about twice the
+		// longest drop seen — a margin, not a ceiling anyone measured. The cleanup is not what
+		// this test checks; it waits for the checkpoint and still fails loudly if it never ends.
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer dropCancel()
 		if _, err := admin.Exec(dropCtx, `DROP DATABASE IF EXISTS `+databaseName+` WITH (FORCE)`); err != nil {
 			t.Errorf("drop audit retention probe: %v", err)

@@ -674,9 +674,7 @@ func TestUpgradingWithAnOpenServiceIncidentKeepsItsLadder(t *testing.T) {
 		t.Fatalf("create probe database (this gate requires CREATEDB): %v", err)
 	}
 	defer func() {
-		if _, err := st.pool.Exec(ctx, `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
-			t.Errorf("drop probe database %s: %v", name, err)
-		}
+		dropProbeDatabase(t, st.pool, name)
 	}()
 	u.Path = "/" + name
 	db, err := sql.Open("pgx", u.String())

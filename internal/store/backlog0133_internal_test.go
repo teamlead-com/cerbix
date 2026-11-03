@@ -2169,9 +2169,7 @@ func TestFreshMigrationUnderNonUTCSessionSeedsUTCBounds(t *testing.T) {
 		t.Fatalf("create probe database %s (the migration-evidence gate requires CREATEDB): %v", probeName, err)
 	}
 	defer func() {
-		if _, err := st.pool.Exec(ctx, `DROP DATABASE IF EXISTS `+probeName+` WITH (FORCE)`); err != nil {
-			t.Errorf("drop probe database %s: %v", probeName, err)
-		}
+		dropProbeDatabase(t, st.pool, probeName)
 	}()
 
 	u.Path = "/" + probeName

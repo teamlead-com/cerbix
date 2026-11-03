@@ -9091,3 +9091,36 @@ can now learn whether an email is a user of the instance ("no user with that ema
 already could; accepted, no rate limit in this iteration. The `project:manage` token chip stays and is
 documented as granting nothing. A Project Admin does not see the org audit log, so the history of
 their project's members is visible to Org Admins only.
+
+## D-0274 — the store test suite is green without caveats: four flakes explained and fixed (2026-10-18)
+
+**Context.** Every full `-race` run of `internal/store` carried a known flake (FLAKE-0201, -0203,
+-0204, -0206), so a red run read as "probably a flake". iter-0207 established each cause before
+changing anything (iter-0207 report: reproductions, diagnostics, the holder caught).
+
+**Decision.** (1) `TruncateAll` — test/dev-only, refused on any database not named "test" — re-runs
+migration 00093's gate-ledger bootstrap, so a test database idle for more than a week still has a
+partition for today. (2) The audit-retention probe waits up to 2 minutes for its `DROP DATABASE`,
+which waits for an immediate checkpoint. (3) A gate-maintenance test that needs a drop to HAPPEN
+moves the day's `detached_at` 25 hours back (`backdateGateDetach`) and requires the drop on ONE pass
+(`requireGateDropOnePass`, which names the holders before failing). Every backend of the shared test
+database whose transaction can close the gate — autovacuum workers on the bloated `pg_catalog` (every
+holder the iter-0207 review logged), a probe's `DROP DATABASE` waiting for its checkpoint — began after
+such a detach, so the answer no longer depends on another session's duration. Applied to the four tests
+that asserted a drop on a given pass after a fresh detach. The deferral is pinned as before, by a
+transaction the test opens itself, and that test now also asserts its own backend is a holder. Review
+round 1 had chosen a bounded convergence (60 s, "a checkpoint's length"); the holders it met were not
+checkpoints and their duration has no bound, so it was replaced. (4) The seven probe-database cleanups in the store
+tests that dropped on the test's own context go through `dropProbeDatabase`, on a 3-minute context of
+its own: a test's own context, partly spent, failed a test whose logic had passed. Three sites already
+had a fresh context of their own and keep their code (statuspageprojection and incidentrepair, 3 min;
+audit retention, 2 min). The product's drop gate (D-0225) is
+unchanged: excluding autovacuum from it would be an amendment to D-0225 with its own test, and closing
+the flakes does not need it.
+
+**Consequences.** The drop-asserting tests no longer wait on other sessions. Their second halves prove
+"no older backend → drop on one pass", not that the test's own commit is what opened the gate; the
+first halves prove an open older transaction closes it. A transaction 25 hours old on a test database
+fails the test loudly, with its holder named — that is a leak, not a flake. The shared test database
+across packages remains the setting that produces holders; isolating packages' databases is not done
+here.

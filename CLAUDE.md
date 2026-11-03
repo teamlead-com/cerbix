@@ -18,7 +18,8 @@ make docs-check                       # living docs may not cite a file or Test*
 # Store/integration tests are DB-gated: they SKIP without this env var.
 export CERBIX_TEST_DATABASE_DSN="postgres://cerbix:cerbix@localhost:5432/cerbix_test?sslmode=disable"
 go test -race -count=1 -timeout 40m ./...              # full suite; `make race` does the same
-# -timeout 40m is REQUIRED, not padding: internal/store takes ~11 min under -race and
+# -timeout 40m is REQUIRED, not padding: internal/store takes ~18 min under -race (1065–1106 s
+# measured alone, 2026-11-02; ~25 min when two runs share the machine) and
 # blows go test's 10 m per-package default, dying as "panic: test timed out" on whichever
 # test was running — which sends the reader after the wrong bug.
 go test ./internal/store/ -run TestName -count=1 -v   # single test

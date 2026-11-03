@@ -79,17 +79,7 @@ func resetGateLedger(t *testing.T, st *Store, ctx context.Context) {
 		END $$`); err != nil {
 		t.Fatalf("reset ledger: %v", err)
 	}
-	src, err := migrationsFS.ReadFile("migrations/00093_reliability_gate.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(src)
-	begin := strings.Index(text, "-- gate-ledger-bootstrap:begin")
-	end := strings.Index(text, "-- gate-ledger-bootstrap:end")
-	if begin < 0 || end < begin {
-		t.Fatal("the bootstrap block markers are gone from 00093")
-	}
-	if _, err := st.pool.Exec(ctx, text[begin:end]); err != nil {
+	if err := st.runGateLedgerBootstrap(ctx); err != nil {
 		t.Fatalf("re-run bootstrap: %v", err)
 	}
 }
@@ -152,6 +142,86 @@ func runGatePass(t *testing.T, st *Store, ctx context.Context, cfg GateMaintenan
 		clock = time.Now
 	}
 	return st.runGateLedgerMaintenancePass(ctx, clock(), cfg, clock, m, hooks)
+}
+
+// gateDetachLongAgo is how far back backdateGateDetach moves a day's detached_at. The drop gate
+// (D-0225) stays closed while ANY other backend of this database holds a transaction that began
+// before the detach, and the suite's shared test database always has other backends: autovacuum
+// workers vacuuming the bloated pg_catalog (pg_attribute, pg_constraint, pg_class — every holder
+// iter-0207 logged in its round-2 review runs), and, under heavier IO load, a DROP DATABASE of
+// internal/cli's repair/adopt probes waiting for its checkpoint. Neither has a duration bounded by
+// anything this test controls, so a test that needs a drop to HAPPEN moves the detach to before
+// any of them could have begun: no backend of a test database holds a transaction for 25 hours
+// unless something is really leaked, and that should fail loudly. The deferral half of the
+// contract is pinned separately, with a transaction the test opens itself.
+const gateDetachLongAgo = "25 hours"
+
+// backdateGateDetach moves `day`'s detached_at to gateDetachLongAgo before now (database clock),
+// which also makes the drop due under any purge_every the tests use. attached_at moves with it, a
+// day earlier still, so the registry never records a detach before its attach — a state the
+// product cannot produce.
+func backdateGateDetach(t *testing.T, st *Store, ctx context.Context, day time.Time) {
+	t.Helper()
+	tag, err := st.pool.Exec(ctx, `UPDATE service_gate_decision_partitions
+		SET detached_at = now() - $2::interval,
+		    attached_at = LEAST(attached_at, now() - $2::interval - interval '1 day')
+		WHERE day = $1::date AND state = 'detached'`, day.Format("2006-01-02"), gateDetachLongAgo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("backdate detach of %s: %d rows, want 1 detached day", day.Format("2006-01-02"), tag.RowsAffected())
+	}
+}
+
+// requireGateDropOnePass runs ONE maintenance pass and requires it to drop `day`. On a deferral
+// it names the holders before failing, so a red run says who held the gate.
+func requireGateDropOnePass(t *testing.T, st *Store, ctx context.Context, cfg GateMaintenanceConfig, m *gateMetricsFake, day time.Time, what string) GateMaintenanceReport {
+	t.Helper()
+	rep, _, err := runGatePass(t, st, ctx, cfg, nil, m, nil)
+	if err != nil {
+		t.Fatalf("%s: %v (failures=%v)", what, err, rep.Failures)
+	}
+	if rep.Dropped != 1 {
+		logGateDropBlockers(t, st, ctx, day, 0)
+		t.Fatalf("%s: dropped=%d refusals=%v failures=%v, want the day dropped on this pass", what, rep.Dropped, rep.Refusals, rep.Failures)
+	}
+	return rep
+}
+
+// logGateDropBlockers logs the backends that keep `day`'s drop gate closed: same database, a
+// transaction older than the day's detached_at, not this session.
+func logGateDropBlockers(t *testing.T, st *Store, ctx context.Context, day time.Time, attempt int) {
+	t.Helper()
+	rows, err := st.pool.Query(ctx, `
+		SELECT a.pid, a.backend_type, COALESCE(a.state, ''), a.xact_start, left(COALESCE(a.query, ''), 120)
+		  FROM pg_stat_activity a, service_gate_decision_partitions p
+		 WHERE p.day = $1::date AND a.datname = current_database()
+		   AND a.xact_start < p.detached_at AND a.pid <> pg_backend_pid()`,
+		day.Format("2006-01-02"))
+	if err != nil {
+		t.Logf("drop gate deferred (pass %d); blockers unreadable: %v", attempt, err)
+		return
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var (
+			pid       int
+			bt, state string
+			q         string
+			xs        time.Time
+		)
+		if err := rows.Scan(&pid, &bt, &state, &xs, &q); err != nil {
+			t.Logf("scan blocker: %v", err)
+			return
+		}
+		n++
+		t.Logf("drop gate deferred (pass %d): pid=%d type=%s state=%s xact_start=%s query=%q", attempt, pid, bt, state, xs.UTC().Format(time.RFC3339Nano), q)
+	}
+	if n == 0 {
+		t.Logf("drop gate deferred (pass %d); the holder had already finished when looked up", attempt)
+	}
 }
 
 // gateToday is the DATABASE's UTC day.
@@ -579,10 +649,12 @@ func TestGateMaintLogicalThenPhysicalRetentionAndTheSnapshotGate(t *testing.T) {
 	if err := otx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	rep, _, err = runGatePass(t, st, ctx, cfg, nil, m, nil)
-	if err != nil || rep.Dropped != 1 {
-		t.Fatalf("drop pass after the old transaction ended: dropped=%d err=%v failures=%v", rep.Dropped, err, rep.Failures)
-	}
+	// Other backends of the shared test database (autovacuum on pg_catalog, a probe's DROP
+	// DATABASE) may hold a transaction older than a detach stamped a second ago, for a time no
+	// test bounds (P2-2 of the iter-0207 review). With the detach 25 hours back the pass has one
+	// question left — with no older backend, does it drop? — and must answer it on this pass.
+	backdateGateDetach(t, st, ctx, old)
+	requireGateDropOnePass(t, st, ctx, cfg, m, old, "drop pass after the old transaction ended")
 	if c := gateLookup(t, st, ctx, old); c.exists || c.state != "dropped" {
 		t.Fatalf("after the drop: %+v, want the table gone and the registry dropped", c)
 	}
@@ -619,6 +691,7 @@ func TestGateMaintDropBoundaryIsInclusiveOnTheDatabaseClock(t *testing.T) {
 	}
 	rep, _, err = runGatePass(t, st, ctx, cfg, nil, &gateMetricsFake{}, nil)
 	if err != nil || rep.Dropped != 1 {
+		logGateDropBlockers(t, st, ctx, day, 0)
 		t.Fatalf("at the boundary: dropped=%d err=%v failures=%v", rep.Dropped, err, rep.Failures)
 	}
 	if c := gateLookup(t, st, ctx, day); c.exists || c.state != "dropped" {
@@ -704,6 +777,7 @@ func TestGateMaintStageAccountingFinalizeDropOldestDetachThenStop(t *testing.T) 
 		t.Fatal(err)
 	}
 	if rep.Finalized != 1 || rep.Dropped != 1 || rep.Detached != 1 || len(rep.Failures) != 0 {
+		logGateDropBlockers(t, st, ctx, dropDay, 0)
 		t.Fatalf("finalized=%d dropped=%d detached=%d failures=%v, want 1/1/1", rep.Finalized, rep.Dropped, rep.Detached, rep.Failures)
 	}
 	if c := gateLookup(t, st, ctx, pendingDay); c.state != "detached" || c.attached {

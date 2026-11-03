@@ -80,11 +80,11 @@ func TestGateMaintPreparedParentQuerySurvivesDetachAndDeferredDropOn158(t *testi
 	}
 	execute("between the detach and the deferred drop", 1)
 
-	time.Sleep(1100 * time.Millisecond)
-	rep, _, err = runGatePass(t, st, ctx, cfg, nil, &gateMetricsFake{}, nil)
-	if err != nil || rep.Dropped != 1 {
-		t.Fatalf("drop pass: dropped=%d err=%v failures=%v", rep.Dropped, err, rep.Failures)
-	}
+	// The drop is made due — and older than any other backend's transaction on this database,
+	// whose duration no test bounds (P2-2 of the iter-0207 review) — by moving the detach 25 hours
+	// back. The prepared statement in `reader` is what this test is about, and it is untouched.
+	backdateGateDetach(t, st, ctx, old)
+	requireGateDropOnePass(t, st, ctx, cfg, &gateMetricsFake{}, old, "drop pass")
 	execute("after the drop", 1)
 	if c := gateLookup(t, st, ctx, old); c.exists || c.state != "dropped" {
 		t.Fatalf("after the drop: %+v", c)

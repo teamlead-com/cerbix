@@ -289,13 +289,6 @@ These are named in specs as follow-up REQUIREMENTS rather than non-goals. None i
   the geo stack (`make geo-up-all` / `make geo-test`), where region affinity is what is actually being
   claimed — `synthetic` carries no region rule of its own, so this is about proving the general rule
   holds for it rather than about synthetic-specific code.
-- **A load-dependent flake in FR-024's gate maintenance** —
-  `TestGateMaintCrashAfterEveryRemovalStatementConverges/after_drop.commit` fails as `crashed=false
-  err=<nil>`: the crash injected after the drop's commit does not fire. Reproduced 2 of 5 runs with the
-  machine under a competing docker build, 12 of 12 clean when idle, and reproduced at `b3c99b6` in a
-  clean worktree — so it predates iter-0166 and is not caused by FR-028. It is a red CI gate under load
-  and it has no owner yet; whoever takes it should start from whether the crash hook's statement
-  boundary is what the pass actually executes when the purge is due at once (`PurgeEvery = 0`).
 - **The living documents** — `make docs-check` is the only mechanical guard; the failure it cannot
   catch is prose that is true of nothing, which is what the FR-025 closing arc kept finding.
 

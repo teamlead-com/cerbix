@@ -26,9 +26,7 @@ func TestGateAllWindowsMigrationRejectsLossyDowngrade(t *testing.T) {
 		t.Fatalf("create migration probe: %v", err)
 	}
 	t.Cleanup(func() {
-		if _, err := admin.pool.Exec(ctx, `DROP DATABASE IF EXISTS `+databaseName+` WITH (FORCE)`); err != nil {
-			t.Errorf("drop migration probe: %v", err)
-		}
+		dropProbeDatabase(t, admin.pool, databaseName)
 	})
 	parsed.Path = "/" + databaseName
 	db, err := sql.Open("pgx", parsed.String())
@@ -153,9 +151,7 @@ func TestGateAllWindowsMigrationPreservesV1PolicyRows(t *testing.T) {
 		t.Fatalf("create migration probe: %v", err)
 	}
 	t.Cleanup(func() {
-		if _, err := admin.pool.Exec(ctx, `DROP DATABASE IF EXISTS `+databaseName+` WITH (FORCE)`); err != nil {
-			t.Errorf("drop migration probe: %v", err)
-		}
+		dropProbeDatabase(t, admin.pool, databaseName)
 	})
 	parsed.Path = "/" + databaseName
 	db, err := sql.Open("pgx", parsed.String())
@@ -235,9 +231,7 @@ func TestProjectGatePolicyMigrationBackfillsLegacyDecisionSource(t *testing.T) {
 		t.Fatalf("create migration probe: %v", err)
 	}
 	t.Cleanup(func() {
-		if _, err := admin.pool.Exec(ctx, `DROP DATABASE IF EXISTS `+databaseName+` WITH (FORCE)`); err != nil {
-			t.Errorf("drop migration probe: %v", err)
-		}
+		dropProbeDatabase(t, admin.pool, databaseName)
 	})
 	parsed.Path = "/" + databaseName
 	db, err := sql.Open("pgx", parsed.String())

@@ -132,32 +132,27 @@ func TestGateMaintCrashAfterEveryRemovalStatementConverges(t *testing.T) {
 		t.Run("after_"+stage, func(t *testing.T) {
 			resetGateLedger(t, st, ctx)
 			plantGateDay(t, st, ctx, old, "detached", nil)
+			// The drop gate closes — correctly, per 15.9 — while ANY other backend of this database
+			// holds a transaction older than detached_at, and the shared test database always has
+			// such backends (autovacuum on pg_catalog, a probe's DROP DATABASE; FLAKE-0204,
+			// iter-0207). A detach 25 hours old is older than any of them, so the first pass reaches
+			// the drop and the converging pass finishes it — deterministically, on one pass each.
+			// The deferral itself is pinned by TestGateMaintADropIsDeferredWhileAnOlderTransactionIsOpen.
+			backdateGateDetach(t, st, ctx, old)
 			cfg := gateMaintCfg
-			cfg.PurgeEvery = 0 // the drop is due at once (inclusive boundary)
 			crashed := false
 			m := &gateMetricsFake{}
-			// The drop gate closes — correctly, per 15.9 — while ANY other backend of this database
-			// holds a transaction older than detached_at, and a closed gate is a deferral, not a
-			// failure: the pass returns nil and the next pass drops. On the CI database that other
-			// backend exists often enough to matter (D-0225: `crashed=false err=<nil>` on the
-			// hypertables job, 942 s of churn on a shared service container — an autovacuum worker
-			// is the plausible holder, and TestGateMaintADropIsDeferredWhileAnOlderTransactionIsOpen
-			// pins the mechanism with a transaction this test opens itself). So the crash is
-			// injected on the first pass that actually REACHES the drop, bounded, instead of
-			// asserting that the first pass must.
-			var err error
-			for attempt := 0; attempt < 20 && !crashed; attempt++ {
-				if attempt > 0 {
-					time.Sleep(250 * time.Millisecond)
-				}
-				_, _, err = runGatePass(t, st, ctx, cfg, nil, m, crashAfter(t, st, ctx, stage, &crashed))
-			}
+			_, _, err := runGatePass(t, st, ctx, cfg, nil, m, crashAfter(t, st, ctx, stage, &crashed))
 			if !crashed || err == nil {
+				logGateDropBlockers(t, st, ctx, old, 0)
 				t.Fatalf("crashed=%v err=%v", crashed, err)
 			}
 			rep, _, err := runGatePass(t, st, ctx, cfg, nil, m, nil)
 			if err != nil {
 				t.Fatalf("converging pass: %v", err)
+			}
+			if c := gateLookup(t, st, ctx, old); c.exists || c.state != "dropped" {
+				logGateDropBlockers(t, st, ctx, old, 1)
 			}
 			if len(rep.Refusals) != 0 || m.get("partition_identity") != 0 {
 				t.Fatalf("a crash outcome was refused: %v", rep.Refusals)
@@ -430,12 +425,22 @@ func TestGateMaintADropIsDeferredWhileAnOlderTransactionIsOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ftx.Rollback(context.Background())             //nolint:errcheck // the point is that it stays open
-	if _, err := ftx.Exec(ctx, `SELECT 1`); err != nil { // materializes xact_start
+	defer ftx.Rollback(context.Background()) //nolint:errcheck // the point is that it stays open
+	var foreignPid int
+	if err := ftx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&foreignPid); err != nil { // materializes xact_start
 		t.Fatal(err)
 	}
 
 	plantGateDay(t, st, ctx, old, "detached", nil) // detached_at = now(), AFTER the foreign xact began
+	// The test's own transaction is one of the holders the gate reads.
+	var holds bool
+	if err := st.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity a, service_gate_decision_partitions p
+		WHERE p.day = $1::date AND a.pid = $2 AND a.xact_start < p.detached_at)`, old.Format("2006-01-02"), foreignPid).Scan(&holds); err != nil {
+		t.Fatal(err)
+	}
+	if !holds {
+		t.Fatalf("backend %d does not hold a transaction older than the detach", foreignPid)
+	}
 	cfg := gateMaintCfg
 	cfg.PurgeEvery = 0
 	m := &gateMetricsFake{}
@@ -454,15 +459,26 @@ func TestGateMaintADropIsDeferredWhileAnOlderTransactionIsOpen(t *testing.T) {
 	if err := ftx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	rep, _, err = runGatePass(t, st, ctx, cfg, nil, m, nil)
-	if err != nil {
-		t.Fatalf("converging pass: %v", err)
+	// The test's own transaction no longer counts: the gate reads xact_start, and a committed
+	// session has none.
+	var stillHolds bool
+	if err := st.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND xact_start IS NOT NULL)`,
+		foreignPid).Scan(&stillHolds); err != nil {
+		t.Fatal(err)
 	}
-	if rep.Dropped != 1 {
-		t.Fatalf("dropped %d day(s) after the older transaction ended, want 1", rep.Dropped)
+	if stillHolds {
+		t.Fatalf("backend %d still reports a transaction after its commit", foreignPid)
 	}
+	// Other backends of the shared test database (autovacuum on pg_catalog, a probe's DROP
+	// DATABASE) may still hold a transaction older than a detach stamped a moment ago, and their
+	// duration is bounded by nothing this test controls (FLAKE-0203, iter-0207). Moving the detach
+	// 25 hours back leaves exactly one question for the pass: with no holder, does it drop?
+	// Honest limit: this half proves "no older backend → drop on one pass", not that it was the
+	// commit above that opened the gate; the first half proves the open transaction closes it.
+	backdateGateDetach(t, st, ctx, old)
+	requireGateDropOnePass(t, st, ctx, cfg, m, old, "the pass after the older transaction ended")
 	if c := gateLookup(t, st, ctx, old); c.exists || c.state != "dropped" {
-		t.Fatalf("after convergence: %+v, want dropped", c)
+		t.Fatalf("after the drop: %+v, want dropped", c)
 	}
 	gateRegistryAgreesWithCatalog(t, st, ctx)
 }

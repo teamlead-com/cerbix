@@ -434,6 +434,31 @@ func (s *Store) TruncateAll(ctx context.Context) error {
 			return fmt.Errorf("store: drop partition %s: %w", name, err)
 		}
 	}
+	// The gate-decision ledger is the other runtime-partitioned table. Its days are created by
+	// migration 00093's bootstrap (today + 7) and then by the maintenance pass; a test database
+	// idle for more than a week therefore had no partition for TODAY, and every test that writes a
+	// decision failed until a gate-maintenance test happened to re-run the bootstrap
+	// (FLAKE-0206, iter-0207). The block is idempotent — registered days are skipped.
+	return s.runGateLedgerBootstrap(ctx)
+}
+
+// runGateLedgerBootstrap re-runs migration 00093's gate-ledger bootstrap block — the days
+// [today, today + 7] that are not registered yet. Test/dev support (TruncateAll and the
+// gate-maintenance tests' reset); production keeps the ledger ahead with the maintenance pass.
+func (s *Store) runGateLedgerBootstrap(ctx context.Context) error {
+	src, err := migrationsFS.ReadFile("migrations/00093_reliability_gate.sql")
+	if err != nil {
+		return fmt.Errorf("store: read gate-ledger bootstrap: %w", err)
+	}
+	text := string(src)
+	begin := strings.Index(text, "-- gate-ledger-bootstrap:begin")
+	end := strings.Index(text, "-- gate-ledger-bootstrap:end")
+	if begin < 0 || end < begin {
+		return fmt.Errorf("store: the gate-ledger bootstrap markers are gone from 00093")
+	}
+	if _, err := s.pool.Exec(ctx, text[begin:end]); err != nil {
+		return fmt.Errorf("store: run gate-ledger bootstrap: %w", err)
+	}
 	return nil
 }
 

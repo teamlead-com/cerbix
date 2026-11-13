@@ -37,11 +37,16 @@ DEV_E2E_ARGS ?=
 # the defect class that arc keeps producing; the awk below is narrow by construction — it reads the
 # `carrier_enabled` line of the top-level `ledger:` block of a file this repository owns, and any
 # other shape yields the empty string, which `run.sh` treats as off.
-override DEV_LEDGER_CARRIER := $(shell awk '/^ledger:[[:space:]]*$$/{f=1;next} f&&/^[^[:space:]#]/{f=0} f&&/^[[:space:]]+carrier_enabled:[[:space:]]*true[[:space:]]*$$/{print "true";exit}' $(DEV_CONFIG_FILE))
+# `#` is spelled through a variable because the two make generations disagree about it inside a
+# function call: GNU Make 3.81 (what macOS ships) starts a comment at a bare `#` and dies with
+# "unterminated call to function `shell'", while 4.3+ passes `\#` through with its backslash.
+# A variable holding the character is the one spelling both read the same way.
+override HASH := \#
+override DEV_LEDGER_CARRIER := $(shell awk '/^ledger:[[:space:]]*$$/{f=1;next} f&&/^[^[:space:]$(HASH)]/{f=0} f&&/^[[:space:]]+carrier_enabled:[[:space:]]*true[[:space:]]*$$/{print "true";exit}' $(DEV_CONFIG_FILE))
 DISTRIBUTED_E2E_ARGS ?= tests/file-providers.spec.ts tests/monitors.spec.ts tests/probers.spec.ts
 GEO_E2E_ARGS ?= tests/topology-geo.spec.ts tests/monitors.spec.ts tests/probers.spec.ts
 
-.PHONY: build spa-snapshot test race lint docs-check version clean \
+.PHONY: build spa-snapshot test race race-both lint docs-check version clean \
 	dev-init geo-init dev-compose-check geo-compose-check \
 	dev-build dev-build-single dev-build-distributed geo-build \
 	dev-up dev-up-single dev-up-distributed geo-up geo-up-all \
@@ -168,6 +173,20 @@ test:
 race:
 	@mkdir -p $(GOCACHE) $(GOMODCACHE)
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test -race -count=1 -timeout 40m ./...
+
+## race-both: the same suite in BOTH storage modes at once, on throwaway fast databases
+##
+## The gate for anything touching `heartbeats` or retention is two full runs — hypertable mode and
+## declarative-partition mode. Done one after the other on the dev Postgres that is ~25–35 minutes
+## of waiting, most of it the store suite paying for durability it does not test. This target
+## starts two disposable containers (TimescaleDB and plain Postgres, fsync off, data on tmpfs),
+## runs both modes side by side and removes the containers. It never touches the dev database.
+## The reasoning for why no assertion is weakened is at the top of scripts/race-both.sh.
+## `make race-both RACE_PKGS=./internal/store/` narrows it to one package.
+RACE_PKGS ?= ./...
+race-both:
+	@mkdir -p $(GOCACHE) $(GOMODCACHE)
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GO=$(GO) ./scripts/race-both.sh $(RACE_PKGS)
 
 lint:
 	golangci-lint run ./...

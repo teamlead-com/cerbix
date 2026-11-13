@@ -25,6 +25,12 @@ go test -race -count=1 -timeout 40m ./...              # full suite; `make race`
 go test ./internal/store/ -run TestName -count=1 -v   # single test
 ```
 
+`make race-both` runs that suite in **both storage modes at once** on two throwaway containers
+(TimescaleDB and plain `postgres:16-alpine`, fsync off, data on tmpfs) and removes them afterwards:
+~9.5 min wall for both modes on a 10-core machine (measured 2026-11-14), against ~25–35 min for two
+sequential runs on the dev Postgres. It needs no `CERBIX_TEST_DATABASE_DSN` and never touches the
+dev database. `make race-both RACE_PKGS=./internal/store/` narrows it; logs land in `.cache/race/`.
+
 Test DB discipline:
 - **Never point tests at the dev `cerbix` DB** — tests run `TruncateAll`. Use `cerbix_test`.
 - Migrations auto-apply in test helpers (`Migrate → Open → TruncateAll`). After **changing** an already-applied migration file, drop and recreate `cerbix_test`.

@@ -189,6 +189,74 @@ Bootstrap the first admin without Keycloak: set `security.admin_email` and
 logged** — if it is unset, no admin is created (`bootstrap_admin_skipped`). Rotate it via
 `/api/v1/me/password` after first login. Local-login brute-force protection is a per-client-IP
 sliding-window limiter (`login_rate_limit_per_minute`, default 10; 0 disables) — D-0031.
+Since D-0276 that setting (L) drives three limiters on `/auth/local/*`:
+- L per client IP per minute, checked before the body is read. Login has its own bucket; reset
+  request and confirm share one.
+- min(L, max(2, (L+1)/2)) per (IP, email): never below 2, so the two-step TOTP sign-in fits.
+- 5L **failed** logins per email, so failures from other addresses cannot lock a user out of a
+  clean address.
+
+Bodies are capped at 4 KiB and passwords at 1024 bytes. A password **reset** ends every session of
+the account, including the browser that requested it. A password **change** keeps the caller's
+session and ends the others. Neither touches API tokens.
+
+**Residual risk of the per-email limiter.** One address can drive at most about L/2 failures for
+an email. It therefore never locks a user out of a clean address on its own. About **ten addresses
+together** (5L ÷ L/2) can keep sign-in to that email blocked for as long as they keep failing, and
+the obvious target is the instance's only local administrator, `security.admin_email`. While it
+lasts, only new local sign-ins to that email are refused (429). Sessions already open, SSO sign-in
+and API tokens are unaffected. Three measures reduce it:
+1. **Keep `security.admin_email` non-public.** Use an address that appears nowhere else: not on
+   the status page, in mail headers, or as a support contact.
+2. **Set `server.trusted_proxy_cidrs` correctly.** Without it, every client behind your proxy shares
+   the proxy's address. With the wrong value, a forged `X-Forwarded-For` mints fresh addresses.
+   Either way the per-address limits stop meaning what they say.
+3. **Close `/auth/local/*` at the perimeter when SSO is the sign-in path.** Allow it only from an
+   admin network or VPN, and keep the local admin for break-glass.
+
+### Machine clients (OIDC client-credentials, D-0034 as amended by D-0276)
+
+A service can call the API with a client-credentials JWT from your IdP, but only from a client
+listed in **Machine clients** (Settings → Authentication, or `oidc.machine_clients`). An empty list
+(the default) turns the JWT bearer path off. cerbix's own interactive `client_id` cannot be listed.
+Rules for a listed client:
+- **Service-account-only at the IdP — a requirement, not advice.** A listed client must allow no user
+  flow (authorization code, password grant, token exchange): such a flow mints tokens with the same
+  client id and a person's subject.
+  - cerbix refuses tokens with a `nonce`, a `sid`, or an Okta `cid` that differs from `sub`, and
+    never authenticates an existing person's account on this path.
+  - **Entra ID delegated (user) access tokens carry neither `nonce` nor `sid` by default, so those
+    markers do not stop them.** A dual-purpose Entra client is held back only by this IdP rule and
+    by the refusal of a known person's subject. A person who has not signed in to cerbix yet would
+    get a machine row under their subject, which their first sign-in then strips. Register a
+    separate app registration for client credentials.
+- **Keycloak:** keep "Use refresh tokens for client credentials grant" off (the default since
+  12). With it on, the grant opens a user session and its tokens carry `sid`, which is refused.
+- **Okta:** use a custom authorization server and keep its default `sub` (the client id).
+- **Entra ID:** v1 tokens name the client in `appid`, v2 tokens in `azp`. Both are understood.
+- **Google:** list the service account's unique id (its tokens' `azp`).
+
+A token's first call creates a **machine** user (`<sub>@clients` when the token has no email) with
+no access. Grant it memberships like anyone else; the member lists show a `machine` badge. A
+machine cannot be made a global admin; use an API token for instance-wide automation. If a
+person ever signs in to an identity a machine token created, it becomes their account: every
+membership the machine held is removed, its global-admin flag is cleared, and the change is
+written to the audit log (`user.kind_human`, and `member.revoke_machine_grants` per
+organization) and logged as `oidc_machine_became_human`.
+
+**Diagnosing a 401 on the bearer path.** Every refused token logs `oidc_bearer_refused` with
+`reason`, `client_claim`, `client`, `issuer` and `sub`, and counts
+`cerbix_oidc_bearer_refused_total{reason}`:
+
+| `reason` | Meaning and fix |
+| --- | --- |
+| `machine_clients_empty` | The path is off. List the client. |
+| `client_not_listed` | The `client` is not in the list (or it is cerbix's own interactive client). |
+| `client_claim_missing` / `client_claims_disagree` | The token names no client, or `azp`/`client_id`/`cid`/`appid` disagree. |
+| `delegated_nonce` / `delegated_sid` / `delegated_cid_sub` | A user-session token. Check the client is service-only (Keycloak: the refresh-token switch). |
+| `subject_is_human` | The token's subject is a person's account. For a service account whose token carries a real email (e.g. GCP) and was filed as human by the 0.4 upgrade, delete that user in Settings → Users and let the next token re-create it, then re-grant its memberships. |
+| `invalid_claims` | A client or session claim is not a string. |
+| `invalid_token` | Not a valid JWT of the configured issuer (logged at debug: any unknown bearer string lands here). |
 
 ### Keycloak bootstrap
 

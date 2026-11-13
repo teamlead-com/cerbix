@@ -38,6 +38,29 @@ beforeEach(() => {
   });
 });
 
+// sec-hardening-2 H-1: a client-credentials identity is badged `machine`; humans carry no badge.
+describe("MembersPanel kind badge", () => {
+  it("badges machine members only", async () => {
+    apiMock.GET.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/organizations") return { data: [{ id: "o1", slug: "acme", name: "Acme" }] };
+      if (path === "/api/v1/organizations/{orgID}/projects") return { data: [{ id: "p1", slug: "api", name: "API" }] };
+      if (path === "/api/v1/organizations/{orgID}/members")
+        return {
+          data: [
+            { id: "m1", user_id: "u1", org_id: "o1", role: "viewer", email: "ada@example.com", display_name: "Ada", kind: "human" },
+            { id: "m2", user_id: "u2", org_id: "o1", role: "viewer", email: "9f1c@clients", display_name: "ci-deployer", kind: "machine" },
+          ],
+        };
+      return { data: [] };
+    });
+    const w = mount(MembersPanel);
+    await flushPromises();
+    const badges = w.findAll('[data-testid="kind-badge"]');
+    expect(badges).toHaveLength(1);
+    expect(badges[0].text()).toBe("machine");
+  });
+});
+
 describe("MembersPanel audit trail", () => {
   it("reads the ORG endpoint and renders its own vocabulary through the shared rows", async () => {
     const w = mount(MembersPanel);

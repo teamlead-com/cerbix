@@ -17,7 +17,8 @@ const resetTokenTTL = time.Hour
 // reset link to the address if it belongs to a local account. The response is
 // always 200 with a generic message so it can't be used to enumerate accounts.
 func (a *Authenticator) ResetRequestHandler(w http.ResponseWriter, r *http.Request) {
-	if !a.loginLimiter.allow(clientIP(r, a.trustedProxies, a.trustedProxyNets), time.Now()) {
+	ip := clientIP(r, a.trustedProxies, a.trustedProxyNets)
+	if !a.limits.perIP.allow("reset|"+ip, time.Now()) {
 		writeJSONError(w, http.StatusTooManyRequests, "too many requests, try again later")
 		return
 	}
@@ -26,6 +27,10 @@ func (a *Authenticator) ResetRequestHandler(w http.ResponseWriter, r *http.Reque
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if !a.limits.perIPEmail.allow("reset|"+ip+"|"+normalizeEmail(body.Email), time.Now()) {
+		writeJSONError(w, http.StatusTooManyRequests, "too many requests, try again later")
 		return
 	}
 	email := strings.TrimSpace(body.Email)
@@ -68,6 +73,12 @@ func (a *Authenticator) ResetRequestHandler(w http.ResponseWriter, r *http.Reque
 // ResetConfirmHandler completes a reset: it consumes a valid token and sets the
 // new password. Tokens are single-use and expire after resetTokenTTL.
 func (a *Authenticator) ResetConfirmHandler(w http.ResponseWriter, r *http.Request) {
+	// sec-hardening-2 H-6: limited per IP BEFORE the body is read — this path runs Argon2id
+	// (64 MiB) before it looks at the token.
+	if !a.limits.perIP.allow("reset|"+clientIP(r, a.trustedProxies, a.trustedProxyNets), time.Now()) {
+		writeJSONError(w, http.StatusTooManyRequests, "too many requests, try again later")
+		return
+	}
 	var body struct {
 		Token       string `json:"token"`
 		NewPassword string `json:"new_password"`
@@ -79,6 +90,10 @@ func (a *Authenticator) ResetConfirmHandler(w http.ResponseWriter, r *http.Reque
 	// Live policy (DB → config → default), not the startup config snapshot.
 	if len(body.NewPassword) < a.authPolicy().MinPasswordLen {
 		writeJSONError(w, http.StatusBadRequest, "new password too short")
+		return
+	}
+	if len(body.NewPassword) > MaxPasswordBytes {
+		writeJSONError(w, http.StatusBadRequest, "new password too long")
 		return
 	}
 	// Hash BEFORE touching the token (Argon2 can fail / be slow) — a hash failure must not

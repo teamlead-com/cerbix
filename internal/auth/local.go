@@ -38,12 +38,17 @@ func (a *Authenticator) secondFactorOK(ctx context.Context, cred store.LocalCred
 
 // LocalLoginHandler authenticates a username(email)/password pair and, on
 // success, issues a session cookie. Failures return a uniform 401 to avoid user
-// enumeration; excessive attempts from one IP get 429.
+// enumeration; excessive attempts get 429 from one of three limiters (authLimiters): per IP
+// before the body is read, per (IP, email), and per email once failures pile up.
 func (a *Authenticator) LocalLoginHandler(w http.ResponseWriter, r *http.Request) {
-	if !a.loginLimiter.allow(clientIP(r, a.trustedProxies, a.trustedProxyNets), time.Now()) {
+	tooMany := func() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "too many login attempts, try again later"})
+	}
+	ip := clientIP(r, a.trustedProxies, a.trustedProxyNets)
+	if !a.limits.perIP.allow("login|"+ip, time.Now()) {
+		tooMany()
 		return
 	}
 	var body struct {
@@ -56,6 +61,13 @@ func (a *Authenticator) LocalLoginHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 	email := strings.TrimSpace(body.Username)
+	key := normalizeEmail(body.Username)
+	if !a.limits.perIPEmail.allow("login|"+ip+"|"+key, time.Now()) || a.limits.emailFailures.blocked(key, time.Now()) {
+		tooMany()
+		return
+	}
+	// failed counts a credential failure against the email (failures-only limiter).
+	failed := func() { a.limits.emailFailures.record(key, time.Now()) }
 	cred, err := a.store.LocalCredentialByEmail(r.Context(), email)
 	if errors.Is(err, store.ErrNotFound) {
 		// Unknown user: still run the SAME Argon2id verification against a decoy hash
@@ -63,6 +75,7 @@ func (a *Authenticator) LocalLoginHandler(w http.ResponseWriter, r *http.Request
 		// otherwise the skipped hash makes a fast 401 a user-enumeration timing oracle
 		// (CWE-203). Result is discarded; the decoy can never authenticate.
 		_, _ = verifyPasswordFn(a.decoyHash, body.Password)
+		failed()
 		unauthorized(w)
 		return
 	}
@@ -75,6 +88,7 @@ func (a *Authenticator) LocalLoginHandler(w http.ResponseWriter, r *http.Request
 	// the decoy path above can never reach here).
 	ok, verr := verifyPasswordFn(cred.PasswordHash, body.Password)
 	if verr != nil || !ok {
+		failed()
 		unauthorized(w)
 		return
 	}
@@ -86,6 +100,11 @@ func (a *Authenticator) LocalLoginHandler(w http.ResponseWriter, r *http.Request
 	}
 	// Second factor, when enrolled: a valid TOTP or an unused recovery code.
 	if cred.TOTPEnabled && !a.secondFactorOK(r.Context(), cred, body.TOTP) {
+		// The SPA's first step sends no code and is told one is required — not a failure; a
+		// WRONG code is, or the second factor could be guessed at the per-IP rate everywhere.
+		if strings.TrimSpace(body.TOTP) != "" {
+			failed()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "two-factor code required", "totp_required": true})

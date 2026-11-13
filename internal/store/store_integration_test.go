@@ -26,6 +26,13 @@ import (
 
 // These tests require a real Postgres. They are opt-in via CERBIX_TEST_DATABASE_DSN
 // and skipped otherwise, so default `go test ./...` and CI stay hermetic.
+// upsertHuman is the fixture form of the interactive OIDC provisioning (sec-hardening-2 H-1); the
+// machine-turned-human report is irrelevant to the fixtures that use it.
+func upsertHuman(ctx context.Context, st *store.Store, issuer, sub, email, name string) (domain.User, error) {
+	u, _, err := st.UpsertHumanUserByOIDCIdentity(ctx, issuer, sub, email, name)
+	return u, err
+}
+
 func testStore(t *testing.T) (*store.Store, context.Context) {
 	t.Helper()
 	dsn := os.Getenv("CERBIX_TEST_DATABASE_DSN")
@@ -70,11 +77,11 @@ func TestOrgProjectUserMembershipRoundTrip(t *testing.T) {
 	}
 
 	// JIT upsert is idempotent by oidc_sub and refreshes mutable fields.
-	u1, err := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "sub-1", "a@x.com", "A")
+	u1, err := upsertHuman(ctx, st, "https://idp.test", "sub-1", "a@x.com", "A")
 	if err != nil {
 		t.Fatalf("upsert user: %v", err)
 	}
-	u2, err := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "sub-1", "a2@x.com", "A2")
+	u2, err := upsertHuman(ctx, st, "https://idp.test", "sub-1", "a2@x.com", "A2")
 	if err != nil {
 		t.Fatalf("re-upsert user: %v", err)
 	}
@@ -101,11 +108,11 @@ func TestUpsertUserByOIDCIdentity(t *testing.T) {
 
 	// Same subject from two different issuers must map to DISTINCT accounts —
 	// keying on the subject alone would let issuer B take over issuer A's user.
-	a, err := st.UpsertUserByOIDCIdentity(ctx, "https://idp-a", "shared-sub", "a@x", "A")
+	a, err := upsertHuman(ctx, st, "https://idp-a", "shared-sub", "a@x", "A")
 	if err != nil {
 		t.Fatalf("upsert A: %v", err)
 	}
-	b, err := st.UpsertUserByOIDCIdentity(ctx, "https://idp-b", "shared-sub", "b@x", "B")
+	b, err := upsertHuman(ctx, st, "https://idp-b", "shared-sub", "b@x", "B")
 	if err != nil {
 		t.Fatalf("upsert B: %v", err)
 	}
@@ -113,7 +120,7 @@ func TestUpsertUserByOIDCIdentity(t *testing.T) {
 		t.Fatalf("same sub from different issuers collided into one user: %s", a.ID)
 	}
 	// Re-upsert of the same identity is idempotent (updates in place).
-	a2, err := st.UpsertUserByOIDCIdentity(ctx, "https://idp-a", "shared-sub", "a2@x", "A2")
+	a2, err := upsertHuman(ctx, st, "https://idp-a", "shared-sub", "a2@x", "A2")
 	if err != nil {
 		t.Fatalf("re-upsert A: %v", err)
 	}
@@ -134,7 +141,7 @@ func TestUpsertUserByOIDCIdentity(t *testing.T) {
 	).Scan(&legacyID); err != nil {
 		t.Fatalf("seed legacy row: %v", err)
 	}
-	claimed, err := st.UpsertUserByOIDCIdentity(ctx, "https://idp-a", "legacy-sub", "l2@x", "L2")
+	claimed, err := upsertHuman(ctx, st, "https://idp-a", "legacy-sub", "l2@x", "L2")
 	if err != nil {
 		t.Fatalf("claim legacy: %v", err)
 	}
@@ -167,7 +174,7 @@ func TestTenantIsolation(t *testing.T) {
 	_, _ = st.CreateProject(ctx, globex.ID, "file-service", "File Service")
 
 	// alice: org-level member of Acme → sees Acme + all its projects only.
-	alice, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "alice", "alice@x", "Alice")
+	alice, _ := upsertHuman(ctx, st, "https://idp.test", "alice", "alice@x", "Alice")
 	if _, err := st.CreateMembership(ctx, domain.Membership{
 		UserID: alice.ID, OrgID: acme.ID, Role: domain.RoleViewer,
 	}); err != nil {
@@ -175,7 +182,7 @@ func TestTenantIsolation(t *testing.T) {
 	}
 
 	// bob: project-level member of Acme/api only → sees just that project.
-	bob, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "bob", "bob@x", "Bob")
+	bob, _ := upsertHuman(ctx, st, "https://idp.test", "bob", "bob@x", "Bob")
 	if _, err := st.CreateMembership(ctx, domain.Membership{
 		UserID: bob.ID, OrgID: acme.ID, ProjectID: lApi.ID, Role: domain.RoleProjectAdmin,
 	}); err != nil {
@@ -227,7 +234,7 @@ func TestListAndAdminHelpers(t *testing.T) {
 	}
 
 	// User lookups + global-admin toggle.
-	u, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "carol", "carol@x", "Carol")
+	u, _ := upsertHuman(ctx, st, "https://idp.test", "carol", "carol@x", "Carol")
 	bySub, err := st.GetUserByOIDCSub(ctx, "carol")
 	if err != nil || bySub.ID != u.ID {
 		t.Fatalf("get by sub = %+v (err %v)", bySub, err)
@@ -266,7 +273,7 @@ func TestListAndAdminHelpers(t *testing.T) {
 func TestCreateMembershipRejectsInvalidDomain(t *testing.T) {
 	st, ctx := testStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
-	u, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "dave", "dave@x", "Dave")
+	u, _ := upsertHuman(ctx, st, "https://idp.test", "dave", "dave@x", "Dave")
 	// project_admin at org scope is rejected by domain.Validate before any SQL.
 	if _, err := st.CreateMembership(ctx, domain.Membership{UserID: u.ID, OrgID: org.ID, Role: domain.RoleProjectAdmin}); err == nil {
 		t.Fatal("expected domain validation error for project_admin at org scope")
@@ -275,7 +282,7 @@ func TestCreateMembershipRejectsInvalidDomain(t *testing.T) {
 
 func TestSessionLifecycle(t *testing.T) {
 	st, ctx := testStore(t)
-	u, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "sess-user", "s@x", "S")
+	u, _ := upsertHuman(ctx, st, "https://idp.test", "sess-user", "s@x", "S")
 
 	sess, err := st.CreateSession(ctx, u.ID, "raw-token-1", time.Now().Add(time.Hour))
 	if err != nil || sess.UserID != u.ID {
@@ -311,8 +318,8 @@ func TestSessionLifecycle(t *testing.T) {
 
 func TestDeleteSessionsByUser(t *testing.T) {
 	st, ctx := testStore(t)
-	u, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "multi-sess", "m@x", "M")
-	other, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "other-user", "o@x", "O")
+	u, _ := upsertHuman(ctx, st, "https://idp.test", "multi-sess", "m@x", "M")
+	other, _ := upsertHuman(ctx, st, "https://idp.test", "other-user", "o@x", "O")
 	mk := func(uid, tok string) {
 		if _, err := st.CreateSession(ctx, uid, tok, time.Now().Add(time.Hour)); err != nil {
 			t.Fatalf("create session %s: %v", tok, err)
@@ -377,8 +384,8 @@ func TestListMembershipsByOrg(t *testing.T) {
 	st, ctx := testStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	ua, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "a", "a@x", "A")
-	ub, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "b", "b@x", "B")
+	ua, _ := upsertHuman(ctx, st, "https://idp.test", "a", "a@x", "A")
+	ub, _ := upsertHuman(ctx, st, "https://idp.test", "b", "b@x", "B")
 	_, _ = st.CreateMembership(ctx, domain.Membership{UserID: ua.ID, OrgID: org.ID, Role: domain.RoleOrgAdmin})
 	_, _ = st.CreateMembership(ctx, domain.Membership{UserID: ub.ID, OrgID: org.ID, ProjectID: proj.ID, Role: domain.RoleViewer})
 
@@ -553,7 +560,7 @@ func TestLocalUsersCoexistWithOIDC(t *testing.T) {
 	st, ctx := testStore(t)
 
 	// OIDC user (oidc_sub set, no password).
-	oidcUser, err := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "kc-1", "oidc@x", "OIDC")
+	oidcUser, err := upsertHuman(ctx, st, "https://idp.test", "kc-1", "oidc@x", "OIDC")
 	if err != nil {
 		t.Fatalf("oidc user: %v", err)
 	}
@@ -582,8 +589,8 @@ func TestLocalUsersCoexistWithOIDC(t *testing.T) {
 	if _, err := st.LocalCredentialByEmail(ctx, "oidc@x"); err != store.ErrNotFound {
 		t.Fatalf("oidc email should not resolve as local credential: %v", err)
 	}
-	if err := st.SetPassword(ctx, local.ID, "hash-xyz"); err != nil {
-		t.Fatalf("set password: %v", err)
+	if _, err := st.ChangePassword(ctx, local.ID, "hash-xyz", ""); err != nil {
+		t.Fatalf("change password: %v", err)
 	}
 	if h, _ := st.PasswordHashByID(ctx, local.ID); h != "hash-xyz" {
 		t.Fatalf("password not updated: %q", h)
@@ -1070,7 +1077,7 @@ func TestNotificationChannelPersistence(t *testing.T) {
 
 func TestGetUserByEmail(t *testing.T) {
 	st, ctx := testStore(t)
-	u, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "kc-1", "alice@x", "Alice")
+	u, _ := upsertHuman(ctx, st, "https://idp.test", "kc-1", "alice@x", "Alice")
 	got, err := st.GetUserByEmail(ctx, "alice@x")
 	if err != nil || got.ID != u.ID {
 		t.Fatalf("by email = %+v (err %v)", got, err)
@@ -1197,7 +1204,7 @@ func TestProjectMembershipMustBelongToOrg(t *testing.T) {
 	acme, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	globex, _ := st.CreateOrganization(ctx, "globex", "Globex")
 	globexProj, _ := st.CreateProject(ctx, globex.ID, "file-service", "File Service")
-	user, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "eve", "eve@x", "Eve")
+	user, _ := upsertHuman(ctx, st, "https://idp.test", "eve", "eve@x", "Eve")
 
 	// Grant references a project from a different org than org_id → composite FK
 	// must reject it.
@@ -1212,8 +1219,8 @@ func TestProjectMembershipMustBelongToOrg(t *testing.T) {
 func TestOrgMembersEnrichmentAndMutation(t *testing.T) {
 	st, ctx := testStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
-	admin, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "sub-admin", "admin@x.com", "Ada Admin")
-	editor, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "sub-ed", "ed@x.com", "Ed Editor")
+	admin, _ := upsertHuman(ctx, st, "https://idp.test", "sub-admin", "admin@x.com", "Ada Admin")
+	editor, _ := upsertHuman(ctx, st, "https://idp.test", "sub-ed", "ed@x.com", "Ed Editor")
 	am, _ := st.CreateMembership(ctx, domain.Membership{UserID: admin.ID, OrgID: org.ID, Role: domain.RoleOrgAdmin})
 	em, _ := st.CreateMembership(ctx, domain.Membership{UserID: editor.ID, OrgID: org.ID, Role: domain.RoleEditor})
 	// A session makes the editor "last active".
@@ -1320,7 +1327,7 @@ func TestAuditRecordAndList(t *testing.T) {
 	st, ctx := testStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	other, _ := st.CreateOrganization(ctx, "globex", "Globex")
-	actor, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "sub-a", "ada@x.com", "Ada")
+	actor, _ := upsertHuman(ctx, st, "https://idp.test", "sub-a", "ada@x.com", "Ada")
 
 	if err := st.RecordAudit(ctx, domain.AuditEntry{OrgID: org.ID, ActorUserID: actor.ID, Action: "member.add", Target: "viewer"}); err != nil {
 		t.Fatalf("record 1: %v", err)
@@ -1839,7 +1846,7 @@ func TestDeleteOrganization(t *testing.T) {
 func TestGlobalAuditIsSeparateFromEveryOrgListing(t *testing.T) {
 	st, ctx := testStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
-	actor, _ := st.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "sub-ga", "ga@x.com", "Grace")
+	actor, _ := upsertHuman(ctx, st, "https://idp.test", "sub-ga", "ga@x.com", "Grace")
 
 	// Two instance-level entries (no org) and one org-scoped entry.
 	if err := st.RecordAudit(ctx, domain.AuditEntry{ActorUserID: actor.ID, Action: "user.global_admin", Target: "u2"}); err != nil {

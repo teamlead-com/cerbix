@@ -147,6 +147,7 @@ type fakeStore struct {
 	diagnostics        []fakeDiag                      // file-provider bundle diagnostics
 	passwords          map[string]string
 	sessionsDeletedFor []string
+	changePasswordErr  error // ChangePassword fails with this when set
 	slaTargets         map[string]domain.SLATarget
 	slaReports         map[string]bool // project id -> weekly report enabled
 	oidcSettings       *domain.OIDCSettings
@@ -713,15 +714,17 @@ func (f *fakeStore) PasswordHashByID(_ context.Context, id string) (string, erro
 	}
 	return h, nil
 }
-func (f *fakeStore) SetPassword(_ context.Context, id, passwordHash string) error {
-	if f.passwords == nil {
-		f.passwords = map[string]string{}
+
+// ChangePassword models the one transaction: on failure neither the hash nor the sessions change.
+func (f *fakeStore) ChangePassword(_ context.Context, id, passwordHash, _ string) (int64, error) {
+	if f.changePasswordErr != nil {
+		return 0, f.changePasswordErr
+	}
+	if _, ok := f.passwords[id]; !ok {
+		return 0, store.ErrNotFound
 	}
 	f.passwords[id] = passwordHash
-	return nil
-}
-func (f *fakeStore) DeleteSessionsByUser(_ context.Context, userID, _ string) (int64, error) {
-	f.sessionsDeletedFor = append(f.sessionsDeletedFor, userID)
+	f.sessionsDeletedFor = append(f.sessionsDeletedFor, id)
 	return 0, nil
 }
 func (f *fakeStore) MonitorSLI(_ context.Context, _ string, _ time.Time) (store.SLICounts, error) {
@@ -2576,6 +2579,23 @@ func TestChangePassword(t *testing.T) {
 	// Non-local user (no password) → 400.
 	if rec := do(h, globalAdmin, http.MethodPost, "/api/v1/me/password", `{"current_password":"x","new_password":"newpass12"}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("non-local user = %d, want 400", rec.Code)
+	}
+}
+
+// sec-hardening-2 H-5: the hash and the revocation of the other sessions are one transaction, so
+// a store failure is a 500 — never a 204 that left stolen sessions alive (D-0139 swallowed it).
+func TestChangePasswordStoreFailureIs500(t *testing.T) {
+	fs := seededStore()
+	h := newHandler(fs)
+	old, _ := auth.HashPassword("oldpass12")
+	fs.passwords["u1"] = old
+	fs.changePasswordErr = errors.New("forced session delete failure")
+	rec := do(h, o1Viewer, http.MethodPost, "/api/v1/me/password", `{"current_password":"oldpass12","new_password":"newpass12"}`)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("store failure = %d, want 500", rec.Code)
+	}
+	if fs.passwords["u1"] != old {
+		t.Fatal("the hash changed although the transaction failed")
 	}
 }
 

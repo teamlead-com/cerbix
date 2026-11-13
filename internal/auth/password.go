@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -19,8 +20,20 @@ const (
 	argonSaltLen = 16
 )
 
+// MaxPasswordBytes bounds what reaches Argon2id (sec-hardening-2 H-6): a password is refused when
+// it is longer than this many BYTES (not characters). One rule in the two primitives covers every
+// caller — login, reset, the self-service change, TOTP disable.
+const MaxPasswordBytes = 1024
+
+// ErrPasswordTooLong is returned by HashPassword and VerifyPassword for a password over
+// MaxPasswordBytes, before any Argon2 work.
+var ErrPasswordTooLong = errors.New("auth: password longer than 1024 bytes")
+
 // HashPassword returns a PHC-encoded argon2id hash of the password.
 func HashPassword(password string) (string, error) {
+	if len(password) > MaxPasswordBytes {
+		return "", ErrPasswordTooLong
+	}
 	salt := make([]byte, argonSaltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("auth: salt: %w", err)
@@ -33,6 +46,9 @@ func HashPassword(password string) (string, error) {
 
 // VerifyPassword reports whether password matches the PHC-encoded argon2id hash.
 func VerifyPassword(encoded, password string) (bool, error) {
+	if len(password) > MaxPasswordBytes {
+		return false, ErrPasswordTooLong
+	}
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" {
 		return false, fmt.Errorf("auth: unsupported password hash format")

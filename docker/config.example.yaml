@@ -48,6 +48,10 @@ oidc:
   button_label: "Continue with SSO"  # text on the login-page OIDC button, e.g. "Continue with Okta"
   post_logout_redirect_url: ""     # where /auth/logout sends the browser
   bootstrap_admin_emails: []       # these emails become global admins on login
+  # Client ids whose client-credentials tokens may call the API as a bearer JWT. Empty (default)
+  # turns the JWT bearer path off. Each listed client must be service-account-only at the IdP;
+  # client_id above is refused here. The Settings UI overrides this once saved.
+  machine_clients: []
 
 # Built-in username/password login, usable alongside or instead of OIDC.
 # When enabled, database.dsn is required. Bootstrap creates a global-admin on an

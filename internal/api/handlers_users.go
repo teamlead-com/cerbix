@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
 )
 
@@ -53,6 +54,12 @@ func (h *Handler) updateAdminUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		h.serverError(w, "get_user", err)
+		return
+	}
+	// sec-hardening-2 H-1: a machine identity never holds instance-wide rights (an API token does
+	// that job). Clearing a flag a machine somehow holds stays allowed.
+	if *body.IsGlobalAdmin && u.Kind == domain.UserKindMachine {
+		writeError(w, http.StatusBadRequest, "a machine identity cannot be a global admin")
 		return
 	}
 	if u.IsGlobalAdmin && !*body.IsGlobalAdmin {

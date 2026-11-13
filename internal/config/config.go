@@ -152,6 +152,10 @@ type OIDCConfig struct {
 	ButtonLabel string `yaml:"button_label"`
 	// BootstrapAdminEmails are promoted to global admin on login (JIT).
 	BootstrapAdminEmails []string `yaml:"bootstrap_admin_emails"`
+	// MachineClients are the client ids whose client-credentials tokens may call the API as a
+	// bearer JWT (sec-hardening-2 H-1). Empty (the default) turns the JWT bearer path off. Each
+	// listed client must be service-account-only at the IdP; client_id itself is refused.
+	MachineClients []string `yaml:"machine_clients"`
 }
 
 // Enabled reports whether OIDC login is configured.
@@ -162,8 +166,10 @@ func (o OIDCConfig) Enabled() bool { return o.Issuer != "" }
 type LocalAuthConfig struct {
 	Enabled           bool `yaml:"enabled"`
 	MinPasswordLength int  `yaml:"min_password_length"`
-	// LoginRateLimitPerMinute bounds local-login attempts per client IP per
-	// minute (brute-force mitigation). 0 disables the limit.
+	// LoginRateLimitPerMinute (L) bounds the unauthenticated /auth/local/* endpoints
+	// (brute-force mitigation, sec-hardening-2 H-6): L attempts per client IP per minute for
+	// login and, separately, for password reset (request + confirm); min(L, max(2, (L+1)/2)) per (IP, email);
+	// 5L failed logins per email. 0 disables all three.
 	LoginRateLimitPerMinute int `yaml:"login_rate_limit_per_minute"`
 }
 
@@ -656,6 +662,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("database.dsn is required when oidc is enabled (sessions and users need Postgres)")
 		}
 	}
+	if _, err := domain.NormalizeMachineClients(c.OIDC.MachineClients, c.OIDC.ClientID); err != nil {
+		return fmt.Errorf("oidc.machine_clients: %w", err)
+	}
 	// Service fan-out caps (func-service-reliability §10.10). Fail fast: a value the domain
 	// forbids is REJECTED at startup, never silently mapped to something legal — the config
 	// the operator wrote and the config the system runs must be the same config.
@@ -685,6 +694,20 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	// Local-login values the runtime cannot honour are refused here, not at the first sign-in
+	// (sec-hardening-2 review, P2-2).
+	if c.Local.LoginRateLimitPerMinute < 0 {
+		return fmt.Errorf("local.login_rate_limit_per_minute must be 0 (limits off) or positive: %d", c.Local.LoginRateLimitPerMinute)
+	}
+	// The ceiling of the live auth policy's min_password_len (domain.AuthPolicy.Validate, 6..256).
+	if c.Local.MinPasswordLength > 256 {
+		return fmt.Errorf("local.min_password_length must be at most 256: %d", c.Local.MinPasswordLength)
+	}
+	// auth.MaxPasswordBytes (config cannot import auth): HashPassword refuses a longer password,
+	// so the bootstrap admin would never be created.
+	if len(c.Security.AdminPassword) > 1024 {
+		return fmt.Errorf("security.admin_password must be at most 1024 bytes")
+	}
 	if c.Local.Enabled {
 		if c.Database.DSN == "" {
 			return fmt.Errorf("database.dsn is required when local login is enabled")

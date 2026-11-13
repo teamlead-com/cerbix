@@ -17,10 +17,10 @@ func (s *Store) GetOIDCSettings(ctx context.Context) (domain.OIDCSettings, error
 	)
 	err := s.pool.QueryRow(ctx, //nolint:forbidigo // encrypted OIDC secret is read only at the store decryption boundary; never logged
 		`SELECT enabled, issuer, client_id, client_secret, redirect_url, scopes,
-		        post_logout_url, button_label, bootstrap_admins
+		        post_logout_url, button_label, bootstrap_admins, machine_clients
 		   FROM oidc_settings WHERE id = true`).
 		Scan(&st.Enabled, &st.Issuer, &st.ClientID, &secret, &st.RedirectURL, &st.Scopes,
-			&st.PostLogoutURL, &st.ButtonLabel, &st.BootstrapAdmins)
+			&st.PostLogoutURL, &st.ButtonLabel, &st.BootstrapAdmins, &st.MachineClients)
 	if noRows(err) {
 		return domain.OIDCSettings{}, ErrNotFound
 	}
@@ -37,6 +37,9 @@ func (s *Store) GetOIDCSettings(ctx context.Context) (domain.OIDCSettings, error
 	}
 	if st.BootstrapAdmins == nil {
 		st.BootstrapAdmins = []string{}
+	}
+	if st.MachineClients == nil {
+		st.MachineClients = []string{}
 	}
 	return st, nil
 }
@@ -56,16 +59,20 @@ func (s *Store) UpsertOIDCSettings(ctx context.Context, st domain.OIDCSettings) 
 	if admins == nil {
 		admins = []string{}
 	}
+	machines := st.MachineClients
+	if machines == nil {
+		machines = []string{}
+	}
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO oidc_settings
-		     (id, enabled, issuer, client_id, client_secret, redirect_url, scopes, post_logout_url, button_label, bootstrap_admins, updated_at)
-		 VALUES (true, $1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+		     (id, enabled, issuer, client_id, client_secret, redirect_url, scopes, post_logout_url, button_label, bootstrap_admins, machine_clients, updated_at)
+		 VALUES (true, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
 		 ON CONFLICT (id) DO UPDATE SET
 		     enabled = EXCLUDED.enabled, issuer = EXCLUDED.issuer, client_id = EXCLUDED.client_id,
 		     client_secret = EXCLUDED.client_secret, redirect_url = EXCLUDED.redirect_url, scopes = EXCLUDED.scopes,
 		     post_logout_url = EXCLUDED.post_logout_url, button_label = EXCLUDED.button_label,
-		     bootstrap_admins = EXCLUDED.bootstrap_admins, updated_at = now()`,
-		st.Enabled, st.Issuer, st.ClientID, enc, st.RedirectURL, scopes, st.PostLogoutURL, st.ButtonLabel, admins)
+		     bootstrap_admins = EXCLUDED.bootstrap_admins, machine_clients = EXCLUDED.machine_clients, updated_at = now()`,
+		st.Enabled, st.Issuer, st.ClientID, enc, st.RedirectURL, scopes, st.PostLogoutURL, st.ButtonLabel, admins, machines)
 	if err != nil {
 		return fmt.Errorf("store: upsert oidc settings: %w", err)
 	}

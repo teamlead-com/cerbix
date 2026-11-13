@@ -20,13 +20,16 @@ type fakeStore struct {
 	localCreds  map[string]store.LocalCredential // by email
 	recovery    map[string]bool                  // userID|hash -> available
 	resetTokens map[string]resetTok              // tokenHash -> token
-	passwords   map[string]string                // userID -> hash (SetPassword)
+	passwords   map[string]string                // userID -> hash (password writes)
 	apiTokens   map[string]domain.ApiToken       // by token hash
 	touched     []string                         // token ids touched
 	seenTouched []string                         // user ids whose last_seen_at was refreshed
 	seenErr     error                            // TouchUserSeen fails with this when set
 	oidc        *domain.OIDCSettings             // nil = no DB override
 	nextID      int
+	// afterListMemberships, when set, runs right after ListMembershipsForUser read its result —
+	// the window in which a concurrent sign-in could flip a machine to human.
+	afterListMemberships func(userID string)
 }
 
 func newFakeStore() *fakeStore {
@@ -40,22 +43,54 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-// UpsertUserByOIDCIdentity keys by subject alone in the fake — the (issuer, sub)
-// uniqueness is a DB-constraint concern exercised in store integration tests; the
-// hermetic auth tests only need the JIT-provisioning shape.
-func (f *fakeStore) UpsertUserByOIDCIdentity(_ context.Context, _, sub, email, displayName string) (domain.User, error) {
+// The Upsert*UserByOIDCIdentity fakes key by subject alone — the (issuer, sub) uniqueness, the
+// transactions and the races are DB concerns exercised in the store tests; the hermetic auth
+// tests only need the provisioning shape and the human/machine rules.
+
+func (f *fakeStore) UpsertMachineUserByOIDCIdentity(_ context.Context, _, sub, email, displayName string) (domain.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	u, ok := f.usersBySub[sub]
+	if ok && u.Kind != domain.UserKindMachine {
+		return domain.User{}, store.ErrSubjectIsHuman
+	}
 	if !ok {
 		f.nextID++
-		u = domain.User{ID: "user-" + itoa(f.nextID), OIDCSub: sub}
+		u = domain.User{ID: "user-" + itoa(f.nextID), OIDCSub: sub, Kind: domain.UserKindMachine}
 	}
 	u.Email = email
 	u.DisplayName = displayName
 	f.usersBySub[sub] = u
 	f.usersByID[u.ID] = u
 	return u, nil
+}
+
+func (f *fakeStore) UpsertHumanUserByOIDCIdentity(_ context.Context, _, sub, email, displayName string) (domain.User, store.HumanFlip, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var flip store.HumanFlip
+	u, ok := f.usersBySub[sub]
+	switch {
+	case !ok:
+		f.nextID++
+		u = domain.User{ID: "user-" + itoa(f.nextID), OIDCSub: sub}
+	case u.Kind == domain.UserKindMachine:
+		flip = store.HumanFlip{Flipped: true, WasGlobalAdmin: u.IsGlobalAdmin, Revoked: f.memberships[u.ID]}
+		delete(f.memberships, u.ID)
+		u.IsGlobalAdmin = false
+	}
+	u.Kind = domain.UserKindHuman
+	u.Email = email
+	u.DisplayName = displayName
+	f.usersBySub[sub] = u
+	f.usersByID[u.ID] = u
+	return u, flip, nil
+}
+
+// upsertHuman is the fixture form of an interactive sign-in.
+func (f *fakeStore) upsertHuman(ctx context.Context, issuer, sub, email, displayName string) (domain.User, error) {
+	u, _, err := f.UpsertHumanUserByOIDCIdentity(ctx, issuer, sub, email, displayName)
+	return u, err
 }
 
 func (f *fakeStore) SetGlobalAdmin(_ context.Context, id string, admin bool) error {
@@ -83,8 +118,13 @@ func (f *fakeStore) GetUser(_ context.Context, id string) (domain.User, error) {
 
 func (f *fakeStore) ListMembershipsForUser(_ context.Context, userID string) ([]domain.Membership, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.memberships[userID], nil
+	out := f.memberships[userID]
+	hook := f.afterListMemberships
+	f.mu.Unlock()
+	if hook != nil {
+		hook(userID) // runs after the memberships were read, before the caller's next read
+	}
+	return out, nil
 }
 
 func (f *fakeStore) CreateSession(_ context.Context, userID, token string, expiresAt time.Time) (store.Session, error) {
@@ -241,15 +281,6 @@ type resetTok struct {
 	used    bool
 }
 
-func (f *fakeStore) SetPassword(_ context.Context, id, passwordHash string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.passwords == nil {
-		f.passwords = map[string]string{}
-	}
-	f.passwords[id] = passwordHash
-	return nil
-}
 
 func (f *fakeStore) CreatePasswordResetToken(_ context.Context, userID, tokenHash string, expiresAt time.Time) error {
 	f.mu.Lock()
@@ -273,7 +304,8 @@ func (f *fakeStore) ConsumePasswordResetToken(_ context.Context, tokenHash strin
 	return t.userID, nil
 }
 
-// ResetPasswordWithToken mirrors the store's atomic consume+set-password.
+// ResetPasswordWithToken mirrors the store's atomic consume + set-password + revoke-every-session
+// (sec-hardening-2 H-5).
 func (f *fakeStore) ResetPasswordWithToken(_ context.Context, tokenHash, passwordHash string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -287,5 +319,10 @@ func (f *fakeStore) ResetPasswordWithToken(_ context.Context, tokenHash, passwor
 		f.passwords = map[string]string{}
 	}
 	f.passwords[t.userID] = passwordHash
+	for h, s := range f.sessions {
+		if s.UserID == t.userID {
+			delete(f.sessions, h)
+		}
+	}
 	return t.userID, nil
 }

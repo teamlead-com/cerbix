@@ -593,6 +593,7 @@ func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 			logging.Critical(logger, "auth_init_failed", "error", err.Error())
 			return 1
 		}
+		authn.WithMetrics(registry) // cerbix_oidc_bearer_refused_total (sec-hardening-2 H-1)
 		if mail != nil {
 			authn.WithMailer(mail) // enables self-service password reset
 		}
@@ -657,7 +658,7 @@ func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 				WithAgentDBTokens().WithPullWaiter(notifier)
 			appMux.Handle("/api/v1/agent/", apiHandler.AgentRouter())
 		}
-		appMux.Handle("/api/", authn.RequireAuth(apiHandler.Router()))
+		appMux.Handle("/api/", authn.RequireAuth(apiHandler.APIRouter()))
 		// Public status-page rendering is unauthenticated; its more-specific prefix
 		// takes precedence over the auth-gated /api/ handler (ServeMux longest-match).
 		appMux.Handle("/api/v1/public/", apiHandler.PublicRouter())

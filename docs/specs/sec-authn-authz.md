@@ -58,10 +58,12 @@ Implementation:
   `mail`. Migration `00023`: `password_reset_tokens(user_id, token_hash, expires_at, used_at)`
   — only the hash is stored (`HashToken`), TTL 1 hour, single-use (consume = `UPDATE … used_at
   WHERE used_at IS NULL AND expires_at > now() RETURNING user_id`). `POST /auth/local/reset/request`
-  {email} — always `200 {ok:true}` (no user enumeration), per-IP rate limit (the shared loginLimiter);
-  on a local email match sends a letter with the link `${public_base_url}/reset?token=…`.
-  `POST /auth/local/reset/confirm` {token, new_password} — consumes the token → `SetPassword`; invalid/
-  expired/used → `400`. `/auth/config` returns `password_reset` (=`local && mail`), so the
+  {email} — always `200 {ok:true}` (no user enumeration), rate-limited per IP and per (IP, email)
+  (`authLimiters`, D-0276); on a local email match sends a letter with the link
+  `${public_base_url}/reset?token=…`. `POST /auth/local/reset/confirm` {token, new_password} —
+  limited per IP before the body is read; `ResetPasswordWithToken` consumes the token, sets the
+  hash and deletes **every** session of the account in one transaction (D-0276, amending D-0139
+  item 3; API tokens are not revoked); invalid/expired/used → `400`. `/auth/config` returns `password_reset` (=`local && mail`), so the
   login page shows the "Forgot?" link only when the reset actually works.
 - **Two-factor authentication (TOTP, D-0064)** — local accounts only (for
   OIDC, MFA is on the provider side). Package `internal/totp` (RFC 6238: HMAC-SHA1, 6 digits,
@@ -94,6 +96,14 @@ DONE (rate limit — D-0031).
 - **OIDC client-credentials** (iter-0027, D-0034; provider-agnostic, D-0043): a machine
   OAuth2 client, the JWT is verified by issuer+signature (`ccVerifier`, audience relaxed),
   JIT by `sub`, access — via membership. Both schemes converge on the same `authz.Can`.
+  **Narrowed by D-0276 (sec-hardening-2 H-1, iter-0209):**
+  - Only clients listed in `machine_clients` are accepted. The client claim is `azp`/`client_id`/
+    `cid`/`appid`, and all of them must agree.
+  - Delegated tokens (`nonce`, `sid`, Okta `cid` ≠ `sub`) are refused.
+  - The subject is provisioned only as `users.kind = machine`. A human row is 401 and nothing is
+    written.
+  - A machine is never a global admin. A person signing in to a machine identity flips it to
+    human and strips its grants.
 - **Per-token `actions` allow-list (FR-025 D12, iter-0165; D-0209/D-0212).** `api_tokens.actions
   text[] NULL`. `NULL` means what it always meant — the token's role decides. A non-null list is an
   ALLOW-LIST intersected with the role inside the ONE central predicate and nowhere else: `Can(action)`

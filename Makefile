@@ -296,6 +296,9 @@ dev-ready-single: dev-compose-check
 	$(call assert_no_geo_stack)
 	$(call assert_no_distributed_roles)
 	$(call wait_ready,cerbix,cerbix)
+# The dedicated local account e2e/tests/mail.spec.ts resets (sec-hardening-2 H-5): a reset ends
+# every session, so the suite never resets the shared admin. Idempotent; dev database only.
+	$(DEV_DC) exec -T postgres psql -U cerbix -d cerbix -v ON_ERROR_STOP=1 -q < e2e/seed/e2e-reset-user.sql
 
 dev-ready-distributed: dev-compose-check
 	$(call assert_no_geo_stack)

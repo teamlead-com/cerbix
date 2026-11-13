@@ -472,6 +472,10 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "new password too short")
 		return
 	}
+	if len(body.NewPassword) > auth.MaxPasswordBytes {
+		writeError(w, http.StatusBadRequest, "new password too long")
+		return
+	}
 	hash, err := h.store.PasswordHashByID(r.Context(), p.UserID)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusBadRequest, "not a local account")
@@ -491,19 +495,21 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "hash_password", err)
 		return
 	}
-	if err := h.store.SetPassword(r.Context(), p.UserID, newHash); err != nil {
-		h.serverError(w, "set_password", err)
+	// The new hash and the revocation of every OTHER session are one transaction
+	// (sec-hardening-2 H-5): a stolen/stale session elsewhere can't survive the credential
+	// change, and a failed revocation is a 500 with the old password still in place. The
+	// caller's own session is kept (it just proved the current password); a bearer/JWT caller
+	// has no session token, so all interactive sessions are dropped.
+	n, err := h.store.ChangePassword(r.Context(), p.UserID, newHash, auth.SessionTokenFrom(r.Context()))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusBadRequest, "not a local account")
 		return
 	}
-	// Invalidate every OTHER session for this user so a stolen/stale session elsewhere
-	// can't survive the credential change; the caller's own session is preserved (it
-	// just proved the current password). A bearer/JWT caller has no session token, so
-	// all interactive sessions are dropped.
-	if n, err := h.store.DeleteSessionsByUser(r.Context(), p.UserID, auth.SessionTokenFrom(r.Context())); err != nil {
-		h.logEvent(r, "password_change_session_invalidate_failed", "error", err.Error())
-	} else {
-		h.logEvent(r, "password_changed", "sessions_invalidated", n)
+	if err != nil {
+		h.serverError(w, "change_password", err)
+		return
 	}
+	h.logEvent(r, "password_changed", "sessions_invalidated", n)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -512,9 +518,16 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 // so it gets a tight cap. The agent router is token-authed but ingests batches
 // (a reconnecting agent's backfill can carry thousands of heartbeats), so it gets a
 // larger one. Both bound memory against an oversized body.
+//
+// The session/bearer API router gets a default cap too (sec-hardening-2 H-6): handlers with a
+// smaller cap of their own keep it — the inner MaxBytesReader is the tighter one. The one exception
+// is the Alertmanager receiver: a grouped webhook (max_alerts: 0 sends the whole group) can exceed
+// 1 MiB, so it gets the agent ingest's 16 MiB (owner ruling on the iter-0209 review, D-0276).
 const (
-	publicMaxBody = 64 << 10 // 64 KiB
-	agentMaxBody  = 16 << 20 // 16 MiB
+	publicMaxBody       = 64 << 10 // 64 KiB
+	agentMaxBody        = 16 << 20 // 16 MiB
+	apiMaxBody          = 1 << 20  // 1 MiB
+	alertmanagerMaxBody = 16 << 20 // 16 MiB
 )
 
 // maxBytes caps every request body on the wrapped handler at limit bytes: a read past

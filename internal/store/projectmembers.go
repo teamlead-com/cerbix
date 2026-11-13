@@ -24,7 +24,7 @@ var ErrUnknownUser = errors.New("store: unknown user")
 func (s *Store) ListProjectMembers(ctx context.Context, projectID string) ([]domain.Member, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT m.id, m.user_id, m.org_id, m.project_id, m.role, m.created_at,
-		        u.email, u.display_name, u.last_seen_at
+		        u.email, u.display_name, u.last_seen_at, u.kind
 		   FROM memberships m JOIN users u ON u.id = m.user_id
 		  WHERE m.project_id = $1
 		  ORDER BY u.display_name, u.email`,
@@ -42,7 +42,7 @@ func (s *Store) ListProjectMembers(ctx context.Context, projectID string) ([]dom
 			lastSeen  *time.Time
 		)
 		if err := rows.Scan(&mem.ID, &mem.UserID, &mem.OrgID, &projectID, &role, &mem.CreatedAt,
-			&mem.Email, &mem.DisplayName, &lastSeen); err != nil {
+			&mem.Email, &mem.DisplayName, &lastSeen, &mem.Kind); err != nil {
 			return nil, fmt.Errorf("store: scan project member: %w", err)
 		}
 		if projectID != nil {
@@ -62,7 +62,7 @@ func (s *Store) ListProjectMembers(ctx context.Context, projectID string) ([]dom
 // who reaches the project through the organization — as role, email and name only.
 func (s *Store) ListProjectInheritedMembers(ctx context.Context, projectID string) ([]domain.InheritedMember, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT m.role, u.email, u.display_name
+		`SELECT m.role, u.email, u.display_name, u.kind
 		   FROM projects p
 		   JOIN memberships m ON m.org_id = p.org_id AND m.project_id IS NULL
 		   JOIN users u ON u.id = m.user_id
@@ -79,7 +79,7 @@ func (s *Store) ListProjectInheritedMembers(ctx context.Context, projectID strin
 			im   domain.InheritedMember
 			role string
 		)
-		if err := rows.Scan(&role, &im.Email, &im.DisplayName); err != nil {
+		if err := rows.Scan(&role, &im.Email, &im.DisplayName, &im.Kind); err != nil {
 			return nil, fmt.Errorf("store: scan inherited member: %w", err)
 		}
 		im.Role = domain.Role(role)

@@ -36,6 +36,30 @@ beforeEach(() => {
 });
 
 describe("ProjectMembersPanel", () => {
+  // sec-hardening-2 H-1: a client-credentials identity is badged `machine`, direct or inherited;
+  // humans carry no badge.
+  it("badges machine members in both the project and the inherited lists", async () => {
+    apiMock.GET.mockImplementation(async (path: string) => {
+      if (path === "/api/v1/organizations") return { data: [{ id: "o1", slug: "acme", name: "Acme" }] };
+      if (path === "/api/v1/organizations/{orgID}/projects") return { data: [{ id: "p1", slug: "api", name: "API" }] };
+      if (path === "/api/v1/projects/{projectID}/members")
+        return {
+          data: {
+            members: [...members.map((m) => ({ ...m, kind: "human" })),
+              { id: "m-ci", user_id: "ci", org_id: "o1", project_id: "p1", role: "editor", email: "9f1c@clients", display_name: "ci-deployer", kind: "machine" }],
+            inherited: [{ ...inherited[0], kind: "human" }, { role: "editor", email: "c41d@clients", display_name: "terraform-runner", kind: "machine" }],
+          },
+        };
+      return { data: [] };
+    });
+    const w = mount(ProjectMembersPanel);
+    await flushPromises();
+    const badges = w.findAll('[data-testid="kind-badge"]');
+    expect(badges).toHaveLength(2);
+    expect(badges.every((b) => b.text() === "machine")).toBe(true);
+    expect(w.get('[data-testid="project-inherited"]').findAll('[data-testid="kind-badge"]')).toHaveLength(1);
+  });
+
   it("reads the PROJECT endpoint and shows organization access read-only", async () => {
     const w = mount(ProjectMembersPanel);
     await flushPromises();

@@ -6,15 +6,18 @@ import (
 	"testing"
 
 	"github.com/teamlead-com/cerbix/internal/authz"
+	"github.com/teamlead-com/cerbix/internal/config"
 )
 
 func TestClientCredentialsBearer(t *testing.T) {
 	fs := newFakeStore()
 	mock := newMockOIDC(t, "cerbix")
-	a := testAuthenticator(t, fs, mock)
+	// sec-hardening-2 H-1: the bearer path accepts only listed machine clients.
+	a := testAuthenticatorWith(t, fs, mock, func(c *config.Config) { c.OIDC.MachineClients = []string{"ci"} })
 
-	// An OIDC service account: a subject, no email/nonce.
+	// An OIDC service account of the listed client: a subject, no email/nonce.
 	mock.sub, mock.email, mock.name, mock.nn = "service-account-ci", "", "", ""
+	mock.extra = map[string]any{"azp": "ci"}
 	token := mock.mintIDToken(t)
 
 	var got authz.Principal

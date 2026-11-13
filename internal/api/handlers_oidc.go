@@ -23,6 +23,7 @@ type oidcSettingsView struct {
 	PostLogoutURL   string   `json:"post_logout_url"`
 	ButtonLabel     string   `json:"button_label"`
 	BootstrapAdmins []string `json:"bootstrap_admins"`
+	MachineClients  []string `json:"machine_clients"`
 	ReloadError     string   `json:"reload_error,omitempty"` // set when a save could not build the provider (e.g. IdP unreachable)
 }
 
@@ -33,7 +34,7 @@ func (h *Handler) getOIDCSettings(w http.ResponseWriter, r *http.Request) {
 	if !h.requireGlobalAdmin(w, r) {
 		return
 	}
-	view := oidcSettingsView{Active: h.oidc != nil && h.oidc.OIDCActive(), Scopes: []string{}, BootstrapAdmins: []string{}}
+	view := oidcSettingsView{Active: h.oidc != nil && h.oidc.OIDCActive(), Scopes: []string{}, BootstrapAdmins: []string{}, MachineClients: []string{}}
 	s, err := h.store.GetOIDCSettings(r.Context())
 	if err == nil {
 		view.Configured = true
@@ -46,6 +47,7 @@ func (h *Handler) getOIDCSettings(w http.ResponseWriter, r *http.Request) {
 		view.PostLogoutURL = s.PostLogoutURL
 		view.ButtonLabel = s.ButtonLabel
 		view.BootstrapAdmins = nonNilStrings(s.BootstrapAdmins)
+		view.MachineClients = nonNilStrings(s.MachineClients)
 	} else if !errors.Is(err, store.ErrNotFound) {
 		h.serverError(w, "get_oidc_settings", err)
 		return
@@ -76,6 +78,9 @@ func (h *Handler) setOIDCSettings(w http.ResponseWriter, r *http.Request) {
 		PostLogoutURL   string   `json:"post_logout_url"`
 		ButtonLabel     string   `json:"button_label"`
 		BootstrapAdmins []string `json:"bootstrap_admins"`
+		// pointer: omitted/null → keep the stored list (a script written before the field existed
+		// must not silently turn the bearer path off); [] clears it.
+		MachineClients *[]string `json:"machine_clients"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -90,18 +95,33 @@ func (h *Handler) setOIDCSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Preserve the stored secret when the client sends an empty/omitted one.
+	// The stored row, when a preserved field needs it.
+	var cur domain.OIDCSettings
 	secret := ""
 	if body.ClientSecret != nil {
 		secret = *body.ClientSecret
 	}
-	if strings.TrimSpace(secret) == "" {
-		if cur, err := h.store.GetOIDCSettings(r.Context()); err == nil {
-			secret = cur.ClientSecret
-		} else if !errors.Is(err, store.ErrNotFound) {
+	if strings.TrimSpace(secret) == "" || body.MachineClients == nil {
+		stored, err := h.store.GetOIDCSettings(r.Context())
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			h.serverError(w, "get_oidc_settings", err)
 			return
 		}
+		cur = stored
+	}
+	// Preserve the stored secret when the client sends an empty/omitted one.
+	if strings.TrimSpace(secret) == "" {
+		secret = cur.ClientSecret
+	}
+	requested := cur.MachineClients
+	if body.MachineClients != nil {
+		requested = *body.MachineClients
+	}
+	// A kept list is re-checked too: the client_id may have just changed to one of its entries.
+	machineClients, err := domain.NormalizeMachineClients(requested, body.ClientID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	settings := domain.OIDCSettings{
@@ -114,6 +134,7 @@ func (h *Handler) setOIDCSettings(w http.ResponseWriter, r *http.Request) {
 		PostLogoutURL:   strings.TrimSpace(body.PostLogoutURL),
 		ButtonLabel:     strings.TrimSpace(body.ButtonLabel),
 		BootstrapAdmins: nonNilStrings(body.BootstrapAdmins),
+		MachineClients:  machineClients,
 	}
 	if err := h.store.UpsertOIDCSettings(r.Context(), settings); err != nil {
 		h.serverError(w, "upsert_oidc_settings", err)
@@ -127,6 +148,7 @@ func (h *Handler) setOIDCSettings(w http.ResponseWriter, r *http.Request) {
 		ClientSecretSet: settings.ClientSecret != "", RedirectURL: settings.RedirectURL,
 		Scopes: settings.Scopes, PostLogoutURL: settings.PostLogoutURL, ButtonLabel: settings.ButtonLabel,
 		BootstrapAdmins: settings.BootstrapAdmins,
+		MachineClients:  settings.MachineClients,
 	}
 	if err := h.oidc.SyncOIDC(r.Context()); err != nil {
 		view.ReloadError = err.Error()

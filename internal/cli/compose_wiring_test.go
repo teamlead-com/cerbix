@@ -405,6 +405,8 @@ func TestMakefileDryRunTopologyExpansion(t *testing.T) {
 				"--profile single run --rm --no-deps cerbix migrate",
 				"--profile single up -d --no-deps cerbix",
 				"http://cerbix:8080/readyz",
+				// The mail spec's dedicated reset account (sec-hardening-2 H-5), seeded once ready.
+				"exec -T postgres psql -U cerbix -d cerbix -v ON_ERROR_STOP=1 -q < e2e/seed/e2e-reset-user.sql",
 			},
 			forbidden: []string{"docker-compose.geo.yml", "up -d --no-deps scheduler api worker"},
 		},

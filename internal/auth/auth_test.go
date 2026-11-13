@@ -25,8 +25,11 @@ type mockOIDC struct {
 	server               *httptest.Server
 	key                  *rsa.PrivateKey
 	clientID             string
-	sub, email, name, nn string // claims for the next minted id_token
+	sub, email, name, nn string // claims for the next minted id_token; nn == "" omits `nonce`
 	emailVerified        bool   // email_verified claim (default true = conformant IdP)
+	// extra claims merged into the next minted token (azp, client_id, cid, appid, sid, …);
+	// a key mapped to nil removes that claim.
+	extra map[string]any
 }
 
 func newMockOIDC(t *testing.T, clientID string) *mockOIDC {
@@ -81,7 +84,17 @@ func (m *mockOIDC) mintIDToken(t *testing.T) string {
 		Expiry:   jwt.NewNumericDate(now.Add(time.Hour)),
 		IssuedAt: jwt.NewNumericDate(now),
 	}
-	custom := map[string]any{"nonce": m.nn, "email": m.email, "name": m.name, "email_verified": m.emailVerified}
+	custom := map[string]any{"email": m.email, "name": m.name, "email_verified": m.emailVerified}
+	if m.nn != "" {
+		custom["nonce"] = m.nn
+	}
+	for k, v := range m.extra {
+		if v == nil {
+			delete(custom, k)
+			continue
+		}
+		custom[k] = v
+	}
 	raw, err := jwt.Signed(sig).Claims(claims).Claims(custom).Serialize()
 	if err != nil {
 		t.Fatalf("sign id_token: %v", err)
@@ -231,7 +244,7 @@ func TestRequireAuthMiddleware(t *testing.T) {
 	}
 
 	// Valid session → handler runs with principal.
-	u, _ := fs.UpsertUserByOIDCIdentity(context.Background(), "https://idp.test", "kc-9", "u@x", "U")
+	u, _ := fs.upsertHuman(context.Background(), "https://idp.test", "kc-9", "u@x", "U")
 	_, _ = fs.CreateSession(context.Background(), u.ID, "tok-9", time.Now().Add(time.Hour))
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
@@ -245,7 +258,7 @@ func TestRequireAuthMiddleware(t *testing.T) {
 func TestLogoutClearsSession(t *testing.T) {
 	fs := newFakeStore()
 	a := testAuthenticator(t, fs, newMockOIDC(t, "cerbix"))
-	u, _ := fs.UpsertUserByOIDCIdentity(context.Background(), "https://idp.test", "kc-10", "u@x", "U")
+	u, _ := fs.upsertHuman(context.Background(), "https://idp.test", "kc-10", "u@x", "U")
 	_, _ = fs.CreateSession(context.Background(), u.ID, "tok-10", time.Now().Add(time.Hour))
 
 	rec := httptest.NewRecorder()

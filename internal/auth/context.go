@@ -12,7 +12,8 @@ import (
 // Store is the persistence surface the auth layer needs. *store.Store satisfies
 // it; tests can supply a fake.
 type Store interface {
-	UpsertUserByOIDCIdentity(ctx context.Context, issuer, sub, email, displayName string) (domain.User, error)
+	UpsertMachineUserByOIDCIdentity(ctx context.Context, issuer, sub, email, displayName string) (domain.User, error)
+	UpsertHumanUserByOIDCIdentity(ctx context.Context, issuer, sub, email, displayName string) (domain.User, store.HumanFlip, error)
 	SetGlobalAdmin(ctx context.Context, id string, admin bool) error
 	GetUser(ctx context.Context, id string) (domain.User, error)
 	ListMembershipsForUser(ctx context.Context, userID string) ([]domain.Membership, error)
@@ -24,7 +25,6 @@ type Store interface {
 	CreateLocalUser(ctx context.Context, email, displayName, passwordHash string, globalAdmin bool) (domain.User, error)
 	LocalCredentialByEmail(ctx context.Context, email string) (store.LocalCredential, error)
 	ConsumeRecoveryCode(ctx context.Context, userID, codeHash string) (bool, error)
-	SetPassword(ctx context.Context, id, passwordHash string) error
 	CreatePasswordResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error
 	ConsumePasswordResetToken(ctx context.Context, tokenHash string) (string, error)
 	ResetPasswordWithToken(ctx context.Context, tokenHash, passwordHash string) (string, error)

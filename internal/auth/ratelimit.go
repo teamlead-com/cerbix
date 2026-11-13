@@ -24,6 +24,46 @@ type loginLimiter struct {
 	lastSweep time.Time
 }
 
+// authLimiters are the three brute-force limiters of the unauthenticated /auth/local/* endpoints
+// (sec-hardening-2 H-6, D-0276), all derived from local.login_rate_limit_per_minute = L; L <= 0
+// disables all three. A single "IP and email" key allowed either an account-lockout DoS or no
+// protection, so they are split:
+//   - perIP: L/min per client IP, checked BEFORE the body is read; buckets "login|<ip>" and
+//     "reset|<ip>" (reset request and confirm share one);
+//   - perIPEmail: min(L, max(2, (L+1)/2))/min per (IP, normalized email), checked after decode — one
+//     address hammering one account is cut off sooner than a NAT signing many people in;
+//   - emailFailures: 5L/min per normalized email, counting FAILED logins only — several times the
+//     per-IP threshold, so failures driven from one other address (it can drive at most the
+//     per-(IP, email) limit, about L/2) cannot lock a real user out of a clean address. Residual,
+//     inherent to any per-email limiter: about ten addresses together (5L ÷ L/2) can keep an
+//     email blocked for as long as they keep failing.
+//
+// The limiters are per process; a shared limiter across replicas is a non-goal.
+type authLimiters struct {
+	perIP         *loginLimiter
+	perIPEmail    *loginLimiter
+	emailFailures *loginLimiter
+}
+
+func newAuthLimiters(perMinute int) authLimiters {
+	// (L+1)/2, but never below 2 — a TOTP user's sign-in is two requests (password, then the
+	// code) — and never above L, which the per-IP bucket enforces anyway.
+	ipEmail := max(2, (perMinute+1)/2)
+	ipEmail = min(ipEmail, perMinute)
+	if perMinute <= 0 {
+		ipEmail = 0
+	}
+	return authLimiters{
+		perIP:         newLoginLimiter(perMinute),
+		perIPEmail:    newLoginLimiter(ipEmail),
+		emailFailures: newLoginLimiter(5 * perMinute),
+	}
+}
+
+// normalizeEmail is the limiter key for an email: trimmed and lower-cased. It is never used for
+// the account lookup, which stays exact.
+func normalizeEmail(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
 // newLoginLimiter builds a limiter of at most perMinute attempts per key per
 // minute. perMinute <= 0 disables limiting.
 func newLoginLimiter(perMinute int) *loginLimiter {
@@ -56,6 +96,43 @@ func (l *loginLimiter) allow(key string, now time.Time) bool {
 	}
 	l.hits[key] = append(kept, now)
 	return true
+}
+
+// blocked reports whether key is at or over the limit within the window at now, recording
+// nothing — the read half of a failures-only limiter (record is the write half). Disabled
+// limiters never block.
+func (l *loginLimiter) blocked(key string, now time.Time) bool {
+	if l.limit <= 0 {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	cutoff := now.Add(-l.window)
+	n := 0
+	for _, t := range l.hits[key] {
+		if t.After(cutoff) {
+			n++
+		}
+	}
+	return n >= l.limit
+}
+
+// record counts one event for key at now without checking the limit (failures-only limiter).
+func (l *loginLimiter) record(key string, now time.Time) {
+	if l.limit <= 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sweep(now)
+	cutoff := now.Add(-l.window)
+	kept := l.hits[key][:0]
+	for _, t := range l.hits[key] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	l.hits[key] = append(kept, now)
 }
 
 // sweep drops keys whose newest attempt is older than the window, bounding the

@@ -106,6 +106,7 @@ type Registry struct {
 	dispatchTransportFailures map[string]uint64            // bounded reason → count
 	canaryStages              map[string]uint64            // kind\x00stage\x00outcome → count (FR-029)
 	canaryDispatchRefusals    map[string]uint64            // bounded reason → count (FR-029)
+	oidcBearerRefusals        map[string]uint64            // bounded reason → count (sec-hardening-2 H-1)
 	// File-provider metrics (spec func-monitoring-as-code §16). Keyed by the bounded provider
 	// name only — never by file/project/monitor id.
 	fileProviders map[string]*fileProviderStat
@@ -416,6 +417,20 @@ func (r *Registry) RecordCanaryDispatchRefused(reason string) {
 		r.canaryDispatchRefusals = map[string]uint64{}
 	}
 	r.canaryDispatchRefusals[reason]++
+}
+
+// RecordOIDCBearerRefused counts a JWT refused on the OIDC client-credentials bearer path, by its
+// bounded reason (sec-hardening-2 H-1: `invalid_token`, `invalid_claims`, `machine_clients_empty`,
+// `client_claim_missing`, `client_claims_disagree`, `client_not_listed`, `delegated_nonce`,
+// `delegated_sid`, `delegated_cid_sub`, `subject_is_human`). After an upgrade it tells an operator
+// which client-credentials callers now get 401 until their client is listed.
+func (r *Registry) RecordOIDCBearerRefused(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.oidcBearerRefusals == nil {
+		r.oidcBearerRefusals = map[string]uint64{}
+	}
+	r.oidcBearerRefusals[reason]++
 }
 
 func (r *Registry) RecordSecretResolutionFailure(reason string) {
@@ -970,6 +985,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	dispatchTransportFailures := copyCounts(r.dispatchTransportFailures)
 	canaryStages := copyCounts(r.canaryStages)
 	canaryDispatchRefusals := copyCounts(r.canaryDispatchRefusals)
+	oidcBearerRefusals := copyCounts(r.oidcBearerRefusals)
 	dispatchSharedTrust := r.dispatchSharedTrust
 	fileProviders := map[string]fileProviderStat{}
 	for name, s := range r.fileProviders {
@@ -1053,6 +1069,8 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		"Materialized jobs that could not be handed to their transport (by reason).", dispatchTransportFailures)
 	writeReasonCounter(&out, "cerbix_canary_dispatch_refused_total",
 		"Canary runs not dispatched (by bounded reason).", canaryDispatchRefusals)
+	writeReasonCounter(&out, "cerbix_oidc_bearer_refused_total",
+		"OIDC bearer JWTs refused on the client-credentials path, by reason.", oidcBearerRefusals)
 	if len(canaryStages) > 0 {
 		out.println("# HELP cerbix_canary_stage_total Canary executions by workflow kind, deciding stage and outcome class.")
 		out.println("# TYPE cerbix_canary_stage_total counter")

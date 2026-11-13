@@ -22,8 +22,8 @@ func TestSessionRequestsRefreshLastSeenAtMostEveryFiveMinutes(t *testing.T) {
 	a.clock = func() time.Time { return now }
 
 	ctx := context.Background()
-	u, _ := fs.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "kc-seen", "seen@x", "Seen")
-	v, _ := fs.UpsertUserByOIDCIdentity(ctx, "https://idp.test", "kc-other", "other@x", "Other")
+	u, _ := fs.upsertHuman(ctx, "https://idp.test", "kc-seen", "seen@x", "Seen")
+	v, _ := fs.upsertHuman(ctx, "https://idp.test", "kc-other", "other@x", "Other")
 	// The fake checks expiry against the real clock, not a.clock.
 	_, _ = fs.CreateSession(ctx, u.ID, "tok-seen", time.Now().Add(time.Hour))
 	_, _ = fs.CreateSession(ctx, v.ID, "tok-other", time.Now().Add(time.Hour))

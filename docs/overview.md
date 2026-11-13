@@ -78,7 +78,7 @@ Top-level `Config` sections (`internal/config`):
 | `log` | `level`, `format` | `log/slog`, JSON. |
 | `database` | `dsn` | Postgres (pgx). Empty → scaffold mode without a DB. |
 | `rabbitmq` | `url`, `management_url` | AMQP for distributed roles (+ management API for worker-liveness alerts). |
-| `oidc` | `issuer`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `button_label`, `post_logout_redirect_url`, `bootstrap_admin_emails` | Bootstrap OIDC (overridable from the UI, see instance-settings). |
+| `oidc` | `issuer`, `client_id`, `client_secret`, `redirect_url`, `scopes`, `button_label`, `post_logout_redirect_url`, `bootstrap_admin_emails`, `machine_clients` | Bootstrap OIDC (overridable from the UI, see instance-settings). `machine_clients` lists the client ids whose client-credentials JWTs the API bearer path accepts; empty (default) turns that path off (D-0276). |
 | `local` | `enabled`, `min_password_length`, `login_rate_limit_per_minute` | Local login (password + TOTP), brute-force limit. |
 | `session` | `cookie_name`, `ttl`, `secure` | Server-side sessions (cookie). |
 | `prober` | `allow_private_ips`, `allow_metadata_ips` | SSRF guard: what workers are allowed to resolve. |
@@ -137,7 +137,7 @@ flowchart LR
 | `config` | Strict YAML, `Validate()`, single snapshot. |
 | `httpsrv` | Operational server `/healthz` `/readyz` `/metrics`. |
 | `api` | REST handlers (orgs/projects/monitors/incidents/sla/status-pages/settings…), SSE, secret redaction, SPA serving; global-admin surface `/api/v1/admin/*` (users, outbox dead-letter). |
-| `auth` | OIDC login (live-reconfigurable, atomic provider), local login + TOTP, sessions, JIT provisioning, middleware. |
+| `auth` | OIDC login (live-reconfigurable, atomic provider), local login + TOTP, sessions, JIT provisioning (human vs machine users, D-0276), the listed-machine-client bearer path, the three local-login limiters, middleware. |
 | `authz` | Roles and `Can(user, action, scope)`; tenant isolation. |
 | `store` | pgx + goose migrations; repositories; encryption of secret fields. |
 | `domain` | Models and invariants (`Validate()`), rules without I/O. |

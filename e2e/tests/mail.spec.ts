@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { ADMIN, apiGet, apiSend, firstProject } from "./helpers";
+import { apiGet, apiSend, firstProject } from "./helpers";
 
 // Mail flows through the Mailpit sidecar (compose profile `mail`). The Make
 // single-stack contract requires it; optional direct runs may skip it. SMTP
@@ -53,7 +53,11 @@ test.describe("mail flows (mailpit profile)", () => {
     }
   });
 
-  test("password reset: request → letter → confirm → sign in → restore", async ({ page }) => {
+  // A reset ends EVERY session of the account (sec-hardening-2 H-5), so this resets the dedicated
+  // seeded account (e2e/seed/e2e-reset-user.sql, applied by `make dev-ready-single`) — never the
+  // shared admin whose session every spec reuses. One sign-in, no logout.
+  test("password reset: request → letter → confirm → sign in → a second reset ends that session", async ({ page }) => {
+    const RESET_USER = "e2e-reset@cerbix.local";
     const before = await apiGet(page, "/api/v1/settings/mail");
     const set = {
       ...mailBody(before), enabled: true, smtp_host: "mailpit", smtp_port: 1025,
@@ -62,33 +66,36 @@ test.describe("mail flows (mailpit profile)", () => {
     };
     const put = await apiSend(page, "put", "/api/v1/settings/mail", set);
     expect(put.ok(), await put.text()).toBeTruthy();
-    try {
+    const resetTo = async (newPassword: string) => {
       await page.request.delete(`${MAILPIT}/api/v1/messages`);
-      const req = await page.request.post("/auth/local/reset/request", { data: { email: ADMIN.email } });
+      const req = await page.request.post("/auth/local/reset/request", { data: { email: RESET_USER } });
       expect(req.ok()).toBeTruthy();
-
-      const body = await lastMailTo(page, ADMIN.email);
+      const body = await lastMailTo(page, RESET_USER);
       const link = firstUrl(body);
       expect(link, "reset link in the letter").toBeTruthy();
       const token = new URL(link!).searchParams.get("token") ?? link!.split("/").pop();
       expect(token).toBeTruthy();
-
-      const tempPass = "e2e-temporary-pass-123";
-      const confirm = await page.request.post("/auth/local/reset/confirm", { data: { token, new_password: tempPass } });
+      const confirm = await page.request.post("/auth/local/reset/confirm", { data: { token, new_password: newPassword } });
       expect(confirm.status(), await confirm.text()).toBe(204);
+    };
+    const anon = await page.context().browser()!.newContext({ storageState: { cookies: [], origins: [] } });
+    try {
+      const first = `e2e-reset-${Date.now()}-a`;
+      await resetTo(first);
 
-      // The new password signs in (fresh context — never touch the shared session).
-      const anon = await page.context().browser()!.newContext({ storageState: { cookies: [], origins: [] } });
-      const login = await anon.request.post("/auth/local/login", { data: { username: ADMIN.email, password: tempPass } });
+      // The new password signs in (a fresh context — never the shared session).
+      const login = await anon.request.post("/auth/local/login", { data: { username: RESET_USER, password: first } });
       expect(login.ok(), await login.text()).toBeTruthy();
-      await anon.close();
+      expect((await anon.request.get("/api/v1/me")).status()).toBe(200);
 
-      // Restore the well-known dev password through the still-valid admin session.
-      const restore = await apiSend(page, "post", "/api/v1/me/password", {
-        current_password: tempPass, new_password: ADMIN.password,
-      });
-      expect(restore.ok(), await restore.text()).toBeTruthy();
+      // A second reset ends the session the first password opened.
+      await resetTo(`e2e-reset-${Date.now()}-b`);
+      expect((await anon.request.get("/api/v1/me")).status(), "a session survived the reset").toBe(401);
+
+      // The shared admin session is untouched.
+      expect((await page.request.get("/api/v1/me")).status()).toBe(200);
     } finally {
+      await anon.close();
       await apiSend(page, "put", "/api/v1/settings/mail", mailBody(before));
     }
   });

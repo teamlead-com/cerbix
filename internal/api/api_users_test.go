@@ -3,6 +3,7 @@ package api_test
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
@@ -87,6 +88,29 @@ func TestAdminUsersGlobalAdminToggle(t *testing.T) {
 	}
 	if rec := do(h, globalAdmin, http.MethodPatch, "/api/v1/admin/users/nope", `{"is_global_admin":true}`); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown user = %d, want 404", rec.Code)
+	}
+}
+
+// sec-hardening-2 H-1 fix 5: no machine identity is a global admin — an API token does that job.
+// Clearing a flag a machine somehow holds stays allowed.
+func TestUpdateAdminUserRefusesMachineGlobalAdmin(t *testing.T) {
+	fs := seededStore()
+	fs.users["ga"] = domain.User{ID: "ga", Email: "root@x.com", IsGlobalAdmin: true, Kind: domain.UserKindHuman}
+	fs.users["svc"] = domain.User{ID: "svc", Email: "svc@clients", Kind: domain.UserKindMachine}
+	h := newHandler(fs)
+
+	rec := do(h, globalAdmin, http.MethodPatch, "/api/v1/admin/users/svc", `{"is_global_admin":true}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "a machine identity cannot be a global admin") {
+		t.Fatalf("grant to a machine = %d %s, want 400", rec.Code, rec.Body.String())
+	}
+	if fs.users["svc"].IsGlobalAdmin {
+		t.Fatal("the machine was granted global admin")
+	}
+	u := fs.users["svc"]
+	u.IsGlobalAdmin = true
+	fs.users["svc"] = u
+	if rec := do(h, globalAdmin, http.MethodPatch, "/api/v1/admin/users/svc", `{"is_global_admin":false}`); rec.Code != http.StatusOK || fs.users["svc"].IsGlobalAdmin {
+		t.Fatalf("clearing a machine's flag = %d (admin=%v), want 200/false", rec.Code, fs.users["svc"].IsGlobalAdmin)
 	}
 }
 

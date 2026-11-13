@@ -4,6 +4,25 @@ All notable changes to **cerbix** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.0] - Unreleased
+
+### 🔒 Security
+
+- **A bearer JWT no longer signs in as a person.** An OIDC token that another application obtained for a user was accepted on the API's bearer path as that user, with their memberships. The JWT bearer path now accepts only client-credentials tokens of the clients you list under the new **Machine clients** OIDC setting (Settings → Authentication, or `oidc.machine_clients` in the YAML). Tokens carrying a user-session marker (`nonce`, `sid`, or an Okta `cid` other than `sub`) are refused, and a token never authenticates a person's account. Users now have a kind, `human` or `machine`, shown as a badge in the member lists. A machine cannot be a global admin. If a person signs in to an identity a machine token created, that identity becomes theirs and everything granted to the machine is removed and audited (D-0276).
+- **A password reset ends every session of the account.** Before, sessions that were open before the reset stayed valid. Changing your password still keeps your current session and ends the others, and the change and the sign-out now happen together or not at all. API tokens are not affected by either.
+- **Bounded authentication input.** Passwords longer than 1024 bytes are refused. Sign-in and reset requests are limited to 4 KiB and other API requests to 1 MiB. Sign-in and password reset are rate-limited per address (checked before the request is read), per address and email, and per email after repeated failures. The password-reset confirmation step was not rate-limited before.
+
+### Upgrade notes
+
+- **Client-credentials callers get 401 until you list their clients.** With **Machine clients** empty (the default), the JWT bearer path is off. Every refused token is logged as `oidc_bearer_refused` with the client it names and a reason, and counted in `cerbix_oidc_bearer_refused_total{reason}`. Add those client ids to the setting. Each listed client must be service-account-only at your identity provider. On Keycloak, keep "Use refresh tokens for client credentials grant" off, or its tokens carry `sid` and are refused. cerbix API tokens are unaffected.
+- **A service account whose token carries a real email address** (for example a Google Cloud service account) was filed as a person by the upgrade and is refused with `reason=subject_is_human`. Delete that user in Settings → Users and let its next token re-create it as a machine, then grant its memberships again.
+- **Password resets now sign the account out everywhere**, including the browser that started the reset.
+- **Migration 00112** runs on startup. It adds `users.kind` and fills it in: an identity a client-credentials token created (a never-signed-in `<sub>@clients` account with no password that is not a global admin) becomes `machine`, and every other user stays `human`. It also adds `oidc_settings.machine_clients`, which starts empty.
+- **Request bodies on the authenticated API are capped at 1 MiB**, except the Alertmanager receiver (`POST /api/v1/projects/{id}/alerts/alertmanager`), which accepts up to 16 MiB for grouped webhooks.
+- **`POST /api/v1/me/password` answers 500 when it cannot sign out your other sessions**, and the password is then left unchanged. It used to answer 204 with the old sessions still open.
+- **API responses carry new fields.** Users and members now include `kind` (`human` or `machine`), and the OIDC settings include `machine_clients`. `PATCH /api/v1/admin/users/{id}` answers 400 to a request that makes a machine identity a global admin.
+- **Startup refuses invalid local-login settings:** a negative `local.login_rate_limit_per_minute`, a `local.min_password_length` above 256, or a `security.admin_password` longer than 1024 bytes.
+
 ## [v0.3.9] - 2026-11-03
 
 ### 🔒 Security

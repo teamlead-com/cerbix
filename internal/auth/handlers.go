@@ -23,12 +23,24 @@ func (a *Authenticator) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/login", a.LoginHandler)
 	mux.HandleFunc("GET /auth/callback", a.CallbackHandler)
 	if a.local {
-		mux.HandleFunc("POST /auth/local/login", a.LocalLoginHandler)
-		mux.HandleFunc("POST /auth/local/reset/request", a.ResetRequestHandler)
-		mux.HandleFunc("POST /auth/local/reset/confirm", a.ResetConfirmHandler)
+		mux.Handle("POST /auth/local/login", capBody(a.LocalLoginHandler))
+		mux.Handle("POST /auth/local/reset/request", capBody(a.ResetRequestHandler))
+		mux.Handle("POST /auth/local/reset/confirm", capBody(a.ResetConfirmHandler))
 	}
 	mux.HandleFunc("POST /auth/logout", a.LogoutHandler)
 	mux.HandleFunc("GET /auth/logout", a.LogoutHandler)
+}
+
+// localAuthMaxBody caps the body of every unauthenticated /auth/local/* request
+// (sec-hardening-2 H-6): their JSON is a few short fields. The cap wraps the reader, so it bites
+// only when a handler reads — the per-IP limiter still runs before any read.
+const localAuthMaxBody = 4 << 10 // 4 KiB
+
+func capBody(h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, localAuthMaxBody)
+		h(w, r)
+	})
 }
 
 // ConfigHandler reports which sign-in methods are enabled and the OIDC button
@@ -168,11 +180,17 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	user, err := a.store.UpsertUserByOIDCIdentity(ctx, idToken.Issuer, idToken.Subject, claims.Email, displayName)
+	user, flip, err := a.store.UpsertHumanUserByOIDCIdentity(ctx, idToken.Issuer, idToken.Subject, claims.Email, displayName)
 	if err != nil {
 		a.logger.Error("user_provision_failed", "error", err.Error())
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+	if flip.Flipped {
+		// sec-hardening-2 H-1: a person signed in to an identity a client-credentials token had
+		// provisioned as a machine. Its grants are gone (audited in the same transaction); say so.
+		a.logger.Warn("oidc_machine_became_human", "user_id", user.ID,
+			"revoked_memberships", len(flip.Revoked), "was_global_admin", flip.WasGlobalAdmin)
 	}
 	// Bootstrap-admin grant requires a VERIFIED email so an unverified email claim
 	// matching a bootstrap address can't self-escalate to global admin.

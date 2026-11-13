@@ -80,7 +80,7 @@ func (s *Store) ListOrgMembers(ctx context.Context, orgID string) ([]domain.Memb
 	rows, err := s.pool.Query(ctx,
 		`SELECT m.id, m.user_id, m.org_id, m.project_id, m.role, m.created_at,
 		        u.email, u.display_name,
-		        u.last_seen_at
+		        u.last_seen_at, u.kind
 		   FROM memberships m JOIN users u ON u.id = m.user_id
 		  WHERE m.org_id = $1
 		  ORDER BY m.project_id NULLS FIRST, u.display_name, u.email`,
@@ -98,7 +98,7 @@ func (s *Store) ListOrgMembers(ctx context.Context, orgID string) ([]domain.Memb
 			lastSeen  *time.Time
 		)
 		if err := rows.Scan(&mem.ID, &mem.UserID, &mem.OrgID, &projectID, &role, &mem.CreatedAt,
-			&mem.Email, &mem.DisplayName, &lastSeen); err != nil {
+			&mem.Email, &mem.DisplayName, &lastSeen, &mem.Kind); err != nil {
 			return nil, fmt.Errorf("store: scan member: %w", err)
 		}
 		if projectID != nil {

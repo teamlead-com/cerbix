@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,6 +52,9 @@ type oidcRuntime struct {
 	postLogoutURL  string
 	buttonLabel    string
 	bootstrapAdmin map[string]bool
+	// machineClients are the client ids whose client-credentials tokens the bearer path accepts
+	// (sec-hardening-2 H-1); empty turns the JWT bearer path off.
+	machineClients map[string]bool
 }
 
 // EffectiveOIDC is the resolved OIDC configuration (from the DB override if one is
@@ -65,6 +69,7 @@ type EffectiveOIDC struct {
 	PostLogoutURL   string
 	ButtonLabel     string
 	BootstrapAdmins []string
+	MachineClients  []string
 }
 
 // Authenticator wires OIDC (optional, live-reconfigurable) and/or local login,
@@ -80,12 +85,13 @@ type Authenticator struct {
 	localBootEmail    string
 	localBootPassword string
 	minPasswordLen    int
-	loginLimiter      *loginLimiter
-	trustedProxies    int            // reverse-proxy hops in front (rate-limit client IP)
-	trustedProxyNets  []*net.IPNet   // trusted proxy networks; supersedes trustedProxies when set
-	decoyHash         string         // argon2id hash verified for unknown users (anti-enumeration timing)
-	mailer            *mailer.Mailer // optional; enables self-service password reset
-	policy            PolicySource   // optional; instance-wide auth policy
+	limits            authLimiters
+	trustedProxies    int                   // reverse-proxy hops in front (rate-limit client IP)
+	trustedProxyNets  []*net.IPNet          // trusted proxy networks; supersedes trustedProxies when set
+	decoyHash         string                // argon2id hash verified for unknown users (anti-enumeration timing)
+	mailer            *mailer.Mailer        // optional; enables self-service password reset
+	policy            PolicySource          // optional; instance-wide auth policy
+	bearerRefusals    BearerRefusalRecorder // optional; counts OIDC bearer refusals by reason
 
 	// last_seen_at refresh throttle (iter-0205): when this process last stamped each user.
 	// The SQL guard in store.TouchUserSeen is what bounds writes across processes; this only
@@ -147,7 +153,7 @@ func New(_ context.Context, cfg *config.Config, st Store, logger *slog.Logger) (
 		localBootEmail:    cfg.Security.AdminEmail,
 		localBootPassword: cfg.Security.AdminPassword,
 		minPasswordLen:    cfg.Local.MinPasswordLength,
-		loginLimiter:      newLoginLimiter(cfg.Local.LoginRateLimitPerMinute),
+		limits:            newAuthLimiters(cfg.Local.LoginRateLimitPerMinute),
 		trustedProxies:    cfg.Server.TrustedProxyCount,
 	}
 	// Config.Validate (run at Load) already rejected malformed CIDRs, so this parse
@@ -182,7 +188,7 @@ func (a *Authenticator) resolveEffective(ctx context.Context) (EffectiveOIDC, er
 		return EffectiveOIDC{
 			Enabled: c.Enabled(), Issuer: c.Issuer, ClientID: c.ClientID, ClientSecret: c.ClientSecret,
 			RedirectURL: c.RedirectURL, Scopes: c.Scopes, PostLogoutURL: c.PostLogoutRedirectURL,
-			ButtonLabel: c.ButtonLabel, BootstrapAdmins: c.BootstrapAdminEmails,
+			ButtonLabel: c.ButtonLabel, BootstrapAdmins: c.BootstrapAdminEmails, MachineClients: c.MachineClients,
 		}, nil
 	}
 	if err != nil {
@@ -191,7 +197,7 @@ func (a *Authenticator) resolveEffective(ctx context.Context) (EffectiveOIDC, er
 	return EffectiveOIDC{
 		Enabled: s.Enabled, Issuer: s.Issuer, ClientID: s.ClientID, ClientSecret: s.ClientSecret,
 		RedirectURL: s.RedirectURL, Scopes: s.Scopes, PostLogoutURL: s.PostLogoutURL,
-		ButtonLabel: s.ButtonLabel, BootstrapAdmins: s.BootstrapAdmins,
+		ButtonLabel: s.ButtonLabel, BootstrapAdmins: s.BootstrapAdmins, MachineClients: s.MachineClients,
 	}, nil
 }
 
@@ -218,6 +224,15 @@ func (a *Authenticator) buildRuntime(ctx context.Context, e EffectiveOIDC) (*oid
 	for _, addr := range e.BootstrapAdmins {
 		admins[addr] = true
 	}
+	// Every save path already refuses the interactive client id; here it is dropped rather than
+	// failing the whole provider, so a hand-edited row can never open the bearer path to every
+	// interactive token.
+	machines := map[string]bool{}
+	for _, id := range e.MachineClients {
+		if id = strings.TrimSpace(id); id != "" && id != strings.TrimSpace(e.ClientID) {
+			machines[id] = true
+		}
+	}
 	return &oidcRuntime{
 		provider: provider,
 		verifier: provider.Verifier(&oidc.Config{ClientID: e.ClientID}),
@@ -236,6 +251,7 @@ func (a *Authenticator) buildRuntime(ctx context.Context, e EffectiveOIDC) (*oid
 		postLogoutURL:  e.PostLogoutURL,
 		buttonLabel:    e.ButtonLabel,
 		bootstrapAdmin: admins,
+		machineClients: machines,
 	}, nil
 }
 

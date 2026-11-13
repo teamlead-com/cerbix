@@ -84,6 +84,74 @@ func TestOIDCSettingsReadWrite(t *testing.T) {
 	}
 }
 
+// sec-hardening-2 H-1 fix 1: machine_clients is part of the settings API, normalized, and may not
+// name the interactive client.
+func TestSetOIDCSettingsRefusesOwnClientID(t *testing.T) {
+	fs := seededStore()
+	h := newOIDCHandler(fs, &fakeOIDC{active: true})
+	body := `{"enabled":true,"issuer":"https://idp/x","client_id":"cerbix","redirect_url":"https://c/auth/callback","machine_clients":["ci"," cerbix "]}`
+	rec := do(h, globalAdmin, http.MethodPut, "/api/v1/settings/oidc", body)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "machine_clients must not contain this application's client_id") {
+		t.Fatalf("own client id listed = %d %s, want 400", rec.Code, rec.Body.String())
+	}
+	if fs.oidcSettings != nil {
+		t.Fatalf("refused settings were persisted: %+v", fs.oidcSettings)
+	}
+}
+
+func TestOIDCSettingsMachineClientsInView(t *testing.T) {
+	fs := seededStore()
+	h := newOIDCHandler(fs, &fakeOIDC{active: true})
+	var v struct {
+		MachineClients []string `json:"machine_clients"`
+	}
+	rec := do(h, globalAdmin, http.MethodGet, "/api/v1/settings/oidc", "")
+	if !strings.Contains(rec.Body.String(), `"machine_clients":[]`) {
+		t.Fatalf("no row: view %s, want machine_clients []", rec.Body.String())
+	}
+	body := `{"enabled":true,"issuer":"https://idp/x","client_id":"cerbix","redirect_url":"https://c/auth/callback","machine_clients":[" ci ","ci","","deploy"]}`
+	rec = do(h, globalAdmin, http.MethodPut, "/api/v1/settings/oidc", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save = %d %s", rec.Code, rec.Body.String())
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &v)
+	if strings.Join(v.MachineClients, ",") != "ci,deploy" || strings.Join(fs.oidcSettings.MachineClients, ",") != "ci,deploy" {
+		t.Fatalf("saved view %v / persisted %v, want [ci deploy]", v.MachineClients, fs.oidcSettings.MachineClients)
+	}
+	rec = do(h, globalAdmin, http.MethodGet, "/api/v1/settings/oidc", "")
+	v.MachineClients = nil
+	_ = json.Unmarshal(rec.Body.Bytes(), &v)
+	if strings.Join(v.MachineClients, ",") != "ci,deploy" {
+		t.Fatalf("read back %v", v.MachineClients)
+	}
+}
+
+// Review of iter-0209: a PUT that omits machine_clients (or sends null) — a script written before
+// the field existed — keeps the stored list instead of silently turning the bearer path off, like
+// an omitted client_secret; an explicit [] clears it.
+func TestOIDCSettingsOmittedMachineClientsKeepTheStoredList(t *testing.T) {
+	fs := seededStore()
+	h := newOIDCHandler(fs, &fakeOIDC{active: true})
+	base := `"enabled":true,"issuer":"https://idp/x","client_id":"cerbix","redirect_url":"https://c/auth/callback"`
+	if rec := do(h, globalAdmin, http.MethodPut, "/api/v1/settings/oidc", `{`+base+`,"machine_clients":["ci"]}`); rec.Code != http.StatusOK {
+		t.Fatalf("seed = %d", rec.Code)
+	}
+	for _, body := range []string{`{` + base + `}`, `{` + base + `,"machine_clients":null}`} {
+		if rec := do(h, globalAdmin, http.MethodPut, "/api/v1/settings/oidc", body); rec.Code != http.StatusOK {
+			t.Fatalf("save %s = %d", body, rec.Code)
+		}
+		if got := strings.Join(fs.oidcSettings.MachineClients, ","); got != "ci" {
+			t.Fatalf("after %s: machine_clients %q, want the stored [ci]", body, got)
+		}
+	}
+	if rec := do(h, globalAdmin, http.MethodPut, "/api/v1/settings/oidc", `{`+base+`,"machine_clients":[]}`); rec.Code != http.StatusOK {
+		t.Fatalf("clear = %d", rec.Code)
+	}
+	if len(fs.oidcSettings.MachineClients) != 0 {
+		t.Fatalf("an explicit [] did not clear: %v", fs.oidcSettings.MachineClients)
+	}
+}
+
 func TestOIDCSettingsSecretPreserveAndReloadError(t *testing.T) {
 	fs := seededStore()
 	ctrl := &fakeOIDC{active: true}

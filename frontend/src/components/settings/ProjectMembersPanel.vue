@@ -235,7 +235,7 @@ watch(() => ws.projectId, load);
                   <div class="flex items-center gap-[11px]">
                     <span class="grid h-8 w-8 flex-none place-items-center rounded-full text-[11.5px] font-semibold text-white" :style="{ background: avatarColor(m.user_id) }">{{ initials(m.display_name, m.email) }}</span>
                     <span class="flex flex-col leading-tight">
-                      <b class="flex items-center gap-[6px] text-[13px]">{{ m.display_name || m.email }}<span v-if="isSelf(m)" class="rounded-full bg-accent-weak px-[6px] py-px text-[10px] font-bold uppercase tracking-[0.04em] text-accent">you</span></b>
+                      <b class="flex items-center gap-[6px] text-[13px]">{{ m.display_name || m.email }}<span v-if="m.kind === 'machine'" data-testid="kind-badge" class="rounded-full border border-border-strong bg-inset px-[8px] py-px text-[10.5px] font-semibold tracking-[0.02em] text-ink-2">machine</span><span v-if="isSelf(m)" class="rounded-full bg-accent-weak px-[6px] py-px text-[10px] font-bold uppercase tracking-[0.04em] text-accent">you</span></b>
                       <span class="font-mono text-[11px] text-ink-3">{{ m.email }}</span>
                     </span>
                   </div>
@@ -300,7 +300,7 @@ watch(() => ws.projectId, load);
                   <div class="flex items-center gap-[11px]">
                     <span class="grid h-8 w-8 flex-none place-items-center rounded-full text-[11.5px] font-semibold text-white" :style="{ background: avatarColor(im.email) }">{{ initials(im.display_name, im.email) }}</span>
                     <span class="flex flex-col leading-tight">
-                      <b class="text-[13px]">{{ im.display_name || im.email }}</b>
+                      <b class="flex items-center gap-[6px] text-[13px]">{{ im.display_name || im.email }}<span v-if="im.kind === 'machine'" data-testid="kind-badge" class="rounded-full border border-border-strong bg-inset px-[8px] py-px text-[10.5px] font-semibold tracking-[0.02em] text-ink-2">machine</span></b>
                       <span class="font-mono text-[11px] text-ink-3">{{ im.email }}</span>
                     </span>
                   </div>

@@ -70,17 +70,38 @@ func (s *Store) PasswordHashByID(ctx context.Context, id string) (string, error)
 	return *hash, nil
 }
 
-// SetPassword updates a user's password hash.
-func (s *Store) SetPassword(ctx context.Context, id, passwordHash string) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1`, id, passwordHash)
+// ChangePassword sets a local account's new password hash AND revokes every session of the user
+// except keepSessionToken (the caller's; "" keeps none), in one transaction (sec-hardening-2 H-5):
+// a stolen or stale session cannot outlive the credential change, and a failed revocation leaves
+// the old password in place rather than a new password with live old sessions. Returns the number
+// of sessions removed; ErrNotFound when the user is gone or is not a local account. API tokens
+// are not touched — they are org-scoped credentials with their own lifecycle.
+func (s *Store) ChangePassword(ctx context.Context, userID, passwordHash, keepSessionToken string) (int64, error) {
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("store: set password: %w", err)
+		return 0, fmt.Errorf("store: begin change password: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1 AND password_hash IS NOT NULL`,
+		userID, passwordHash)
+	if err != nil {
+		return 0, fmt.Errorf("store: change password: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		return 0, ErrNotFound
 	}
-	return nil
+	// A blank keepSessionToken hashes to a value no real token matches: every session goes.
+	tag, err = tx.Exec(ctx, `DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2`,
+		userID, HashToken(keepSessionToken))
+	if err != nil {
+		return 0, fmt.Errorf("store: change password revoke sessions: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("store: commit change password: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // CountUsers returns the total number of users (used for bootstrap decisions).

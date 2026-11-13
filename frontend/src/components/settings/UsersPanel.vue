@@ -35,6 +35,8 @@ function initials(u: AdminUser): string {
   return n.slice(0, 2).toUpperCase();
 }
 const userName = (u: AdminUser) => u.display_name || u.email || u.id || "unknown";
+// sec-hardening-2 H-1: the server refuses the flag for a machine (400); revoking one it holds stays possible.
+const machineCannotBeAdmin = (u: AdminUser) => u.kind === "machine" && !u.is_global_admin;
 const isSelf = (u: AdminUser) => u.id === session.user?.id;
 const lastActive = (ts?: string | null) => (ts ? relTime(ts) : "never");
 // local | oidc → one pill each; both → two pills.
@@ -231,6 +233,7 @@ onMounted(load);
                   <span class="flex min-w-0 flex-col leading-tight">
                     <b class="flex flex-wrap items-center gap-[6px] text-[13px]">
                       {{ userName(u) }}
+                      <span v-if="u.kind === 'machine'" data-testid="kind-badge" class="rounded-full border border-border-strong bg-inset px-[8px] py-px text-[10.5px] font-semibold tracking-[0.02em] text-ink-2">machine</span>
                       <span v-if="u.is_global_admin" class="rounded-full bg-degraded-weak px-[7px] py-px text-[10px] font-bold uppercase tracking-[0.04em] text-degraded">★ Global admin</span>
                       <span v-if="isSelf(u)" class="rounded-full bg-accent-weak px-[6px] py-px text-[10px] font-bold uppercase tracking-[0.04em] text-accent">you</span>
                     </b>
@@ -258,8 +261,8 @@ onMounted(load);
                   <button
                     type="button"
                     class="h-[26px] rounded-sm border border-border px-[9px] text-[12px] text-ink-2 hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-45"
-                    :disabled="isSelf(u) || busyId === u.id"
-                    :title="isSelf(u) ? 'You cannot change your own global-admin flag' : ''"
+                    :disabled="isSelf(u) || busyId === u.id || machineCannotBeAdmin(u)"
+                    :title="isSelf(u) ? 'You cannot change your own global-admin flag' : machineCannotBeAdmin(u) ? 'A machine identity cannot be a global admin — use an API token' : ''"
                     @click="toggleAdmin(u)"
                   >{{ u.is_global_admin ? "Revoke admin" : "Grant admin" }}</button>
                   <button

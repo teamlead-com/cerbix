@@ -139,47 +139,6 @@ func tokenActions(actions []string) []authz.Action {
 	return out
 }
 
-// principalFromJWT validates a OIDC client-credentials access token (issuer +
-// signature, audience relaxed), JIT-provisions a user keyed by the token subject,
-// and builds a principal from that identity's memberships. Returns ok=false (not
-// an error) when OIDC is disabled or the token isn't a valid JWT for this issuer,
-// so the caller can fall through to 401. Authorization stays membership-driven —
-// a service account with no grants gets no access.
-func (a *Authenticator) principalFromJWT(ctx context.Context, raw string) (authz.Principal, bool, error) {
-	rt := a.rt()
-	if rt == nil {
-		return authz.Principal{}, false, nil
-	}
-	idt, err := rt.ccVerifier.Verify(ctx, raw)
-	if err != nil {
-		return authz.Principal{}, false, nil // not a valid token for us; fall through to 401
-	}
-	var claims struct {
-		Email             string `json:"email"`
-		Azp               string `json:"azp"`
-		PreferredUsername string `json:"preferred_username"`
-	}
-	_ = idt.Claims(&claims)
-	display := claims.PreferredUsername
-	if display == "" {
-		display = claims.Azp
-	}
-	email := claims.Email
-	if email == "" {
-		email = idt.Subject + "@clients" // service accounts often carry no email
-	}
-	user, err := a.store.UpsertUserByOIDCIdentity(ctx, idt.Issuer, idt.Subject, email, display)
-	if err != nil {
-		return authz.Principal{}, false, err
-	}
-	principal, err := a.loadPrincipal(ctx, user.ID)
-	if err != nil {
-		return authz.Principal{}, false, err
-	}
-	principal.ViaToken = true
-	return principal, true, nil
-}
-
 // bearerToken extracts the token from an `Authorization: Bearer <token>` header.
 func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")

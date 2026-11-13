@@ -78,8 +78,7 @@ type Store interface {
 	// configured to keep ninety days of windows.
 	ExpectedRunRetentionDays() int
 	PasswordHashByID(ctx context.Context, id string) (string, error)
-	SetPassword(ctx context.Context, id, passwordHash string) error
-	DeleteSessionsByUser(ctx context.Context, userID, exceptToken string) (int64, error)
+	ChangePassword(ctx context.Context, userID, passwordHash, keepSessionToken string) (int64, error)
 	SetTOTPSecret(ctx context.Context, userID, secret string) error
 	GetTOTP(ctx context.Context, userID string) (secret string, enabled bool, err error)
 	EnableTOTP(ctx context.Context, userID string) error
@@ -589,6 +588,25 @@ func (h *Handler) WithAgentDBTokens() *Handler {
 	return h
 }
 
+// alertmanagerRoute is the Alertmanager receiver's pattern — the one authenticated route with a
+// body cap of its own (alertmanagerMaxBody).
+const alertmanagerRoute = "POST /api/v1/projects/{projectID}/alerts/alertmanager"
+
+// APIRouter is Router with the default request-body cap (apiMaxBody, sec-hardening-2 H-6): what
+// the binary mounts behind the session/bearer auth middleware. The cap is chosen by the pattern
+// the mux matched, so the Alertmanager receiver gets alertmanagerMaxBody instead.
+func (h *Handler) APIRouter() http.Handler {
+	mux := h.Router()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limit := int64(apiMaxBody)
+		if _, pattern := mux.Handler(r); pattern == alertmanagerRoute {
+			limit = alertmanagerMaxBody
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
+		mux.ServeHTTP(w, r)
+	})
+}
+
 // Router registers all API routes (patterns carry the full /api/v1 prefix so the
 // handler can be mounted directly behind auth middleware).
 func (h *Handler) Router() *http.ServeMux {
@@ -707,7 +725,7 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/maintenance/{maintenanceID}/annul", h.annulMaintenance)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/incidents", h.listIncidents)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/incidents", h.createIncident)
-	mux.HandleFunc("POST /api/v1/projects/{projectID}/alerts/alertmanager", h.alertmanagerWebhook)
+	mux.HandleFunc(alertmanagerRoute, h.alertmanagerWebhook)
 	mux.HandleFunc("GET /api/v1/incidents/{incidentID}", h.getIncident)
 	mux.HandleFunc("GET /api/v1/incidents/{incidentID}/updates", h.listIncidentUpdates)
 	mux.HandleFunc("POST /api/v1/incidents/{incidentID}/updates", h.addIncidentUpdate)

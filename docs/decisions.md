@@ -9145,3 +9145,71 @@ needs, and 1.26.10 is that minimum.
 an older local Go downloads it). CI binaries build on 1.26.10, the image on 1.27.3; both lines are
 patched, and the two pins remain different, as before. One uncalled advisory stays open:
 GO-2026-5932 in `golang.org/x/crypto`, fixed so far only in an untagged revision.
+
+## D-0276 — the bearer boundary, session revocation on reset, and bounded authentication input (sec-hardening-2 iteration 1, 2026-11-13)
+
+**Context.** [`sec-hardening-2.md`](specs/sec-hardening-2.md) revision 7 (approved 2026-11-13) admitted three findings for iteration 1.
+H-1: `principalFromJWT` provisioned through the same identity table as the interactive sign-in, so a realm JWT minted for ANY
+client authenticated as the human whose `sub` it carried, with that human's memberships. D-0043 opened this to shared and
+public IdPs. H-5: a password reset kept every session alive. H-6: unbounded bodies and passwords reached Argon2id, and
+`reset/confirm` hashed before any limiter or token check.
+
+**Decision.**
+1. **Explicit machine clients (amends D-0034).** `machine_clients` is an OIDC setting (YAML bootstrap, `oidc_settings`,
+   settings API, OIDC form), resolved DB → config like every other OIDC field. Empty is the default, and it turns the JWT bearer
+   path off. The interactive `client_id` is refused on every save path and dropped defensively at runtime. D-0034's audience
+   relaxation now stands only for a listed client. Its safety argument, "a client with no memberships gets nothing", is
+   replaced: membership-gating alone did not protect a token carrying a human's `sub`.
+2. **S1 on the bearer path.** The client claim is the first present of `azp`, `client_id`, `cid`, `appid`, and all non-empty
+   ones must agree. A token with a non-empty `nonce` or `sid`, or a `cid` other than its `sub`, is refused as delegated. `scp`
+   is not a rule, because its presence differs by provider (iter-0209 records each provider's shape). The subject is
+   provisioned only as `machine`:
+   - `users.kind` (migration 00112, narrow backfill: `<sub>@clients`, never seen, no password, not admin).
+   - `UpsertMachineUserByOIDCIdentity` refuses a human row and rolls back, so it writes nothing. `kind` is re-read after
+     the memberships.
+   - `UpsertHumanUserByOIDCIdentity` (callback) flips a machine row to human for good. In the same transaction it deletes
+     every membership, clears `is_global_admin`, and writes one instance audit row (`user.kind_human`) plus one row per
+     organization (`member.revoke_machine_grants`).
+   - `PATCH /admin/users/{id}` refuses the global-admin flag for a machine.
+   - The email allowlist stays an interactive rule.
+   - Every refusal logs `oidc_bearer_refused` and counts `cerbix_oidc_bearer_refused_total{reason}`. The reasons:
+     `invalid_token` (Debug, since any unknown bearer string lands there), `invalid_claims`, `machine_clients_empty`,
+     `client_claim_missing`, `client_claims_disagree`, `client_not_listed`, `delegated_nonce`, `delegated_sid`,
+     `delegated_cid_sub`, `subject_is_human`.
+3. **A reset ends every session (amends D-0139 item 3).** `ResetPasswordWithToken` deletes all of the account's sessions in
+   its transaction. A reset is what an owner does when the password is believed compromised. The change path keeps D-0139's
+   behaviour (the caller's session survives), but the hash and the revocation are now one transaction (`store.ChangePassword`)
+   and a failure is a 500, no longer swallowed. API tokens are revoked by neither. The E2E mail spec resets a dedicated local
+   account that `make dev-ready-single` seeds, because cerbix has no product path that creates a second local account
+   (owner ruling 2026-11-13).
+4. **Bounded input.** `HashPassword`/`VerifyPassword` refuse more than 1024 bytes. `/auth/local/*` reads at most 4 KiB. The
+   session/bearer API router caps bodies at 1 MiB by default. The limiters are derived from
+   `local.login_rate_limit_per_minute` = L, and L ≤ 0 disables all of them:
+   - L per IP before the body is read, in separate `login|` and `reset|` buckets. `reset/confirm` is limited now.
+   - `min(L, max(2, (L+1)/2))` per (IP, normalized email). The floor of 2 lets the two-step TOTP sign-in fit; it was `max(1, (L+1)/2)` until the code review of iter-0209.
+   - 5L per normalized email, counting failed logins only. A second-factor failure counts only when a code was supplied.
+
+**Consequences.**
+- Breaking for instances that use client-credentials: they get 401 until their clients are listed. The CHANGELOG upgrade
+  note and `oidc_bearer_refused` name the client.
+- A service account whose token carries a real email (GCP) was filed `human` by the narrow backfill and is refused
+  (`subject_is_human`). The operator deletes it, and the next token re-creates it as a machine.
+- A listed client must be service-account-only at the IdP. On Keycloak, "Use refresh tokens for client credentials grant" must
+  stay off, or the tokens carry `sid` and are refused.
+- The residual is stated in the spec: a dual-purpose listed client that mints a human's `sub` before that human's first
+  sign-in creates a machine row. The sign-in strips it, loudly.
+- **Limiter residual, found by the code review of iter-0209.** One address can drive at most the per-(IP, email) limit
+  (about L/2) of failures, which is why a single noisy address never locks a clean one out (S6). About ten addresses
+  together (5L ÷ L/2) can keep an email blocked while they keep failing. That is inherent to any per-email limiter
+  and accepted with it; the spec's "several times the per-IP threshold" is honoured.
+- **Changes after the code review of iter-0209:**
+  - The Alertmanager receiver keeps a 16 MiB body cap: a grouped webhook can exceed 1 MiB. This is an owner-approved
+    exception to H-6 fix 2.
+  - An omitted or null `machine_clients` in a settings PUT keeps the stored list.
+  - A bearer principal never carries `is_global_admin`.
+  - The login per-(IP, email) key is namespaced `login|`.
+  - The per-(IP, email) floor is 2.
+  - The non-revoking `store.SetPassword` is removed.
+- **After the external review of iter-0209:** adding a member by email (`GetUserByEmail`) picks a `human` row first and
+  only then the oldest. A machine token's email is not verified, so an older machine row carrying a person's address
+  must not receive that person's invitation.

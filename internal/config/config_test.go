@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -256,6 +257,69 @@ func TestValidateOIDCComplete(t *testing.T) {
 	}
 	if !cfg.OIDC.Enabled() {
 		t.Fatal("oidc should be enabled")
+	}
+}
+
+// sec-hardening-2 H-1 fix 1: the interactive client may not be listed as a machine client.
+func TestConfigRefusesOwnClientInMachineClients(t *testing.T) {
+	base := "oidc:\n" +
+		"  issuer: https://keycloak.example/realms/x\n" +
+		"  client_id: cerbix\n" +
+		"%s" +
+		"  redirect_url: https://cerbix.example/auth/callback\n" +
+		"database:\n" +
+		"  dsn: postgres://localhost/cerbix\n"
+	_, err := Parse([]byte(fmt.Sprintf(base, "  machine_clients: [\"ci\", \" cerbix \"]\n")))
+	if err == nil || !strings.Contains(err.Error(), "oidc.machine_clients") {
+		t.Fatalf("own client id in machine_clients: err %v, want an oidc.machine_clients error", err)
+	}
+	cfg, err := Parse([]byte(fmt.Sprintf(base, "  machine_clients: [\"ci\"]\n")))
+	if err != nil {
+		t.Fatalf("machine_clients [ci]: %v", err)
+	}
+	if len(cfg.OIDC.MachineClients) != 1 || cfg.OIDC.MachineClients[0] != "ci" {
+		t.Fatalf("parsed machine_clients = %v", cfg.OIDC.MachineClients)
+	}
+}
+
+// External review of iter-0209, P2-2: local-login settings that the runtime cannot honour are
+// refused at startup, not discovered at the first sign-in.
+const localBase = "database:\n  dsn: postgres://localhost/cerbix\n" +
+	"local:\n  enabled: true\n  min_password_length: %d\n  login_rate_limit_per_minute: %d\n"
+
+func TestConfigRefusesNegativeLoginRateLimit(t *testing.T) {
+	if _, err := Parse([]byte(fmt.Sprintf(localBase, 8, 0))); err != nil {
+		t.Fatalf("0 (limits off) must stay valid: %v", err)
+	}
+	_, err := Parse([]byte(fmt.Sprintf(localBase, 8, -1)))
+	if err == nil || !strings.Contains(err.Error(), "local.login_rate_limit_per_minute") {
+		t.Fatalf("negative rate limit: err %v, want a local.login_rate_limit_per_minute error", err)
+	}
+}
+
+func TestConfigRefusesMinPasswordLengthOverCeiling(t *testing.T) {
+	if _, err := Parse([]byte(fmt.Sprintf(localBase, 256, 10))); err != nil {
+		t.Fatalf("256 (the UI policy ceiling) must stay valid: %v", err)
+	}
+	_, err := Parse([]byte(fmt.Sprintf(localBase, 257, 10)))
+	if err == nil || !strings.Contains(err.Error(), "local.min_password_length") {
+		t.Fatalf("min_password_length 257: err %v, want a local.min_password_length error", err)
+	}
+}
+
+func TestConfigRefusesAdminPasswordOverByteCap(t *testing.T) {
+	admin := func(pw string) string {
+		return fmt.Sprintf(localBase, 8, 10) + "security:\n  admin_email: root@x.com\n  admin_password: \"" + pw + "\"\n"
+	}
+	if _, err := Parse([]byte(admin(strings.Repeat("a", 1024)))); err != nil {
+		t.Fatalf("1024-byte admin password must stay valid: %v", err)
+	}
+	// Bytes, not characters: 342 three-byte runes are 1026 bytes.
+	for _, pw := range []string{strings.Repeat("a", 1025), strings.Repeat("€", 342)} {
+		_, err := Parse([]byte(admin(pw)))
+		if err == nil || !strings.Contains(err.Error(), "security.admin_password") {
+			t.Fatalf("%d-byte admin password: err %v, want a security.admin_password error", len(pw), err)
+		}
 	}
 }
 

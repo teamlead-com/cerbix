@@ -46,6 +46,11 @@ paths:
       tags: [auth]
       summary: Local username/password login (issues a session cookie)
       security: []
+      description: >
+        The body is capped at 4 KiB and a password at 1024 bytes. Three limiters
+        answer 429 (all derived from local.login_rate_limit_per_minute = L): L per
+        client IP per minute (checked before the body is read), min(L, max(2, (L+1)/2)) per (IP,
+        email), and 5L failed logins per email.
       requestBody:
         required: true
         content:
@@ -57,7 +62,9 @@ paths:
           content:
             application/json:
               schema: { type: object, properties: { ok: { type: boolean } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { description: Too many attempts. }
 
   /auth/local/reset/request:
     post:
@@ -68,7 +75,8 @@ paths:
         Emails a one-time reset link if the address belongs to a local account.
         Always returns 200 with a generic body so it cannot enumerate accounts.
         Requires outbound email (mail) to be configured; see /auth/config
-        password_reset.
+        password_reset. The body is capped at 4 KiB; limited per client IP
+        (shared with reset/confirm) and per (IP, email).
       requestBody:
         required: true
         content:
@@ -84,6 +92,7 @@ paths:
           content:
             application/json:
               schema: { type: object, properties: { ok: { type: boolean } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '429': { description: Too many requests. }
 
   /auth/local/reset/confirm:
@@ -91,6 +100,11 @@ paths:
       tags: [auth]
       summary: Complete a password reset with a token
       security: []
+      description: >
+        Consumes the token, sets the new password and ends EVERY session of the
+        account, in one transaction (API tokens are not revoked). Limited per
+        client IP before the body is read (shared with reset/request); the body is
+        capped at 4 KiB and the new password at 1024 bytes.
       requestBody:
         required: true
         content:
@@ -100,10 +114,11 @@ paths:
               required: [token, new_password]
               properties:
                 token: { type: string, description: The token from the reset link. }
-                new_password: { type: string, format: password }
+                new_password: { type: string, format: password, maxLength: 1024, description: At most 1024 bytes. }
       responses:
-        '204': { description: Password changed. }
+        '204': { description: Password changed; every session of the account ended. }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { description: Too many requests. }
 
   /auth/config:
     get:
@@ -180,14 +195,19 @@ paths:
     post:
       tags: [me]
       summary: Change the current local user's password
+      description: >
+        Sets the new password (at most 1024 bytes) and ends every OTHER session of
+        the user — the caller's own is kept — in one transaction; a failure is a
+        500 with the old password in place. API tokens are not revoked.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/ChangePasswordRequest' }
       responses:
-        '204': { description: Password changed. }
+        '204': { description: Password changed; the user's other sessions ended. }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { description: Internal error; nothing changed. }
 
   /api/v1/me/totp/enroll:
     post:
@@ -2414,7 +2434,8 @@ paths:
       summary: Alertmanager webhook receiver — firing opens incidents, resolved closes them (editor+)
       description: >
         Point a Prometheus Alertmanager webhook_config here with a service-account
-        bearer token in its http_config. Alerts are correlated by fingerprint: a
+        bearer token in its http_config. The body may be up to 16 MiB (every other
+        authenticated API route is capped at 1 MiB). Alerts are correlated by fingerprint: a
         firing alert opens an incident (idempotent per fingerprint), a resolved alert
         closes the incident it opened.
       requestBody:
@@ -3776,8 +3797,9 @@ paths:
       tags: [admin]
       summary: Grant or revoke the global-admin flag (global admin only)
       description: >
-        Changing your own flag is rejected, and the last global admin cannot be
-        demoted (400 in both cases).
+        Changing your own flag is rejected, the last global admin cannot be
+        demoted, and a machine identity (kind=machine) cannot be granted the flag
+        (400 in all three cases; clearing a machine's flag is allowed).
       parameters:
         - { in: path, name: userID, required: true, schema: { type: string, format: uuid } }
       requestBody:
@@ -4941,8 +4963,17 @@ components:
       properties:
         current_password: { type: string, format: password }
         new_password: { type: string, format: password }
+    UserKind:
+      type: string
+      enum: [human, machine]
+      description: >
+        A machine is provisioned by an OIDC client-credentials token of a listed
+        machine client; a human by an interactive sign-in. A machine is never a
+        global admin; a machine a person signs in to becomes human for good and
+        loses every membership granted to it.
     User:
       type: object
+      required: [kind]
       properties:
         id: { type: string, format: uuid }
         oidc_sub: { type: string }
@@ -4951,6 +4982,7 @@ components:
         is_global_admin: { type: boolean }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        kind: { $ref: '#/components/schemas/UserKind' }
     AdminUserMembership:
       type: object
       properties:
@@ -5056,7 +5088,9 @@ components:
     Member:
       type: object
       description: A membership enriched with the user's identity for the members UI.
+      required: [kind]
       properties:
+        kind: { $ref: '#/components/schemas/UserKind' }
         id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
         org_id: { type: string, format: uuid }
@@ -5098,11 +5132,12 @@ components:
     InheritedMember:
       type: object
       description: Who reaches the project through the organization — role, email and name only.
-      required: [role, email, display_name]
+      required: [role, email, display_name, kind]
       properties:
         role: { $ref: '#/components/schemas/Role' }
         email: { type: string }
         display_name: { type: string }
+        kind: { $ref: '#/components/schemas/UserKind' }
     AddProjectMember:
       type: object
       required: [role]
@@ -6170,6 +6205,7 @@ components:
         post_logout_url: { type: string }
         button_label: { type: string }
         bootstrap_admins: { type: array, items: { type: string } }
+        machine_clients: { type: array, items: { type: string }, description: 'Client ids whose client-credentials tokens the JWT bearer path accepts; empty means that path is off.' }
         reload_error: { type: string, description: 'Set when a save could not build the provider (e.g. IdP unreachable).' }
     SetOIDCSettings:
       type: object
@@ -6184,6 +6220,16 @@ components:
         post_logout_url: { type: string }
         button_label: { type: string }
         bootstrap_admins: { type: array, items: { type: string } }
+        machine_clients:
+          type: array
+          items: { type: string }
+          nullable: true
+          description: >
+            Client ids whose client-credentials tokens may call the API as a bearer
+            JWT. Omit it (or send null) to keep the stored list; send [] to clear it.
+            Empty (default) turns the JWT bearer path off. Entries are trimmed,
+            empties and duplicates dropped; the interactive client_id is refused
+            (400). Each listed client must be service-account-only at the IdP.
     AlertmanagerPayload:
       type: object
       description: Subset of the Prometheus Alertmanager webhook payload (schema v4) consumed by the receiver.

@@ -16,7 +16,7 @@ func (s *Store) ListAllUsers(ctx context.Context, q string) ([]domain.AdminUser,
 	rows, err := s.pool.Query(ctx,
 		`SELECT u.id, COALESCE(u.oidc_sub, ''), u.email, u.display_name, u.is_global_admin,
 		        u.password_hash IS NOT NULL, u.created_at, u.updated_at,
-		        u.last_seen_at
+		        u.last_seen_at, u.kind
 		   FROM users u
 		  WHERE $1 = '' OR u.email ILIKE '%' || $1 || '%' OR u.display_name ILIKE '%' || $1 || '%'
 		  ORDER BY u.created_at, u.email`, q)
@@ -33,7 +33,7 @@ func (s *Store) ListAllUsers(ctx context.Context, q string) ([]domain.AdminUser,
 			lastSeen *time.Time
 		)
 		if err := rows.Scan(&u.ID, &u.OIDCSub, &u.Email, &u.DisplayName, &u.IsGlobalAdmin,
-			&hasLocal, &u.CreatedAt, &u.UpdatedAt, &lastSeen); err != nil {
+			&hasLocal, &u.CreatedAt, &u.UpdatedAt, &lastSeen, &u.Kind); err != nil {
 			return nil, fmt.Errorf("store: scan user: %w", err)
 		}
 		switch {

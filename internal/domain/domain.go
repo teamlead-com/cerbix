@@ -89,7 +89,17 @@ type User struct {
 	IsGlobalAdmin bool      `json:"is_global_admin"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
+	// Kind is UserKindHuman or UserKindMachine (sec-hardening-2 H-1): a machine is provisioned by
+	// an OIDC client-credentials token on the bearer path, a human by the interactive sign-in.
+	Kind string `json:"kind"`
 }
+
+// User kinds. A machine never becomes a global admin; a machine a person signs in to becomes a
+// human for good and keeps nothing that was granted to the machine.
+const (
+	UserKindHuman   = "human"
+	UserKindMachine = "machine"
+)
 
 // Membership grants a user a role within an org, or within a specific project of
 // that org. ProjectID == "" means an org-level grant.
@@ -108,6 +118,7 @@ type Member struct {
 	Email        string     `json:"email"`
 	DisplayName  string     `json:"display_name"`
 	LastActiveAt *time.Time `json:"last_active_at,omitempty"`
+	Kind         string     `json:"kind"` // UserKindHuman | UserKindMachine
 }
 
 // InheritedMember is an org-level membership as a project admin sees it on their project's member
@@ -117,6 +128,7 @@ type InheritedMember struct {
 	Role        Role   `json:"role"`
 	Email       string `json:"email"`
 	DisplayName string `json:"display_name"`
+	Kind        string `json:"kind"` // UserKindHuman | UserKindMachine
 }
 
 // Scope returns the scope implied by whether ProjectID is set.

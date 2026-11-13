@@ -13,7 +13,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Local username/password login (issues a session cookie) */
+        /**
+         * Local username/password login (issues a session cookie)
+         * @description The body is capped at 4 KiB and a password at 1024 bytes. Three limiters answer 429 (all derived from local.login_rate_limit_per_minute = L): L per client IP per minute (checked before the body is read), min(L, max(2, (L+1)/2)) per (IP, email), and 5L failed logins per email.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -38,7 +41,15 @@ export interface paths {
                         };
                     };
                 };
+                400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
+                /** @description Too many attempts. */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -58,7 +69,7 @@ export interface paths {
         put?: never;
         /**
          * Request a password-reset link (local accounts)
-         * @description Emails a one-time reset link if the address belongs to a local account. Always returns 200 with a generic body so it cannot enumerate accounts. Requires outbound email (mail) to be configured; see /auth/config password_reset.
+         * @description Emails a one-time reset link if the address belongs to a local account. Always returns 200 with a generic body so it cannot enumerate accounts. Requires outbound email (mail) to be configured; see /auth/config password_reset. The body is capped at 4 KiB; limited per client IP (shared with reset/confirm) and per (IP, email).
          */
         post: {
             parameters: {
@@ -87,6 +98,7 @@ export interface paths {
                         };
                     };
                 };
+                400: components["responses"]["BadRequest"];
                 /** @description Too many requests. */
                 429: {
                     headers: {
@@ -111,7 +123,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Complete a password reset with a token */
+        /**
+         * Complete a password reset with a token
+         * @description Consumes the token, sets the new password and ends EVERY session of the account, in one transaction (API tokens are not revoked). Limited per client IP before the body is read (shared with reset/request); the body is capped at 4 KiB and the new password at 1024 bytes.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -124,13 +139,16 @@ export interface paths {
                     "application/json": {
                         /** @description The token from the reset link. */
                         token: string;
-                        /** Format: password */
+                        /**
+                         * Format: password
+                         * @description At most 1024 bytes.
+                         */
                         new_password: string;
                     };
                 };
             };
             responses: {
-                /** @description Password changed. */
+                /** @description Password changed; every session of the account ended. */
                 204: {
                     headers: {
                         [name: string]: unknown;
@@ -138,6 +156,13 @@ export interface paths {
                     content?: never;
                 };
                 400: components["responses"]["BadRequest"];
+                /** @description Too many requests. */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -380,7 +405,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Change the current local user's password */
+        /**
+         * Change the current local user's password
+         * @description Sets the new password (at most 1024 bytes) and ends every OTHER session of the user — the caller's own is kept — in one transaction; a failure is a 500 with the old password in place. API tokens are not revoked.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -394,7 +422,7 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Password changed. */
+                /** @description Password changed; the user's other sessions ended. */
                 204: {
                     headers: {
                         [name: string]: unknown;
@@ -402,6 +430,13 @@ export interface paths {
                     content?: never;
                 };
                 400: components["responses"]["BadRequest"];
+                /** @description Internal error; nothing changed. */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -4266,7 +4301,7 @@ export interface paths {
         put?: never;
         /**
          * Alertmanager webhook receiver — firing opens incidents, resolved closes them (editor+)
-         * @description Point a Prometheus Alertmanager webhook_config here with a service-account bearer token in its http_config. Alerts are correlated by fingerprint: a firing alert opens an incident (idempotent per fingerprint), a resolved alert closes the incident it opened.
+         * @description Point a Prometheus Alertmanager webhook_config here with a service-account bearer token in its http_config. The body may be up to 16 MiB (every other authenticated API route is capped at 1 MiB). Alerts are correlated by fingerprint: a firing alert opens an incident (idempotent per fingerprint), a resolved alert closes the incident it opened.
          */
         post: {
             parameters: {
@@ -7472,7 +7507,7 @@ export interface paths {
         head?: never;
         /**
          * Grant or revoke the global-admin flag (global admin only)
-         * @description Changing your own flag is rejected, and the last global admin cannot be demoted (400 in both cases).
+         * @description Changing your own flag is rejected, the last global admin cannot be demoted, and a machine identity (kind=machine) cannot be granted the flag (400 in all three cases; clearing a machine's flag is allowed).
          */
         patch: {
             parameters: {
@@ -8341,6 +8376,11 @@ export interface components {
             /** Format: password */
             new_password: string;
         };
+        /**
+         * @description A machine is provisioned by an OIDC client-credentials token of a listed machine client; a human by an interactive sign-in. A machine is never a global admin; a machine a person signs in to becomes human for good and loses every membership granted to it.
+         * @enum {string}
+         */
+        UserKind: "human" | "machine";
         User: {
             /** Format: uuid */
             id?: string;
@@ -8352,6 +8392,7 @@ export interface components {
             created_at?: string;
             /** Format: date-time */
             updated_at?: string;
+            kind: components["schemas"]["UserKind"];
         };
         AdminUserMembership: {
             /** Format: uuid */
@@ -8465,6 +8506,7 @@ export interface components {
         };
         /** @description A membership enriched with the user's identity for the members UI. */
         Member: {
+            kind: components["schemas"]["UserKind"];
             /** Format: uuid */
             id?: string;
             /** Format: uuid */
@@ -8510,6 +8552,7 @@ export interface components {
             role: components["schemas"]["Role"];
             email: string;
             display_name: string;
+            kind: components["schemas"]["UserKind"];
         };
         /** @description Identify the member by user_id or email (the user must have signed in at least once). No project_id or org_id — the project is the path's. */
         AddProjectMember: {
@@ -9748,6 +9791,8 @@ export interface components {
             post_logout_url?: string;
             button_label?: string;
             bootstrap_admins?: string[];
+            /** @description Client ids whose client-credentials tokens the JWT bearer path accepts; empty means that path is off. */
+            machine_clients?: string[];
             /** @description Set when a save could not build the provider (e.g. IdP unreachable). */
             reload_error?: string;
         };
@@ -9765,6 +9810,8 @@ export interface components {
             post_logout_url?: string;
             button_label?: string;
             bootstrap_admins?: string[];
+            /** @description Client ids whose client-credentials tokens may call the API as a bearer JWT. Omit it (or send null) to keep the stored list; send [] to clear it. Empty (default) turns the JWT bearer path off. Entries are trimmed, empties and duplicates dropped; the interactive client_id is refused (400). Each listed client must be service-account-only at the IdP. */
+            machine_clients?: string[] | null;
         };
         /** @description Subset of the Prometheus Alertmanager webhook payload (schema v4) consumed by the receiver. */
         AlertmanagerPayload: {

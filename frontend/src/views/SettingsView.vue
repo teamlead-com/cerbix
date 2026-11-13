@@ -140,6 +140,7 @@ const oidc = reactive({
   error: "",
   scopeInput: "",
   adminInput: "",
+  machineInput: "",
   form: {
     enabled: false,
     issuer: "",
@@ -150,8 +151,18 @@ const oidc = reactive({
     post_logout_url: "",
     button_label: "",
     bootstrap_admins: [] as string[],
+    // Client ids whose client-credentials JWTs the API bearer path accepts (sec-hardening-2 H-1).
+    machine_clients: [] as string[],
   },
 });
+
+// The server refuses this app's own client id among the machine clients (400); the form says so
+// before the round trip. Save stays enabled — the server is the authority.
+function isOwnClient(c: string) {
+  const own = oidc.form.client_id.trim();
+  return own !== "" && c.trim() === own;
+}
+const ownClientListed = computed(() => oidc.form.machine_clients.some(isOwnClient));
 
 async function loadOIDC() {
   oidc.error = "";
@@ -175,6 +186,7 @@ async function loadOIDC() {
   oidc.form.post_logout_url = d.post_logout_url || "";
   oidc.form.button_label = d.button_label || "";
   oidc.form.bootstrap_admins = d.bootstrap_admins ? [...d.bootstrap_admins] : [];
+  oidc.form.machine_clients = d.machine_clients ? [...d.machine_clients] : [];
   oidc.loaded = true;
 }
 
@@ -199,6 +211,7 @@ async function saveOIDC() {
       post_logout_url: oidc.form.post_logout_url,
       button_label: oidc.form.button_label,
       bootstrap_admins: oidc.form.bootstrap_admins,
+      machine_clients: oidc.form.machine_clients,
     };
     // Send the secret only when the admin typed a new one (blank preserves it).
     if (oidc.form.client_secret) body.client_secret = oidc.form.client_secret;
@@ -1171,6 +1184,18 @@ watch(tab, loadActive);
             <div class="flex flex-wrap items-center gap-[6px]">
               <span v-for="(e, i) in oidc.form.bootstrap_admins" :key="e" class="inline-flex items-center gap-[6px] rounded-md bg-inset px-[9px] py-[4px] font-mono text-[11.5px] text-ink-2">{{ e }}<button type="button" class="text-ink-3 hover:text-down" @click="removeChip(oidc.form.bootstrap_admins, i)">×</button></span>
               <input v-model="oidc.adminInput" type="text" placeholder="+ email" class="w-[150px] rounded-sm border border-dashed border-border-strong bg-transparent px-[8px] py-[3px] font-mono text-[11.5px] outline-none focus:border-accent" @keydown.enter.prevent="addChip(oidc.form.bootstrap_admins, oidc.adminInput); oidc.adminInput = ''" />
+            </div>
+          </div>
+
+          <div class="grid grid-cols-[210px_1fr] items-start gap-4 border-b border-border py-[12px] max-[640px]:grid-cols-1 max-[640px]:gap-2">
+            <span class="pt-[8px] text-[12.5px] font-semibold text-ink">Machine clients</span>
+            <div>
+              <div class="flex flex-wrap items-center gap-[6px]">
+                <span v-for="(c, i) in oidc.form.machine_clients" :key="c" data-testid="machine-client-chip" class="inline-flex items-center gap-[6px] rounded-md px-[9px] py-[4px] font-mono text-[11.5px]" :class="isOwnClient(c) ? 'border border-down bg-down-weak text-down' : 'bg-inset text-ink-2'">{{ c }}<button type="button" class="text-ink-3 hover:text-down" @click="removeChip(oidc.form.machine_clients, i)">×</button></span>
+                <input v-model="oidc.machineInput" type="text" placeholder="+ client id" data-testid="machine-client-input" class="w-[150px] rounded-sm border border-dashed border-border-strong bg-transparent px-[8px] py-[3px] font-mono text-[11.5px] outline-none focus:border-accent" @keydown.enter.prevent="addChip(oidc.form.machine_clients, oidc.machineInput); oidc.machineInput = ''" />
+              </div>
+              <p v-if="ownClientListed" class="mt-[6px] text-[12px] text-down" data-testid="machine-client-error">Machine clients must not contain this app’s Client ID (<span class="font-mono">{{ oidc.form.client_id.trim() }}</span>).</p>
+              <p class="mt-[6px] text-[11.5px] text-ink-3">Client IDs whose client-credentials tokens may call the API. Empty turns JWT bearer access off. Each client must be service-account-only at your identity provider. This app’s own Client ID is not allowed.</p>
             </div>
           </div>
 

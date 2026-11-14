@@ -62,10 +62,26 @@ func (h *Handler) listApiTokens(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tokens)
 }
 
+// refuseTokenPrincipal answers 403 to any principal authenticated by a token — a cbx_ token or an
+// OIDC machine JWT (sec-hardening-2 H-1 fix 8, D-0277): a token never mints or revokes a token, the
+// rule project membership management already follows. Otherwise a machine identity holding
+// org_admin could issue a cbx_ token that outlives its flip to human (the flip strips memberships,
+// not tokens) and is then listed under the person's email. Listing is unaffected.
+func refuseTokenPrincipal(w http.ResponseWriter, p authz.Principal) bool {
+	if !p.ViaToken {
+		return false
+	}
+	writeError(w, http.StatusForbidden, "api tokens are managed by people, not tokens")
+	return true
+}
+
 // createApiToken issues a service-account token (org admin). The plaintext secret
 // is returned once, in this response only; the store keeps just its hash.
 func (h *Handler) createApiToken(w http.ResponseWriter, r *http.Request) {
 	p, _ := h.principal(r)
+	if refuseTokenPrincipal(w, p) {
+		return
+	}
 	orgID := r.PathValue("orgID")
 	if !p.InOrg(orgID) {
 		writeError(w, http.StatusNotFound, "not found")
@@ -138,6 +154,9 @@ func (h *Handler) createApiToken(w http.ResponseWriter, r *http.Request) {
 
 // deleteApiToken revokes a token (org admin on its org).
 func (h *Handler) deleteApiToken(w http.ResponseWriter, r *http.Request) {
+	if p, _ := h.principal(r); refuseTokenPrincipal(w, p) {
+		return
+	}
 	tok, err := h.store.GetApiToken(r.Context(), r.PathValue("tokenID"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not found")

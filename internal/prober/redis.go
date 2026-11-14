@@ -22,6 +22,10 @@ type redisProber struct {
 
 func (p redisProber) Probe(ctx context.Context, m domain.Monitor) Result {
 	start := time.Now()
+	// sec-hardening-2 H-2 (S2): the target is checked again before anything is dialed.
+	if err := domain.ValidateSocketTarget(m.Target); err != nil {
+		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "bad target: " + err.Error()}
+	}
 	host, port := hostPort(m.Target, 6379)
 	conn, err := p.dial(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
 	if err != nil {

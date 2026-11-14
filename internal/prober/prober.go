@@ -65,7 +65,7 @@ func NewRunnerWithGuard(g Guard) *Runner {
 	transport.Proxy = nil // never route probes through a proxy; it would bypass the IP guard
 	r := &Runner{clock: time.Now}
 	r.registry = map[domain.MonitorType]Prober{
-		domain.MonitorHTTP:      httpProber{client: &http.Client{Transport: transport}},
+		domain.MonitorHTTP:      httpProber{client: &http.Client{Transport: transport, CheckRedirect: runnerCheckRedirect}},
 		domain.MonitorTCP:       tcpProber{dial: g.dialContext(&net.Dialer{})},
 		domain.MonitorICMP:      icmpProber{guard: g},
 		domain.MonitorDNS:       dnsProber{resolver: net.DefaultResolver},
@@ -75,11 +75,11 @@ func NewRunnerWithGuard(g Guard) *Runner {
 		domain.MonitorPostgres:  pgProber{dial: g.dialContext(&net.Dialer{})},
 		domain.MonitorMySQL:     mysqlProber{},
 		domain.MonitorRedis:     redisProber{dial: g.dialContext(&net.Dialer{})},
-		domain.MonitorPromQL:    promqlProber{client: &http.Client{Transport: transport}},
-		domain.MonitorRabbitMQ:  rabbitmqProber{dial: g.dialContext(&net.Dialer{}), client: &http.Client{Transport: transport}},
+		domain.MonitorPromQL:    promqlProber{client: &http.Client{Transport: transport, CheckRedirect: runnerCheckRedirect}},
+		domain.MonitorRabbitMQ:  rabbitmqProber{dial: g.dialContext(&net.Dialer{}), client: &http.Client{Transport: transport, CheckRedirect: runnerCheckRedirect}},
 		domain.MonitorWebSocket: websocketProber{dial: g.dialContext(&net.Dialer{})},
 		domain.MonitorSSH:       sshProber{dial: g.dialContext(&net.Dialer{})},
-		domain.MonitorSynthetic: syntheticProber{client: &http.Client{Transport: transport}},
+		domain.MonitorSynthetic: syntheticProber{client: &http.Client{Transport: transport, CheckRedirect: runnerCheckRedirect}},
 		// The canary gets its OWN guard, strict and not configurable: no loopback, no link-local,
 		// no private range, no cloud metadata — validated after resolution and re-validated on every
 		// redirect hop by the dialer. There is deliberately no setting that relaxes it, because a
@@ -185,9 +185,16 @@ func (p httpProber) Probe(ctx context.Context, m domain.Monitor) Result {
 	if method == "" {
 		method = http.MethodGet
 	}
+	// sec-hardening-2 H-2 (S2), second external review of iter-0210: the target is parsed by the
+	// parser the write surfaces run before any request exists, so both give one verdict and a
+	// refused target reaches no network. Userinfo is not judged here (D-0145: a legacy row keeps
+	// probing until its next edit).
+	if _, err := domain.ParseHTTPTarget(m.Target); err != nil {
+		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "bad target: " + err.Error()}
+	}
 	req, err := http.NewRequestWithContext(ctx, method, m.Target, nil)
 	if err != nil {
-		return Result{Connected: false, Msg: "bad request: " + err.Error()}
+		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: msgRequestNotBuilt}
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {

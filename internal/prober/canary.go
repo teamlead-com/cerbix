@@ -77,10 +77,15 @@ func (p canaryProber) Probe(ctx context.Context, m domain.Monitor) Result {
 
 	// ── submit ──────────────────────────────────────────────────────────────────────────────
 	subCtx, cancel := context.WithTimeout(ctx, time.Duration(w.Submit.SubmitTimeout)*time.Second)
-	body, contentType, err := canaryBuildBody(w, secrets)
+	body, contentType, secretBody, err := canaryBuildBody(w, secrets)
 	if err != nil {
 		cancel()
 		return Result{Msg: canaryFailure{domain.CanaryStageSubmit, err.Error()}.String()}
+	}
+	if secretBody {
+		// Out of band, like the binding-backed names: the redirect policy refuses to carry this body
+		// to another origin.
+		subCtx = canaryWithSecretBody(subCtx)
 	}
 	resp, respBody, fail := p.do(subCtx, client, "POST", w.Submit.URL, w.Submit.Headers, secrets,
 		body, contentType, canaryIdempotencyKey(m), domain.CanaryStageSubmit)
@@ -193,19 +198,28 @@ func (p canaryProber) client() *http.Client {
 			if violation := domain.CanaryHopViolation(req.URL); violation != domain.CanaryHopOK {
 				return errors.New(violation.HopReason())
 			}
-			prev := via[len(via)-1].URL
-			if canaryOrigin(req.URL) != canaryOrigin(prev) {
-				// Normalized SCHEME, host OR port changed: drop every header a binding produced,
-				// and do it for the whole binding-backed set rather than for the one name Go knows
-				// about. The scheme is in the comparison independently of the refusal above, so a
-				// cross-scheme hop is an origin change even in a future where some downgrade
-				// becomes legal.
+			// D3c1 as amended by sec-hardening-2 H-13 (D-0277): the origin compared is the FIRST
+			// request's, and leaving it is sticky. A comparison with the previous hop lost on a two-
+			// hop chain — net/http re-copies the first request's headers onto every hop before this
+			// runs, so a header deleted on hop 1 came back on hop 2, whose origin equals hop 1's.
+			// No http → https exception: http is never legal for a canary.
+			if chainLeftOrigin(req, via, false) {
+				// A secret-bearing body (the submit's JSON or multipart fields resolved a secret_ref)
+				// is refused, not sent body-less: a canary that succeeds without what it was told to
+				// send is a false UP. Other bodies follow — upload-then-307-to-storage is legitimate.
+				if hasBody(req) && canarySecretBody(req.Context()) {
+					return errors.New("redirect refused: secret-bearing body to another origin")
+				}
+				// Normalized SCHEME, host OR port changed: drop every header a binding produced, for
+				// the whole binding-backed set rather than the one name Go knows about.
 				for name := range req.Header {
 					if canaryBindingBacked(req.Context(), name) {
 						req.Header.Del(name)
 					}
 				}
 			}
+			// The library's Referer carries the previous hop's full URL; it is removed on every hop.
+			req.Header.Del("Referer")
 			return nil
 		},
 	}
@@ -233,6 +247,18 @@ func canaryWithBindingBacked(ctx context.Context, names []string) context.Contex
 	return context.WithValue(ctx, canaryBindingCtxKey{}, set)
 }
 
+// The secret-bearing-body marker travels the same way, on the context and never on the wire.
+type canarySecretBodyCtxKey struct{}
+
+func canaryWithSecretBody(ctx context.Context) context.Context {
+	return context.WithValue(ctx, canarySecretBodyCtxKey{}, true)
+}
+
+func canarySecretBody(ctx context.Context) bool {
+	v, _ := ctx.Value(canarySecretBodyCtxKey{}).(bool)
+	return v
+}
+
 func canaryBindingBacked(ctx context.Context, name string) bool {
 	set, ok := ctx.Value(canaryBindingCtxKey{}).(map[string]struct{})
 	if !ok {
@@ -248,20 +274,11 @@ func canaryBindingBacked(ctx context.Context, name string) bool {
 // `http://x` normalized to the SAME string and a downgrade was not an origin change (B1). The
 // default is now taken from the scheme, which is what makes `https://x` and `https://x:443` still
 // one origin while `http://x` is a different one.
-func canaryOrigin(u *url.URL) string {
-	scheme := strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Hostname())
-	port := u.Port()
-	if port == "" {
-		switch scheme {
-		case "https":
-			port = "443"
-		case "http":
-			port = "80"
-		}
-	}
-	return scheme + "://" + host + ":" + port
-}
+//
+// Since sec-hardening-2 H-13 the canary and the Runner share one origin function, requestOrigin
+// (redirect.go), which chainLeftOrigin compares with; this name keeps the canary's own test pinned
+// to it.
+func canaryOrigin(u *url.URL) string { return requestOrigin(u) }
 
 // do performs one request with the declared headers, the binding values injected, and bounded
 // reading. It returns the response and its body, or a stage failure that never carries a URL.
@@ -506,52 +523,55 @@ func (p canaryProber) awaitSSE(ctx context.Context, client *http.Client, w domai
 
 // canaryBuildBody renders the submit body. `http_json` encodes the typed algebra with binding values
 // substituted at the leaves; `multipart_fixture` is phase E and is refused here rather than sent as
-// something else.
-func canaryBuildBody(w domain.CanaryWorkflow, secrets map[string]string) ([]byte, string, error) {
+// something else. The bool reports a SECRET-BEARING body: one whose JSON or multipart fields resolved a
+// secret_ref (sec-hardening-2 H-13 — such a body never follows a cross-origin 307/308).
+func canaryBuildBody(w domain.CanaryWorkflow, secrets map[string]string) ([]byte, string, bool, error) {
 	switch w.Submit.Kind {
 	case domain.CanarySubmitHTTPJSON:
-		rendered, err := canaryRenderMap(w.Submit.Body, secrets)
+		rendered, secret, err := canaryRenderMap(w.Submit.Body, secrets)
 		if err != nil {
-			return nil, "", err
+			return nil, "", false, err
 		}
 		encoded, err := json.Marshal(rendered)
 		if err != nil {
-			return nil, "", fmt.Errorf("body could not be encoded")
+			return nil, "", false, fmt.Errorf("body could not be encoded")
 		}
-		return encoded, "application/json", nil
+		return encoded, "application/json", secret, nil
 	case domain.CanarySubmitMultipartFixture:
 		// The runner owns the boundary — which is why the schema refuses an author-supplied
 		// `content-type` on this kind — and the fixture comes from the closed registry with its
 		// digest verified before a byte is sent (D11).
 		asset, err := domain.CanaryFixtureBytes(w.Submit.FixtureRef)
 		if err != nil {
-			return nil, "", fmt.Errorf("fixture unavailable")
+			return nil, "", false, fmt.Errorf("fixture unavailable")
 		}
 		fixture, _ := domain.CanaryFixtureByRef(w.Submit.FixtureRef)
 		var buf bytes.Buffer
 		mw := multipart.NewWriter(&buf)
 		part, err := mw.CreateFormFile(w.Submit.Multipart.FileField, fixture.FileName)
 		if err != nil {
-			return nil, "", fmt.Errorf("body could not be encoded")
+			return nil, "", false, fmt.Errorf("body could not be encoded")
 		}
 		if _, err := part.Write(asset); err != nil {
-			return nil, "", fmt.Errorf("body could not be encoded")
+			return nil, "", false, fmt.Errorf("body could not be encoded")
 		}
+		secret := false
 		for name, v := range w.Submit.Multipart.Fields {
-			rendered, err := canaryRenderValue(v, secrets)
+			rendered, used, err := canaryRenderValue(v, secrets)
 			if err != nil {
-				return nil, "", err
+				return nil, "", false, err
 			}
+			secret = secret || used
 			if err := mw.WriteField(name, canaryFieldString(rendered)); err != nil {
-				return nil, "", fmt.Errorf("body could not be encoded")
+				return nil, "", false, fmt.Errorf("body could not be encoded")
 			}
 		}
 		if err := mw.Close(); err != nil {
-			return nil, "", fmt.Errorf("body could not be encoded")
+			return nil, "", false, fmt.Errorf("body could not be encoded")
 		}
-		return buf.Bytes(), mw.FormDataContentType(), nil
+		return buf.Bytes(), mw.FormDataContentType(), secret, nil
 	default:
-		return nil, "", fmt.Errorf("submit kind not supported by this executor")
+		return nil, "", false, fmt.Errorf("submit kind not supported by this executor")
 	}
 }
 
@@ -575,46 +595,53 @@ func canaryFieldString(v any) string {
 	}
 }
 
-func canaryRenderMap(m map[string]domain.CanaryValue, secrets map[string]string) (map[string]any, error) {
+// canaryRenderMap renders a map of values; the bool reports whether any of them, at any depth,
+// resolved a secret_ref (sec-hardening-2 H-13: such a body never follows a cross-origin redirect).
+func canaryRenderMap(m map[string]domain.CanaryValue, secrets map[string]string) (map[string]any, bool, error) {
 	out := make(map[string]any, len(m))
+	secret := false
 	for k, v := range m {
-		rendered, err := canaryRenderValue(v, secrets)
+		rendered, used, err := canaryRenderValue(v, secrets)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
+		secret = secret || used
 		out[k] = rendered
 	}
-	return out, nil
+	return out, secret, nil
 }
 
-func canaryRenderValue(v domain.CanaryValue, secrets map[string]string) (any, error) {
+// canaryRenderValue renders one value; the bool reports a resolved secret_ref, recursively.
+func canaryRenderValue(v domain.CanaryValue, secrets map[string]string) (any, bool, error) {
 	switch v.Kind {
 	case domain.CanaryValueString:
-		return v.Str, nil
+		return v.Str, false, nil
 	case domain.CanaryValueBool:
-		return v.Bool, nil
+		return v.Bool, false, nil
 	case domain.CanaryValueNumber:
-		return json.RawMessage(v.Num.String()), nil
+		return json.RawMessage(v.Num.String()), false, nil
 	case domain.CanaryValueSecret:
 		value, ok := secrets[v.SecretRef]
 		if !ok {
-			return nil, fmt.Errorf("credential unavailable")
+			return nil, false, fmt.Errorf("credential unavailable")
 		}
-		return value, nil
+		return value, true, nil
 	case domain.CanaryValueList:
 		out := make([]any, 0, len(v.List))
+		secret := false
 		for _, item := range v.List {
-			rendered, err := canaryRenderValue(item, secrets)
+			rendered, used, err := canaryRenderValue(item, secrets)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
+			secret = secret || used
 			out = append(out, rendered)
 		}
-		return out, nil
+		return out, secret, nil
 	case domain.CanaryValueObject:
 		return canaryRenderMap(v.Obj, secrets)
 	default:
-		return nil, fmt.Errorf("body could not be encoded")
+		return nil, false, fmt.Errorf("body could not be encoded")
 	}
 }
 

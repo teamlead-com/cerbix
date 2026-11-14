@@ -374,8 +374,13 @@ function typeConfig(): Record<string, string> | undefined {
   if (isRabbitMQ.value) return rabbitConfig();
   if (isSynthetic.value) return syntheticConfig();
   if (isCanary.value) return buildCanaryConfig(canary);
+  // WebSocket TLS is verified by default (sec-hardening-2 H-2); the opt-out is sent only for a TLS
+  // endpoint, and an empty object clears it on edit.
+  if (form.type === "websocket") return wsSecure.value && tlsSettings.skipVerify ? { tls_skip_verify: "true" } : {};
   return undefined;
 }
+// A wss:// or https:// endpoint runs the handshake over TLS — the only case with a certificate to verify.
+const wsSecure = computed(() => form.type === "websocket" && /^(wss|https):\/\//i.test(form.target.trim()));
 
 // Composite (group) monitor: aggregate child monitors of this project.
 type Monitor = components["schemas"]["Monitor"];
@@ -878,6 +883,9 @@ async function loadForEdit() {
     tlsSettings.enabled = m.config?.tls !== "false";
     tlsSettings.skipVerify = m.config?.tls_skip_verify === "true";
   }
+  if (m.type === "websocket") {
+    tlsSettings.skipVerify = m.config?.tls_skip_verify === "true";
+  }
   // RabbitMQ: prefill mode + management basic-auth username/path (password redacted).
   if (m.type === "rabbitmq") {
     rabbitMode.value = m.config?.mode === "management" ? "management" : "amqp";
@@ -1180,6 +1188,10 @@ const selectCls =
                     <option v-for="mth in httpMethods" :key="mth" :value="mth">{{ mth }}</option>
                   </select>
                   <input v-model="form.target" type="text" :placeholder="targetPlaceholder" :class="[inputCls, 'font-mono text-[13px]']" />
+                </div>
+                <div v-if="wsSecure" class="mt-[4px] flex flex-col gap-[4px]">
+                  <label class="flex items-center gap-2 text-[12.5px]"><input v-model="tlsSettings.skipVerify" data-testid="ws-skip-verify" type="checkbox" /> Skip certificate verification</label>
+                  <span class="text-[11.5px] text-ink-3">Accept self-signed or otherwise unverifiable certificates. Off by default; existing wss monitors were switched on at upgrade so none went DOWN.</span>
                 </div>
               </div>
               <div v-else class="flex flex-col gap-[6px]">

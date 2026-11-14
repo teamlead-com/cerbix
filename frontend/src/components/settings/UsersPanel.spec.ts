@@ -49,7 +49,7 @@ describe("UsersPanel kind", () => {
     await flushPromises();
     const grant = rowOf(w, "9f1c@clients").findAll("button").find((b) => b.text() === "Grant admin")!;
     expect(grant.attributes("disabled")).toBeDefined();
-    expect(grant.attributes("title")).toBe("A machine identity cannot be a global admin — use an API token");
+    expect(grant.attributes("title")).toBe("A machine identity cannot be a global admin — global administration is for people; automation gets organization or project rights");
     const revoke = rowOf(w, "old@clients").findAll("button").find((b) => b.text() === "Revoke admin")!;
     expect(revoke.attributes("disabled")).toBeUndefined();
     const human = rowOf(w, "ada@example.com").findAll("button").find((b) => b.text() === "Grant admin")!;

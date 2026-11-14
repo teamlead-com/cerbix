@@ -238,7 +238,9 @@ Rules for a listed client:
 
 A token's first call creates a **machine** user (`<sub>@clients` when the token has no email) with
 no access. Grant it memberships like anyone else; the member lists show a `machine` badge. A
-machine cannot be made a global admin; use an API token for instance-wide automation. If a
+machine cannot be made a global admin: global administration is for people; automation gets
+organization or project rights. A token — a service-account token or a machine JWT — cannot create
+or revoke API tokens either (403, D-0277). If a
 person ever signs in to an identity a machine token created, it becomes their account: every
 membership the machine held is removed, its global-admin flag is cleared, and the change is
 written to the audit log (`user.kind_human`, and `member.revoke_machine_grants` per
@@ -277,6 +279,49 @@ When a database is configured and `--role=all`, `serve` starts the checking pipe
   DB/PromQL/RabbitMQ/composite/synthetic probers) with per-check timeout + retries.
 - **ingestion** — writes each result as a heartbeat, updates the monitor's `status`, and
   increments `cerbix_checks_total{result="up|down"}`.
+
+**Probe targets and TLS (sec-hardening-2 H-2, D-0277).** Every write surface parses a target with
+its protocol's parser, and the prober parses it again before it dials. A refusal names the rule
+and never repeats the target.
+- **Every type:** no control byte (CR, LF, tab, NUL, DEL…) anywhere in the raw target.
+  Migration 00115 trimmed such bytes, and spaces, from the edges of existing websocket, ssh,
+  redis, rabbitmq, postgres and mysql targets, because those probes used to trim them. For http
+  it removed them from the fragment (after `#`), the one place they ever probed: the fragment is
+  never sent.
+- **WebSocket:** a `ws`, `wss`, `http` or `https` URL. A target without a scheme is refused;
+  migration 00113 gave existing ones the `ws://` they were dialled with.
+- **SSH, Redis and RabbitMQ AMQP:** `host` or `host:port`, where the port is optional.
+- **HTTP:** an `http(s)://` URL with a host that parses, and a written port of 1–65535 (`host:`
+  with an empty port is fine). A query and a fragment are allowed. The probe parses its target too:
+  a refused one fails with `bad target: …` before any request, and no probe message ever carries
+  the request URL.
+- **PromQL:** the Prometheus base URL: `http(s)://`, a host, no query or fragment. A path
+  prefix (`https://gw/prometheus`) is kept, and the probe asks `<base>/api/v1/query`. A prefix
+  ending in an escaped slash (`/vhosts/%2F`) is kept as written, for PromQL and RabbitMQ
+  management alike.
+- **RabbitMQ management target:** `host[:port]` (port 15672, or 15671 with `tls: "true"`), or an
+  `http(s)://` base URL with any letter case. A written port is 1–65535; credentials, a query and
+  a fragment are not allowed. With `tls: "true"` the URL must be `https://`.
+- **RabbitMQ management `path`:** starts with one `/`, contains no `@`, `\`, whitespace or
+  control bytes, and uses valid percent-encoding. It reaches the server exactly as written:
+  `/api/aliveness-test/%2F` checks the default vhost. A relative path (`api/overview`) is refused
+  on save and by the probe. Migration 00114 gave existing rows their `/`; a Monitoring-as-Code
+  bundle with a relative path is refused (`domain_invalid`) until it is edited.
+- **URL credentials:** `user:password@` in a target is refused on save (D-0145). A promql or
+  http row stored before that rule keeps probing until its next edit.
+
+The WebSocket handshake over `wss://`/`https://` now **verifies the certificate** unless the
+monitor sets `tls_skip_verify: "true"`. Migration 00113 set that for existing wss/https monitors,
+so none went DOWN. A Monitoring-as-Code bundle must declare it in `settings`, or the next apply
+resets it and a self-signed endpoint goes DOWN with a `tls:` message.
+
+**Redirects (H-13).** On a redirect to another origin (scheme, host or port), a probe drops every
+header the first request carried. Coming back to the first host does not restore them. It never
+sends `Referer`, and it refuses (`redirect refused: …`) an `https → http` downgrade, a `Location`
+with credentials or a non-http scheme, and any 307/308 that would carry a request body to another
+origin. The one exception is `http://host` → `https://host` on ports 80 → 443. A synthetic step
+that must POST to another origin names that origin in its own `url`. The canary keeps its stricter
+D3c1 rules and refuses only a **secret-bearing** body across origins.
 
 Monitors are managed via the API (requires auth): `POST /api/v1/projects/{id}/monitors`,
 `GET /api/v1/monitors/{id}`, `GET /api/v1/monitors/{id}/heartbeats`, `DELETE`. Condition

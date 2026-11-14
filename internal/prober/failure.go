@@ -12,6 +12,11 @@ import (
 	"syscall"
 )
 
+// msgRequestNotBuilt is the message for a request net/http refused to build. Never the error
+// itself: http.NewRequest returns a *url.Error whose text is `parse "<the whole URL>": …`, user,
+// password and query included (second external review of iter-0210).
+const msgRequestNotBuilt = "bad request: the request could not be built"
+
 // probeFailure renders a transport failure for `heartbeat.msg` WITHOUT echoing the request
 // URL. It exists because `net/http` embeds the full URL in every error it returns, so the
 // obvious `Msg: err.Error()` publishes whatever the target's query string carries — a

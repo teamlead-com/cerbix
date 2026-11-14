@@ -299,6 +299,9 @@ func TestCanaryDropsEveryBindingHeaderOnACrossHostRedirect(t *testing.T) {
 			{Name: "x-api-key", SecretRef: "upload"},
 			{Name: "x-tenant", Value: "canary"},
 		}
+		// This test is about HEADERS. The default body carries a secret_ref, which a cross-origin 307
+		// now refuses outright (sec-hardening-2 H-13); the secret-in-body case is its own test.
+		delete(w.Submit.Body, "token")
 		w.Completion.URL = target.URL + "/tasks/{{ correlation_id }}"
 	})
 	canaryTLSProber(t, target, redirector).Probe(context.Background(), m)
@@ -568,6 +571,9 @@ func TestCanaryProvenanceNeverReachesEitherTargetOnTheWire(t *testing.T) {
 			{Name: "x-api-key", SecretRef: "upload"},
 			{Name: "x-tenant", Value: "canary"},
 		}
+		// This test is about HEADERS. The default body carries a secret_ref, which a cross-origin 307
+		// now refuses outright (sec-hardening-2 H-13); the secret-in-body case is its own test.
+		delete(w.Submit.Body, "token")
 		w.Completion.URL = target.URL + "/tasks/{{ correlation_id }}"
 	})
 	canaryTLSProber(t, target, redirector).Probe(context.Background(), m)

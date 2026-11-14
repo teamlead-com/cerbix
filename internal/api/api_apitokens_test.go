@@ -16,6 +16,41 @@ var (
 	tokenOtherOrg = authz.Principal{UserID: "apitoken:o", ViaToken: true, Memberships: []domain.Membership{{OrgID: "o2", Role: domain.RoleEditor}}}
 )
 
+// sec-hardening-2 H-1 fix 8: a token never mints a token. Creating or deleting an API token answers
+// 403 to any principal authenticated by a token — a cbx_ token or an OIDC machine JWT, whatever its
+// role — so a machine's grant cannot outlive its flip to human as a token listed under a person.
+// Listing is unchanged; people (sessions) keep both writes.
+func TestApiTokenWritesRefuseTokenPrincipals(t *testing.T) {
+	tokenOrgAdmin := authz.Principal{UserID: "apitoken:a", ViaToken: true, Memberships: []domain.Membership{{OrgID: "o1", Role: domain.RoleOrgAdmin}}}
+	machineOrgAdmin := authz.Principal{UserID: "machine-1", ViaToken: true, Memberships: []domain.Membership{{OrgID: "o1", Role: domain.RoleOrgAdmin}}}
+	for name, p := range map[string]authz.Principal{"cbx_ token": tokenOrgAdmin, "OIDC machine JWT": machineOrgAdmin} {
+		fs := seededStore()
+		before := len(fs.apiTokens)
+		h := newHandler(fs)
+		rec := do(h, p, http.MethodPost, "/api/v1/organizations/o1/tokens", `{"name":"minted","role":"editor"}`)
+		if rec.Code != http.StatusForbidden || rec.Body.String() != "{\"error\":\"api tokens are managed by people, not tokens\"}\n" {
+			t.Fatalf("%s create = %d %q, want 403", name, rec.Code, rec.Body.String())
+		}
+		if rec := do(h, p, http.MethodDelete, "/api/v1/tokens/at1", ""); rec.Code != http.StatusForbidden {
+			t.Fatalf("%s delete = %d, want 403", name, rec.Code)
+		}
+		if len(fs.apiTokens) != before {
+			t.Fatalf("%s: the token store was written", name)
+		}
+		if rec := do(h, p, http.MethodGet, "/api/v1/organizations/o1/tokens", ""); rec.Code != http.StatusOK {
+			t.Fatalf("%s list = %d, want 200 (unchanged)", name, rec.Code)
+		}
+	}
+	fs := seededStore()
+	h := newHandler(fs)
+	if rec := do(h, o1Admin, http.MethodPost, "/api/v1/organizations/o1/tokens", `{"name":"by-a-person","role":"editor"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("a person's create = %d, want 201", rec.Code)
+	}
+	if rec := do(h, o1Admin, http.MethodDelete, "/api/v1/tokens/at1", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("a person's delete = %d, want 204", rec.Code)
+	}
+}
+
 func TestApiTokenManagementAuthz(t *testing.T) {
 	h := newHandler(seededStore())
 	// List: viewer forbidden, admin ok.

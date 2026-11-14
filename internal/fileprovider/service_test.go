@@ -200,6 +200,69 @@ func TestCanonicalHashMovesOnMeaning(t *testing.T) {
 	}
 }
 
+// sec-hardening-2 H-2 (invariant S2): a bundle carrying a hostile probe target is refused at decode
+// as domain_invalid — the MaC surface of the three.
+func TestBundleRefusesHostileProbeTargets(t *testing.T) {
+	// Every fixture is otherwise valid — credentialed types carry their settings — and the message
+	// must name the rule, so a refusal for a missing setting cannot pass for this one (external
+	// review of iter-0210, P3-1: the rabbit row used to lack its username).
+	for name, tc := range map[string]struct{ monitor, names string }{
+		"websocket without a scheme": {"    type: websocket\n    target: chat.example.com/ws\n", "target"},
+		"websocket with a space":     {"    type: websocket\n    target: \"wss://chat.example.com/a b\"\n", "target"},
+		"redis with a bad port":      {"    type: redis\n    target: redis.example.com:abc\n    settings:\n      password_ref: redis\n", "target"},
+		"ssh with CRLF":              {"    type: ssh\n    target: \"bastion.example.com\\r\\nX-Evil: 1\"\n", "target"},
+		"ssh with a bad port":        {"    type: ssh\n    target: bastion.example.com:70000\n", "target"},
+		"rabbit amqp with a space":   {"    type: rabbitmq\n    target: \"rabbit.example.com 5672\"\n    settings:\n      mode: amqp\n", "target"},
+		"rabbit amqp with a path":    {"    type: rabbitmq\n    target: rabbit.example.com:5672/vhost\n    settings:\n      mode: amqp\n", "target"},
+		"rabbit path authority": {"    type: rabbitmq\n    target: rabbit.example.com:15672\n    settings:\n      mode: management\n" +
+			"      username: monitor\n      password_ref: rabbit\n      path: \"@10.0.0.9:8080/x\"\n", "path"},
+	} {
+		y := "format: 2\norganization: acme\nproject: api\nmonitors:\n  subject:\n    name: Subject\n" + tc.monitor
+		be := decodeErr(t, y)
+		if be.Reason != ReasonDomainInvalid || !strings.Contains(be.Msg, tc.names) {
+			t.Errorf("%s: reason = %s, message %q; want domain_invalid naming the %s", name, be.Reason, be.Msg, tc.names)
+		}
+		if strings.Contains(be.Msg, "X-Evil") || strings.Contains(be.Msg, "10.0.0.9") {
+			t.Errorf("%s: the message echoes the input: %q", name, be.Msg)
+		}
+	}
+}
+
+// External review of iter-0210 (P2-1): a bundle whose RabbitMQ management path is relative is
+// refused with a message that names the rule, not applied with a silently added "/". The database
+// rows got their "/" from migration 00114; the bundle in Git did not, and must be edited.
+func TestBundleRefusesRelativeRabbitMgmtPath(t *testing.T) {
+	y := "format: 2\norganization: acme\nproject: api\nmonitors:\n  subject:\n    name: Subject\n" +
+		"    type: rabbitmq\n    target: rabbit.example.com\n    settings:\n      mode: management\n      username: monitor\n      password_ref: rabbit\n      path: api/overview\n"
+	be := decodeErr(t, y)
+	if be.Reason != ReasonDomainInvalid || be.UID != "subject" {
+		t.Fatalf("reason = %s, uid = %q; want domain_invalid on subject", be.Reason, be.UID)
+	}
+	if !strings.Contains(be.Msg, "path must start with a single /") {
+		t.Fatalf("message %q does not name the rule", be.Msg)
+	}
+	ok := strings.Replace(y, "path: api/overview", "path: /api/overview", 1)
+	if got := decodeOK(t, ok).Monitors["subject"].Monitor.Config["path"]; got != "/api/overview" {
+		t.Fatalf("absolute path decoded as %q", got)
+	}
+}
+
+// sec-hardening-2 H-2 fix 3: a bundle may declare `tls_skip_verify` for a websocket monitor, it
+// reaches the monitor's config, and a non-boolean is refused.
+func TestFileProviderWebSocketTLSSkipVerifyRoundTrip(t *testing.T) {
+	bundle := func(v string) string {
+		return "format: 2\norganization: acme\nproject: api\nmonitors:\n  subject:\n    name: Subject\n" +
+			"    type: websocket\n    target: wss://chat.example.com/ws\n    settings:\n      tls_skip_verify: \"" + v + "\"\n"
+	}
+	dp := decodeOK(t, bundle("true"))
+	if got := dp.Monitors["subject"].Monitor.Config["tls_skip_verify"]; got != "true" {
+		t.Fatalf("decoded tls_skip_verify = %q, want true", got)
+	}
+	if be := decodeErr(t, bundle("maybe")); be.Reason != ReasonDomainInvalid {
+		t.Fatalf("maybe: reason = %s, want domain_invalid", be.Reason)
+	}
+}
+
 func TestUnknownPolicyValuesAreRejected(t *testing.T) {
 	for _, tc := range []struct{ what, y string }{
 		{"missing_data", strings.Replace(format2Bundle, "missing_data: unknown", "missing_data: whatever", 1)},

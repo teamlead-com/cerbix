@@ -45,6 +45,10 @@ func (p rabbitmqProber) Probe(ctx context.Context, m domain.Monitor) Result {
 
 func (p rabbitmqProber) probeAMQP(ctx context.Context, m domain.Monitor) Result {
 	start := time.Now()
+	// sec-hardening-2 H-2 (S2): the target is checked again before anything is dialed.
+	if err := domain.ValidateSocketTarget(m.Target); err != nil {
+		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "bad target: " + err.Error()}
+	}
 	host, port := hostPort(m.Target, 5672)
 	conn, err := p.dial(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
 	if err != nil {
@@ -72,13 +76,13 @@ func (p rabbitmqProber) probeAMQP(ctx context.Context, m domain.Monitor) Result 
 
 func (p rabbitmqProber) probeManagement(ctx context.Context, m domain.Monitor) Result {
 	start := time.Now()
-	u, err := rabbitMgmtURL(m.Target, m.Config["path"], m.Config["tls"] == "true")
+	u, err := rabbitMgmtURL(m.Target, m.Config["path"], domain.RabbitMgmtTLS(m.Config))
 	if err != nil {
-		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "bad request: " + err.Error()}
+		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "bad target: " + err.Error()}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "bad request: " + err.Error()}
+		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: msgRequestNotBuilt}
 	}
 	if user := m.Config["username"]; user != "" {
 		req.SetBasicAuth(user, m.Config["password"])
@@ -91,7 +95,8 @@ func (p rabbitmqProber) probeManagement(ctx context.Context, m domain.Monitor) R
 		}
 		transport := base.Clone()
 		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec // explicit operator opt-in
-		client = &http.Client{Transport: transport, Timeout: p.client.Timeout}
+		// The redirect rule travels with the client (sec-hardening-2 H-13): this branch used to drop it.
+		client = &http.Client{Transport: transport, Timeout: p.client.Timeout, CheckRedirect: p.client.CheckRedirect}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -114,30 +119,38 @@ func (p rabbitmqProber) probeManagement(ctx context.Context, m domain.Monitor) R
 
 // rabbitMgmtURL builds the management API URL from a target (a base URL, or a
 // bare host defaulting to port 15672) and a path (default /api/overview).
+//
+// sec-hardening-2 H-2 (S2): the path is checked by domain.ValidateRabbitMgmtPath and the URL is
+// assembled as a url.URL, never by concatenation, so `path` can never become an authority that
+// moves the request — and its Basic-Auth credentials — to another host. The path starts with a
+// single "/"; a base path of a URL target (a reverse-proxy prefix) is kept.
+//
+// The target is parsed by domain.ParseRabbitMgmtTarget, the same parser Monitor.Validate runs, so
+// the prober and the write surfaces give one verdict (external review of iter-0210). It gets the
+// RAW target: trimming first would hide a trailing CR/LF.
+//
+// The path is a URL REFERENCE and its percent-encoding is part of what the operator configured:
+// `%2F` is RabbitMQ's default vhost. So the URL carries both Path and RawPath, joined by
+// joinURLPath, and the reference's own RawQuery. Building from the decoded Path alone re-encoded
+// `%2F` as `%252F` (review of iter-0210).
 func rabbitMgmtURL(target, path string, tlsEnabled bool) (string, error) {
-	target = strings.TrimSpace(target)
 	if path == "" {
 		path = "/api/overview"
 	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
+	// A relative path is refused, not given a "/" (external review of iter-0210, P2-1): the rule is
+	// the one the write surfaces apply, and migration 00114 wrote the "/" into existing rows.
+	if err := domain.ValidateRabbitMgmtPath(path); err != nil {
+		return "", err
 	}
-	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
-		u, err := url.Parse(target)
-		if err != nil {
-			return "", err
-		}
-		if tlsEnabled && u.Scheme != "https" {
-			return "", fmt.Errorf("rabbitmq management target must use https when tls is enabled")
-		}
-		return strings.TrimRight(target, "/") + path, nil
+	ref, err := domain.ParseRabbitMgmtPath(path)
+	if err != nil {
+		return "", err
 	}
-	defaultPort := uint16(15672)
-	scheme := "http"
-	if tlsEnabled {
-		defaultPort = 15671
-		scheme = "https"
+	base, err := domain.ParseRabbitMgmtTarget(target, tlsEnabled)
+	if err != nil {
+		return "", err
 	}
-	host, port := hostPort(target, defaultPort)
-	return scheme + "://" + net.JoinHostPort(host, strconv.Itoa(int(port))) + path, nil
+	out := url.URL{Scheme: base.Scheme, Host: base.Host, RawQuery: ref.RawQuery}
+	out.Path, out.RawPath = joinURLPath(base, ref)
+	return out.String(), nil
 }

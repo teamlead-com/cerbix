@@ -262,7 +262,7 @@ onMounted(load);
                     type="button"
                     class="h-[26px] rounded-sm border border-border px-[9px] text-[12px] text-ink-2 hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-45"
                     :disabled="isSelf(u) || busyId === u.id || machineCannotBeAdmin(u)"
-                    :title="isSelf(u) ? 'You cannot change your own global-admin flag' : machineCannotBeAdmin(u) ? 'A machine identity cannot be a global admin — use an API token' : ''"
+                    :title="isSelf(u) ? 'You cannot change your own global-admin flag' : machineCannotBeAdmin(u) ? 'A machine identity cannot be a global admin — global administration is for people; automation gets organization or project rights' : ''"
                     @click="toggleAdmin(u)"
                   >{{ u.is_global_admin ? "Revoke admin" : "Grant admin" }}</button>
                   <button

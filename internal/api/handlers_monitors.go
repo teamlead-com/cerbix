@@ -268,6 +268,15 @@ func (h *Handler) testMonitor(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		m.Config = prepared
+	} else if domain.HasTypedSettings(m.Type) {
+		// A plain typed schema (websocket tls_skip_verify, sec-hardening-2 H-2): validated as strictly
+		// as the file provider does.
+		prepared, err := domain.PrepareTypedSettings(m.Type, m.Config, domain.SurfaceAPI)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		m.Config = prepared
 	}
 	if m.Type == domain.MonitorPush || m.Type == domain.MonitorComposite {
 		writeError(w, http.StatusBadRequest, "this monitor type cannot be tested")
@@ -410,6 +419,15 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		prepared, err := domain.PrepareCredentialSettings(m.Type, m.Config, domain.SurfaceAPI)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		m.Config = prepared
+	} else if domain.HasTypedSettings(m.Type) {
+		// A plain typed schema (websocket tls_skip_verify, sec-hardening-2 H-2): validated as strictly
+		// as the file provider does.
+		prepared, err := domain.PrepareTypedSettings(m.Type, m.Config, domain.SurfaceAPI)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -654,6 +672,13 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 		// the stored ciphertext in that case; rejecting here made every other setting
 		// unreachable without sending `"password": ""` as a placeholder.
 		prepared, err := domain.PrepareCredentialSettings(mon.Type, mon.Config, domain.SurfaceAPIUpdate)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		mon.Config = prepared
+	} else if domain.HasTypedSettings(mon.Type) && body.Config != nil {
+		prepared, err := domain.PrepareTypedSettings(mon.Type, mon.Config, domain.SurfaceAPIUpdate)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return

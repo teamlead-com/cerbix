@@ -216,6 +216,12 @@ func (m Monitor) Validate() error {
 		if strings.TrimSpace(m.Target) == "" {
 			return fmt.Errorf("monitor: target is required for %s monitors", m.Type)
 		}
+		// sec-hardening-2 H-2 (S2), external review of iter-0210: a control byte in the RAW target
+		// is refused for every type — trimming would hide a trailing CR/LF — and the message never
+		// echoes the target.
+		if hasControl(m.Target) {
+			return fmt.Errorf("monitor: target must not contain control characters")
+		}
 		if m.IntervalSeconds <= 0 {
 			return fmt.Errorf("monitor: interval_seconds must be positive")
 		}
@@ -353,6 +359,11 @@ func (m Monitor) Validate() error {
 	// target.
 	if u, err := url.Parse(strings.TrimSpace(m.Target)); err == nil && u.User != nil {
 		return fmt.Errorf("monitor: target must not carry credentials in its URL userinfo; use a target without user:password")
+	}
+	// sec-hardening-2 H-2 (S2): a target written to a socket or into a URL passes its protocol's
+	// parser on every write surface (API create/update, test-connection, MaC decode).
+	if err := validateProbeTarget(m); err != nil {
+		return fmt.Errorf("monitor: %w", err)
 	}
 	if m.Type == MonitorHTTP && m.Method != "" && !httpMethods[m.Method] {
 		return fmt.Errorf("monitor: unsupported HTTP method %q", m.Method)

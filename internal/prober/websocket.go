@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
@@ -31,7 +30,21 @@ type websocketProber struct {
 
 func (p websocketProber) Probe(ctx context.Context, m domain.Monitor) Result {
 	start := time.Now()
-	secure, host, addr, path := wsTarget(m.Target)
+	// sec-hardening-2 H-2 (S2): the target is parsed again here, before anything is dialed, so a
+	// value that bypassed write-time validation never reaches the socket.
+	u, err := domain.ParseWebSocketTarget(m.Target)
+	if err != nil {
+		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "bad target: " + err.Error()}
+	}
+	secure := u.Scheme == "wss" || u.Scheme == "https"
+	addr := u.Host
+	if u.Port() == "" {
+		port := "80"
+		if secure {
+			port = "443"
+		}
+		addr = net.JoinHostPort(u.Hostname(), port)
+	}
 
 	conn, err := p.dial(ctx, "tcp", addr)
 	if err != nil {
@@ -42,7 +55,12 @@ func (p websocketProber) Probe(ctx context.Context, m domain.Monitor) Result {
 		_ = conn.SetDeadline(d)
 	}
 	if secure {
-		tconn := tls.Client(conn, &tls.Config{ServerName: host, InsecureSkipVerify: true}) //nolint:gosec // liveness handshake; internal/self-signed endpoints must stay monitorable
+		// Verified unless the operator opted out with tls_skip_verify (it used to be skipped always).
+		tconn := tls.Client(conn, &tls.Config{
+			ServerName:         u.Hostname(),
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: m.Config["tls_skip_verify"] == "true", //nolint:gosec // explicit operator opt-in
+		})
 		if err := tconn.HandshakeContext(ctx); err != nil {
 			return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "tls: " + err.Error()}
 		}
@@ -53,13 +71,21 @@ func (p websocketProber) Probe(ctx context.Context, m domain.Monitor) Result {
 	if err != nil {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
-	req := "GET " + path + " HTTP/1.1\r\n" +
-		"Host: " + host + "\r\n" +
-		"Upgrade: websocket\r\n" +
-		"Connection: Upgrade\r\n" +
-		"Sec-WebSocket-Key: " + key + "\r\n" +
-		"Sec-WebSocket-Version: 13\r\n\r\n"
-	if _, err := conn.Write([]byte(req)); err != nil {
+	// The handshake is built and serialized by net/http, never by concatenation.
+	reqURL := *u
+	reqURL.Scheme = "http"
+	if secure {
+		reqURL.Scheme = "https"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
+	if err != nil {
+		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "bad target: request could not be built"}
+	}
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Key", key)
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	if err := req.Write(conn); err != nil {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
 
@@ -91,37 +117,4 @@ func wsKey() (string, error) {
 func wsAccept(key string) string {
 	h := sha1.Sum([]byte(key + wsAcceptMagic)) //nolint:gosec // RFC 6455 handshake
 	return base64.StdEncoding.EncodeToString(h[:])
-}
-
-// wsTarget parses a WebSocket target into (secure, hostname, host:port, path),
-// defaulting to port 80 (ws) / 443 (wss) and path "/".
-func wsTarget(target string) (secure bool, host, addr, path string) {
-	target = strings.TrimSpace(target)
-	rest := target
-	switch {
-	case strings.HasPrefix(rest, "wss://"):
-		secure, rest = true, rest[len("wss://"):]
-	case strings.HasPrefix(rest, "https://"):
-		secure, rest = true, rest[len("https://"):]
-	case strings.HasPrefix(rest, "ws://"):
-		rest = rest[len("ws://"):]
-	case strings.HasPrefix(rest, "http://"):
-		rest = rest[len("http://"):]
-	}
-	hostPortPart := rest
-	path = "/"
-	if i := strings.IndexAny(rest, "/"); i >= 0 {
-		hostPortPart = rest[:i]
-		path = rest[i:]
-	}
-	host = hostPortPart
-	if h, _, err := net.SplitHostPort(hostPortPart); err == nil {
-		host = h
-		addr = hostPortPart
-	} else if secure {
-		addr = net.JoinHostPort(hostPortPart, "443")
-	} else {
-		addr = net.JoinHostPort(hostPortPart, "80")
-	}
-	return secure, host, addr, path
 }

@@ -210,7 +210,7 @@ run unfinished. That was rejected as a P0 at party [218], and the reasoning is w
 
 - **One mutable row cannot hold two outstanding runs.** A following dispatch overwrites the single
   job identity, and the older run's terminal event then has no durable row to land on.
-- **Overlap is not an edge case, it is a supported configuration.** `internal/domain/monitor.go:288`
+- **Overlap is not an edge case, it is a supported configuration.** `internal/domain/monitor.go:294`
   scopes the `interval_seconds >= timeout_seconds` rule to `async_canary` **only**, and the comment
   says why: *"an ordinary http monitor with a 30 s interval and a 60 s timeout is legal today and
   common, so writing this as a general rule would refuse configurations nobody meant it to."* A

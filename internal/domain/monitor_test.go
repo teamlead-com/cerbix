@@ -223,7 +223,11 @@ func TestRabbitMQWebSocketSSHTypes(t *testing.T) {
 		if !tp.Valid() || !tp.Active() || !tp.NeedsTarget() {
 			t.Fatalf("%s should be valid, active, and target-needing", tp)
 		}
-		m := Monitor{Name: "x", ProjectID: "p", Type: tp, Target: "host:1", IntervalSeconds: 60, TimeoutSeconds: 5}
+		target := "host:1"
+		if tp == MonitorWebSocket {
+			target = "ws://host:1" // a websocket target needs its scheme (sec-hardening-2 H-2)
+		}
+		m := Monitor{Name: "x", ProjectID: "p", Type: tp, Target: target, IntervalSeconds: 60, TimeoutSeconds: 5}
 		if err := m.Validate(); err != nil {
 			t.Fatalf("%s validate: %v", tp, err)
 		}
@@ -239,7 +243,11 @@ func TestMySQLRedisPromQLTypes(t *testing.T) {
 		if !tp.Valid() || !tp.Active() || !tp.NeedsTarget() {
 			t.Fatalf("%s should be valid, active, and target-needing", tp)
 		}
-		m := Monitor{Name: "x", ProjectID: "p", Type: tp, Target: "host:1", IntervalSeconds: 60, TimeoutSeconds: 5}
+		target := "host:1"
+		if tp == MonitorPromQL {
+			target = "http://host:1" // a Prometheus base URL (external review of iter-0210, P2-2)
+		}
+		m := Monitor{Name: "x", ProjectID: "p", Type: tp, Target: target, IntervalSeconds: 60, TimeoutSeconds: 5}
 		if err := m.Validate(); err != nil {
 			t.Fatalf("%s validate: %v", tp, err)
 		}

@@ -5808,6 +5808,12 @@ submit, the request that actually carries the credential. All seventeen are answ
 are now `TODO` rows in `docs/status.md`; no code exists and `async_canary` is not a monitor type in
 the tree. Phase B is the next unit of work and carries its own gate.
 
+**Amended by D-0277 (sec-hardening-2 H-13, 2026-11-14).** D3c1 now compares every redirect hop
+with the first request's origin, and leaving it is sticky. It refuses a cross-origin 307/308
+whose body or multipart fields resolved a `secret_ref`, and it removes the library's `Referer`
+on every hop. The full text of the three points is in
+[`func-async-canary.md`](specs/func-async-canary.md) D3c1.
+
 ## D-0219 — an incident write says who wrote it: FR-026 / NFR-021 implemented, and the two design claims the code found wrong (2026-09-03)
 
 **Context.** FR-022 promised, as invariant 14, that "every write is audited with actor and tenant, in the
@@ -7013,7 +7019,7 @@ its payload in B2. The residual error always points at WITHHOLDING. 64 acceptanc
 migrations from `00100`.
 
 **Eight P0 rejections, and six were one class.** Revision 1 ([218]) could not hold two outstanding runs —
-and overlap is a SUPPORTED configuration, `monitor.go:288` scoping `interval >= timeout` to `async_canary`
+and overlap is a SUPPORTED configuration, `monitor.go:294` scoping `interval >= timeout` to `async_canary`
 alone with a comment calling a 30 s interval and 60 s timeout "legal today and common". Revision 2 ([225])
 capped gap materialization with a batch-wide `LIMIT` while advancing every monitor, and never wrote the
 fence its own prose promised. Revision 4 ([229]) reintroduced that defect through the fix for [227], having
@@ -9213,3 +9219,98 @@ public IdPs. H-5: a password reset kept every session alive. H-6: unbounded bodi
 - **After the external review of iter-0209:** adding a member by email (`GetUserByEmail`) picks a `human` row first and
   only then the oldest. A machine token's email is not verified, so an older machine row carrying a person's address
   must not receive that person's invitation.
+
+## D-0277 — probe input parsed before the socket, redirects held to the first origin, a token never mints a token (sec-hardening-2 iteration 2, 2026-11-14)
+
+**Context.** [`sec-hardening-2.md`](specs/sec-hardening-2.md) iteration 2 covers three findings.
+- **H-2 (P0).** The WebSocket prober wrote an unvalidated target into a raw socket and accepted any
+  TLS certificate, and the RabbitMQ management URL was concatenated from `config.path`.
+- **H-13 (P1).** Credentials, request bodies and the library's `Referer` followed redirects to
+  another origin. On the canary this was live on `main`: its policy compared each hop with the
+  previous one, while `net/http` restores the first request's headers on every hop, so a two-hop
+  chain delivered the binding-backed headers.
+- **H-1 fix 8.** A machine identity holding `org_admin` could mint a `cbx_` token that outlived its
+  flip to human.
+
+**Decision.**
+1. **Targets are parsed by their protocol** (`internal/domain/targets.go`), in `Monitor.Validate`
+   (which every write surface passes) and again in the prober before it dials.
+   - **WebSocket:** a URL with scheme ws/wss/http/https, a host, a numeric port if present, and no
+     userinfo, fragment, whitespace or control byte. Control bytes are checked on the raw value.
+     The handshake is built by `net/http`.
+   - **SSH, Redis, RabbitMQ AMQP:** `host[:port]`.
+   - **RabbitMQ management:** an http(s) base URL or `host[:port]`, plus a `path` starting with a
+     single `/` and containing no `@`, backslash, whitespace or control byte. The URL is assembled
+     as a `url.URL`. The target has one parser for the write surfaces and the prober,
+     `domain.ParseRabbitMgmtTarget`:
+     - control bytes are judged on the raw value;
+     - the scheme is http or https, case-insensitive;
+     - a written port is 1–65535;
+     - no userinfo, query or fragment;
+     - `tls: "true"` demands https already at write time.
+   - **http and promql** (added by the external review of iter-0210): the target must parse, with
+     an http(s) scheme and a host; a promql base URL has no query or fragment. `promqlProber`
+     re-parses it and builds `/api/v1/query` as a `url.URL`. The D-0145 userinfo rule stays a write
+     rule, so a legacy row keeps probing.
+   - **Every type that probes a target:** no control byte in the raw value.
+
+   Owner rulings (2026-11-14):
+   - The port stays optional, because the UI documents a default.
+   - A scheme-less WebSocket target is migrated to `ws://`.
+
+   A base path on a URL target (a reverse-proxy prefix) is kept, for RabbitMQ and for promql. The
+   management `path` keeps its percent-encoding byte for byte: it is a URL reference, so `%2F`, the
+   default vhost, is sent as written.
+
+   *Corrected by the external review of iter-0210.* This record first said a relative management
+   `path` "still gets its leading `/`". That was the prober's silent repair of a value the write
+   surfaces already refused. It is gone: the prober refuses a relative path too, and migration 00114
+   wrote the `/` into existing rows.
+2. **`tls_skip_verify` for WebSocket** (default false) is a *plain* typed setting
+   (`plainSettingsSchemas`), so no credential envelope is demanded. `HasTypedSettings` routes the
+   API's create, test and update through `PrepareTypedSettings`. Migration 00113 sets it for
+   existing wss/https monitors and prefixes `ws://` onto scheme-less targets, without bumping
+   `execution_revision`, because probe behaviour is unchanged. Two more migrations keep existing
+   rows probing as before, under the same no-bump rule:
+   - **00114** prefixes `/` onto a relative RabbitMQ management path.
+   - **00115** trims ASCII whitespace (CR, LF, tab, VT, FF, space) from the edges of the targets
+     of the six types whose old prober trimmed them: websocket, ssh, redis, rabbitmq, postgres
+     and mysql.
+     - It also repairs a websocket row that the first 00113 doubled into `ws://wss://…`.
+     - It removes control bytes from the fragment of an http target. That is the one place they
+       ever probed: `url.Parse` checks them only before `#`, and the fragment is never sent.
+   - **00113** trims the same set its prober trimmed (second external review of iter-0210). A
+     one-argument `btrim` trims only spaces. VT is written `\x0b`, because in a Postgres string
+     literal `\v` is the letter v.
+3. **One redirect predicate** (`internal/prober/redirect.go`): `chainLeftOrigin` compares every hop
+   with `via[0]` (scheme, lower-cased host, port), and leaving is sticky. The Runner's clients
+   (http, promql, rabbitmq management including the skip-verify branch, synthetic) use
+   `runnerCheckRedirect`. It applies the library's 10-hop limit and:
+   - refuses a non-http(s) scheme, userinfo, an `https → http` downgrade, and any cross-origin
+     307/308 with a body;
+   - strips every header of the first request once the chain has left its origin;
+   - removes `Referer` on every hop;
+   - does not count the strict `http:80 → https:443` upgrade of the first host as leaving.
+
+   The canary keeps D3c1 with three amendments, written into D-0218 and `func-async-canary.md`:
+   - (a) the first-origin comparison, sticky, with no upgrade exception;
+   - (b) a refusal for a cross-origin 307/308 whose body or multipart fields resolved a
+     `secret_ref` (`canaryRenderValue` reports it recursively);
+   - (c) `Referer` removed.
+
+   All refusal reasons start with `redirect refused:` and carry no URL.
+4. **A token never mints a token.** API token create and delete answer 403 to any `ViaToken`
+   principal. The machine tooltip and the runbook stop recommending an API token for instance-wide
+   automation.
+
+**Consequences.**
+- WebSocket monitors on self-signed endpoints keep working through the migration. A
+  Monitoring-as-Code bundle must declare `tls_skip_verify`, or the next apply resets it (CHANGELOG).
+- A bundle in Git is not migrated. One with a relative RabbitMQ `path`, a scheme-less WebSocket
+  target, or a target with a control byte is refused at decode (`domain_invalid`, the rule named)
+  until it is edited.
+- A synthetic step that POSTed through a cross-origin 307 is now refused and must name the final
+  origin.
+- Automation that issued tokens with a token gets 403.
+- Two canary header tests drop the body's `token` field, as the spec requires. The same-origin,
+  downgrade and userinfo canary tests are unchanged.

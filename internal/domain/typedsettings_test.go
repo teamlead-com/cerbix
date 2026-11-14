@@ -1,6 +1,36 @@
 package domain
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
+
+// sec-hardening-2 H-2 fix 3: `tls_skip_verify` is a PLAIN typed setting of the websocket type — no
+// credential schema, so no credential envelope is demanded for every WebSocket monitor.
+func TestPrepareTypedSettingsWebSocket(t *testing.T) {
+	if !HasTypedSettings(MonitorWebSocket) || CredentialedType(MonitorWebSocket) || RequiresExecutionEnvelope(Monitor{Type: MonitorWebSocket, Config: map[string]string{"tls_skip_verify": "true"}}) {
+		t.Fatal("websocket must have plain typed settings, no credential schema, and no envelope")
+	}
+	got, err := PrepareTypedSettings(MonitorWebSocket, map[string]string{"tls_skip_verify": "true"}, SurfaceAPI)
+	if err != nil || got["tls_skip_verify"] != "true" || len(got) != 1 {
+		t.Fatalf("true: %v (%v)", got, err)
+	}
+	if got, err := PrepareTypedSettings(MonitorWebSocket, map[string]string{"tls_skip_verify": "false"}, SurfaceFile); err != nil || got["tls_skip_verify"] != "false" {
+		t.Fatalf("false: %v (%v)", got, err)
+	}
+	if _, err := PrepareTypedSettings(MonitorWebSocket, map[string]string{"tls_skip_verify": "yes"}, SurfaceAPI); err == nil {
+		t.Fatal(`"yes" accepted`)
+	}
+	if _, err := PrepareTypedSettings(MonitorWebSocket, map[string]string{"other": "x"}, SurfaceAPI); !errors.Is(err, ErrUnknownSetting) {
+		t.Fatalf("unknown key: %v, want ErrUnknownSetting", err)
+	}
+	if got, err := PrepareTypedSettings(MonitorWebSocket, nil, SurfaceAPI); err != nil || len(got) != 0 {
+		t.Fatalf("empty: %v (%v)", got, err)
+	}
+	if HasTypedSettings(MonitorComposite) || HasTypedSettings(MonitorSynthetic) {
+		t.Fatal("composite and synthetic keep their own config paths")
+	}
+}
 
 // D-0215: promql's credential is OPTIONAL, which the tri-state requirement cannot express in
 // one variant — so the schema is a discriminator with a DEFAULT, and these cases pin what that
@@ -123,14 +153,17 @@ func TestMonitorTargetRejectsURLUserinfo(t *testing.T) {
 		})
 	}
 
-	for name, target := range map[string]string{
-		"plain https":   "https://prom.example:9090",
-		"host and port": "prom.example:9090",
-		"bare host":     "prom.example",
-		"path with @":   "https://prom.example/api/v1/query?query=up@rate",
+	// The non-URL targets are a tcp monitor's: an http target needs an http(s) scheme since the
+	// external review of iter-0210 (P2-2) — net/http never probed a scheme-less one — and the point
+	// here is only that url.Parse does not read a userinfo into host:port or a bare host.
+	for name, m := range map[string]Monitor{
+		"plain https":   base("https://prom.example:9090"),
+		"host and port": {ProjectID: "p1", Name: "m", Type: MonitorTCP, Target: "prom.example:9090", IntervalSeconds: 60, TimeoutSeconds: 5},
+		"bare host":     {ProjectID: "p1", Name: "m", Type: MonitorICMP, Target: "prom.example", IntervalSeconds: 60, TimeoutSeconds: 5},
+		"path with @":   base("https://prom.example/api/v1/query?query=up@rate"),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := base(target).Validate(); err != nil {
+			if err := m.Validate(); err != nil {
 				t.Fatalf("legitimate target rejected: %v", err)
 			}
 		})

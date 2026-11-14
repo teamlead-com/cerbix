@@ -281,7 +281,6 @@ type resetTok struct {
 	used    bool
 }
 
-
 func (f *fakeStore) CreatePasswordResetToken(_ context.Context, userID, tokenHash string, expiresAt time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -414,6 +414,22 @@ headers those are and the HTTP client does not. Proven by a submit that redirect
 public host, asserting the target receives no binding header at all — `x-api-key` named explicitly in
 the test, because it is the one a default would have let through.
 
+**D3c1 amended (sec-hardening-2 H-13, D-0277, iteration 2):**
+- **(a) The origin compared is the FIRST request's, and leaving it is sticky.** It is no longer the
+  previous hop's. `net/http` re-copies the first request's headers onto every hop before the
+  redirect policy runs. So on `A → B/1 → B/2` a header deleted on hop 1 came back on hop 2, whose
+  origin equals hop 1's, and reached `B/2`. Every hop is now compared with the first request
+  (scheme, host, port), and `A → B → A` stays "left".
+- **(b) A new hop refusal.** A cross-origin 307/308 whose submit body or multipart fields resolved a
+  `secret_ref` — at any depth — is refused. The stage fails with `redirect refused: secret-bearing
+  body to another origin`. It is refused rather than sent body-less, because a canary that succeeds
+  without what it was told to send is a false UP. A body without a secret still follows: an upload
+  redirected with 307 to a storage host is a legitimate flow.
+- **(c) The library's `Referer` is removed on every hop.**
+
+The stripped header set (`canaryBindingBacked`), the hop limit (`canaryMaxRedirects = 3`) and
+`CanaryHopViolation` are unchanged.
+
 **D3c — completion NEVER inherits submit's headers, and a credential cannot cross hosts (P0, review
 round 2).** Revision 3 said nothing about completion headers, and silence there is a credential
 forwarding bug waiting to be written: the completion URL is a different URL, and in general a

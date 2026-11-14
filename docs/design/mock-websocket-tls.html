@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WebSocket TLS control</title>
+<style>
+/* Tokens VERBATIM from frontend/src/style.css. No new colour, no new control: the checkbox is the
+   "Skip certificate verification" control redis/mysql/rabbitmq already use in NewMonitorView.vue. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-weak:rgba(88,84,242,.10);
+  --down:#e0393f; --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-weak:rgba(125,121,255,.15);
+    --down:#ff5f64; --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-weak:rgba(125,121,255,.15);
+  --down:#ff5f64; --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.wrap{max-width:880px; margin:0 auto; padding:24px 16px 64px}
+h1{font-size:20px; margin:0 0 4px} .crumb{color:var(--ink-3); font-size:12px}
+.switch{display:flex; flex-wrap:wrap; gap:6px; margin:18px 0}
+.switch button{border:1px solid var(--border); background:var(--surface); color:var(--ink-2);
+  border-radius:6px; padding:6px 10px; font-size:12.5px; cursor:pointer}
+.switch button[aria-pressed="true"]{background:var(--accent-weak); color:var(--accent); border-color:var(--note-border)}
+.card{background:var(--surface); border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow)}
+.card .head{padding:14px 18px; border-bottom:1px solid var(--border)}
+.card .head h2{font-size:14px; margin:0} .card .head p{margin:2px 0 0; color:var(--ink-3); font-size:12.5px}
+.body{padding:16px 18px; display:grid; grid-template-columns:1fr 1fr; gap:14px}
+@media (max-width:560px){ .body{grid-template-columns:1fr} .span2{grid-column:auto !important} }
+.span2{grid-column:span 2}
+label.f{display:flex; flex-direction:column; gap:6px} label.f span{font-size:12px; font-weight:600; color:var(--ink-2)}
+input[type=text]{width:100%; border:1px solid var(--border); background:var(--surface-2); color:var(--ink);
+  border-radius:4px; padding:8px 10px; font-size:13px}
+.hint{font-size:11.5px; color:var(--ink-3); margin:0}
+.chk{display:flex; align-items:center; gap:8px; font-size:12.5px}
+.new{outline:1px dashed var(--note-border); outline-offset:6px; border-radius:4px}
+.note{margin-top:12px; padding:10px 12px; border:1px solid var(--note-border); background:var(--note-bg);
+  border-radius:6px; font-size:12.5px; color:var(--ink-2)}
+table{width:100%; border-collapse:collapse; font-size:13px}
+td,th{padding:11px 16px; border-bottom:1px solid var(--border); text-align:left}
+th{font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-3); font-weight:600}
+.kind{display:inline-block; border-radius:999px; padding:1px 8px; font-size:10.5px; font-weight:600;
+  background:var(--inset); color:var(--ink-2); border:1px solid var(--border-strong); margin-left:6px}
+.btn{height:26px; border:1px solid var(--border); background:transparent; color:var(--ink-2); border-radius:4px;
+  padding:0 9px; font-size:12px} .btn.off{opacity:.45; cursor:not-allowed}
+.tip{display:inline-block; margin-top:8px; background:var(--ink); color:var(--surface); border-radius:4px;
+  padding:5px 8px; font-size:11.5px}
+[hidden]{display:none !important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>New monitor · WebSocket</h1>
+  <div class="crumb mono">sec-hardening-2 iteration 2 · H-2 (TLS verified by default) · H-1 fix 8 (tooltip wording)</div>
+
+  <div class="switch" role="group" aria-label="State">
+    <button type="button" data-s="ws" aria-pressed="true">ws:// target</button>
+    <button type="button" data-s="wss" aria-pressed="false">wss:// target</button>
+    <button type="button" data-s="wssOn" aria-pressed="false">wss:// · skip checked</button>
+    <button type="button" data-s="users" aria-pressed="false">Users · machine tooltip</button>
+  </div>
+
+  <section class="card" id="editor">
+    <div class="head"><h2>Target</h2><p>ws:// or wss:// endpoint.</p></div>
+    <div class="body">
+      <label class="f span2"><span>Endpoint</span>
+        <input id="target" class="mono" type="text" value="ws://chat.internal/ws"></label>
+      <div class="span2 new" id="tlsrow" hidden>
+        <label class="chk"><input id="skip" type="checkbox"> Skip certificate verification</label>
+        <p class="hint" style="margin-top:6px">Accept self-signed or otherwise unverifiable certificates. Off by default; existing wss monitors were switched on at upgrade so none went DOWN.</p>
+      </div>
+    </div>
+  </section>
+  <div class="note" id="editorNote"><b>Mock notes.</b> The control shows only when the endpoint is
+    <span class="mono">wss://</span> or <span class="mono">https://</span>; a plaintext
+    <span class="mono">ws://</span> endpoint has no TLS to verify, so nothing is shown. There is no
+    separate "TLS" toggle as redis/rabbitmq have: for WebSocket the scheme decides TLS. Unchecked, a
+    self-signed endpoint goes DOWN with a <span class="mono">tls:</span> message; checked, it is sent as
+    <span class="mono">tls_skip_verify: "true"</span>.</div>
+
+  <section class="card" id="users" hidden>
+    <div class="head"><h2>Users</h2><p>Everyone with an account on this instance.</p></div>
+    <table>
+      <thead><tr><th>User</th><th>Sign-in</th><th style="text-align:right">Actions</th></tr></thead>
+      <tbody>
+        <tr><td><b>ci-deployer<span class="kind">machine</span></b><br><small class="mono" style="color:var(--ink-3)">9f1c7a2e4b…@clients</small></td>
+          <td>OIDC</td>
+          <td style="text-align:right"><button class="btn off" type="button" aria-disabled="true"
+            title="A machine identity cannot be a global admin — global administration is for people; automation gets organization or project rights">Grant admin</button><br>
+            <span class="tip">A machine identity cannot be a global admin — global administration is for people; automation gets organization or project rights</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+  <div class="note" id="usersNote" hidden><b>Mock notes.</b> Only the tooltip copy changes. The old text
+    said "use an API token", which pointed to the wrong tool: an API token is bound to one organization and
+    never carries global admin.</div>
+</div>
+<script>
+(function () {
+  var target = document.getElementById("target"), row = document.getElementById("tlsrow"), skip = document.getElementById("skip");
+  var show = {
+    ws:    function () { target.value = "ws://chat.internal/ws"; skip.checked = false; ed(true); },
+    wss:   function () { target.value = "wss://chat.internal/ws"; skip.checked = false; ed(true); },
+    wssOn: function () { target.value = "wss://chat.internal/ws"; skip.checked = true; ed(true); },
+    users: function () { ed(false); }
+  };
+  function ed(on) {
+    document.getElementById("editor").hidden = !on; document.getElementById("editorNote").hidden = !on;
+    document.getElementById("users").hidden = on; document.getElementById("usersNote").hidden = on;
+    sync();
+  }
+  function sync() { row.hidden = !/^(wss|https):\/\//i.test(target.value.trim()); }
+  target.addEventListener("input", sync);
+  document.querySelectorAll(".switch button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      document.querySelectorAll(".switch button").forEach(function (x) { x.setAttribute("aria-pressed", "false"); });
+      b.setAttribute("aria-pressed", "true"); show[b.getAttribute("data-s")]();
+    });
+  });
+  sync();
+})();
+</script>
+</body>
+</html>

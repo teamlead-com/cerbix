@@ -1,7 +1,9 @@
 # sec-hardening-2 — the 2026-11 security findings: authentication boundaries, request forgery, probe input, and the public port
 
 > **STATUS: revision 7 — APPROVED by the OWNER, 2026-11-13. Iteration 1 (H-1, H-5, H-6) implemented in
-> [iter-0209](../iterations/iter-0209.md) (D-0276); iterations 2–4 not yet implemented. The two owner questions are answered (§8).**
+> [iter-0209](../iterations/iter-0209.md) (D-0276); iteration 2 (H-2, H-13, H-1 fix 8) in
+> [iter-0210](../iterations/iter-0210.md) (D-0277; H-2 amended 2026-11-14 by two owner rulings and
+> the external review of that iteration); iterations 3–4 not yet implemented. The two owner questions are answered (§8).**
 > Six independent review rounds: **4/6/5/1**, **1/5/2/1**, **0/3/3/1**, **0/1/3/0**, **0/1/1/0**,
 > **0/0/1/0** (P0/P1/P2/P3). Round 6 found no P0 or P1, called the design of all four iterations
 > complete, and stated that once its one mechanical P2 was written in — it is — the spec needs no
@@ -33,7 +35,7 @@
 | # | Sev | Finding | Where | Amends |
 | --- | --- | --- | --- | --- |
 | H-1 | P0 | A bearer JWT minted by the realm for ANY client authenticates as the human whose `sub` it carries | `internal/auth/auth.go:227`, `internal/auth/middleware.go` (pre-iter-0209 `principalFromJWT`, now `internal/auth/machine.go`), `internal/store/users.go:35-67` | D-0034 |
-| H-2 | P0 | The WebSocket prober writes an unvalidated target into a raw socket and accepts any TLS certificate; the RabbitMQ management URL is built by concatenation from `config.path` | `internal/prober/websocket.go:44-62`, `internal/prober/websocket.go:98-126`, `internal/domain/monitor.go:354`, `internal/prober/rabbitmq.go:74-83` | — |
+| H-2 | P0 | The WebSocket prober writes an unvalidated target into a raw socket and accepts any TLS certificate; the RabbitMQ management URL is built by concatenation from `config.path` | pre-iter-0210 `wsTarget` and the concatenated handshake in `internal/prober/websocket.go`, `rabbitMgmtURL` in `internal/prober/rabbitmq.go`; the userinfo check at `internal/domain/monitor.go:360`; the parsers are now in `internal/domain/targets.go` | — |
 | H-3 | P1 | Reads gated by `InOrg` alone ignore a token's action allow-list and return `unlisted_token` to every reader | `internal/api/handlers_statuspage.go:55-62`, `internal/api/handlers_feed.go:19-25`, `internal/authz/authz.go:230-240`, `internal/api/handlers.go:51-60` | D-0139 preamble |
 | H-4 | P1 | No request-forgery defence beyond `SameSite=Lax`; a state-changing `GET /auth/logout` | `internal/auth/auth.go:374-384`, `internal/api/handlers.go:543-557`, `internal/auth/handlers.go:30-31` | — |
 | H-5 | P1 | A password reset does not revoke the account's sessions | `internal/store/users_reset.go`, `internal/auth/handlers_reset.go:70-96` | D-0139 item 3 |
@@ -41,7 +43,7 @@
 | H-13 | P1 | A credential header follows a redirect to another host: always for the shared prober client (synthetic `{{secret:…}}` headers), and on any two-hop chain for the canary prober, whose guard compares with the previous hop while `net/http` restores headers from the first | `internal/prober/prober.go:63-68`, `internal/prober/synthetic.go:68-72`, `internal/prober/canary.go:196-207` | D-0218 (D3c1: three points, listed in H-13) |
 | H-9a | P1 | The unlisted page's `?token=` leaks through `Referer` to any external link (no `Referrer-Policy`) | `internal/web/web.go:28-55`, `frontend/src/views/PublicStatusView.vue` | — |
 | H-7 | P2 | A TOTP code is accepted again inside its ±1-step window | `internal/totp/totp.go:60-73`, `internal/store/users_totp.go` | — |
-| H-8 | P2 | No `IdleTimeout`/`ReadHeaderTimeout`; three probers read from a peer with no length bound | `internal/httpsrv/server.go:26-32`; `internal/prober/ssh.go:38`, `internal/prober/redis.go:55`, `internal/prober/websocket.go:66` | — |
+| H-8 | P2 | No `IdleTimeout`/`ReadHeaderTimeout`; three probers read from a peer with no length bound | `internal/httpsrv/server.go:26-32`; `internal/prober/ssh.go:42`, `internal/prober/redis.go:59`, `internal/prober/websocket.go:92` | — |
 | H-9b | P2 | No `X-Content-Type-Options`, `X-Frame-Options` or CSP on any surface | `internal/web/web.go:28-55`, `frontend/index.html` | — |
 | H-10 | P2 | `branding.support_url` accepts any string and is rendered as `<a :href>` | `internal/domain/settings.go:35-53`, `frontend/src/views/LoginView.vue` | — |
 | H-11 | P2 | `/metrics` and the raw `readyz` error text are unauthenticated on the application port | `internal/httpsrv/server.go:60-74` | — |
@@ -193,6 +195,18 @@ and its Basic-Auth credentials — to another host.
    host, numeric port, no whitespace or control bytes. `rabbitmq` management mode: `path` must start
    with `/` and contain no control byte, `@`, or `?`-less authority trick; the URL is assembled with
    `url.URL{…}`, not concatenation.
+   - **Amended 2026-11-14 (OWNER, iter-0210 ruling 1): the port is optional.** A socket target is
+     `host` or `host:port`, because these types default the port and the UI documents that. When a
+     port is written it is numeric, 1–65535. Requiring one would have refused every bare-host
+     monitor.
+   - **Amended 2026-11-14 (external review of iter-0210):**
+     - The management `path` starts with a single `/` in the prober too. A relative path is refused,
+       not silently prefixed; migration `00114` writes the `/` into existing rows.
+     - The management target has ONE parser, `domain.ParseRabbitMgmtTarget`, for the write surfaces
+       and the prober. Its rules: control bytes judged on the raw value; `http`/`https`
+       case-insensitive; a host; a written port 1–65535; no userinfo, query or fragment;
+       `tls: "true"` demands `https`.
+     - The path keeps its percent-encoding byte for byte (`%2F` is RabbitMQ's default vhost).
 3. **TLS option, under the name the tree already uses: `tls_skip_verify`** (`redis`, `mysql`,
    `rabbitmq`, `internal/domain/credsettings.go`, `NewMonitorView.vue`). Default `false`. It is
    registered as a **plain typed setting** for `MonitorWebSocket` in `PrepareTypedSettings`
@@ -204,6 +218,28 @@ and its Basic-Auth credentials — to another host.
 4. **Migration:** `tls_skip_verify = "true"` only for existing `websocket` monitors whose target
    starts `wss://` or `https://`, so none flips DOWN on upgrade; plaintext ones are untouched. The
    CHANGELOG note tells MaC users to add the key to their bundle, or the next apply resets it.
+   - **Amended 2026-11-14 (OWNER, iter-0210 ruling 2): `ws://` for a target without a scheme.** The
+     old prober dialled such a target as `ws://`. Migration `00113` writes that scheme into the
+     existing rows, and every new write requires a scheme.
+5. **Added 2026-11-14 (external review of iter-0210): every other target.**
+   - A control byte in the raw target is refused for every type that probes one.
+   - `http` and `promql` targets must parse (a parse failure is a refusal, not a skipped userinfo
+     check), with an `http`/`https` scheme and a host. A `promql` base URL carries no query or
+     fragment.
+   - `promqlProber` re-parses its target and builds `/api/v1/query` as a `url.URL`, keeping the
+     base path.
+   - The userinfo rule of D-0145 stays a write rule, so a legacy row keeps probing until its next
+     edit.
+   - Migration `00115` trims ASCII whitespace from the edges of the targets whose old prober
+     trimmed them (`websocket`, `ssh`, `redis`, `rabbitmq`, `postgres`, `mysql`), so none flips
+     DOWN or answers 400.
+   - **Amended 2026-11-14 (second external review of iter-0210):**
+     - The `http` prober parses its target before any request.
+     - A written port must be 1–65535 for `http` and `promql`.
+     - No probe message carries a request URL.
+     - `00113` trims what its prober trimmed. `00115` repairs targets the first `00113`
+       doubled, and removes control bytes from an `http` fragment.
+     - A base path ending in an escaped slash keeps it.
 
 **Invariant S2.** No prober writes a byte of `monitor.target` or `monitor.config` to a socket or into
 a URL that did not pass through that protocol's parser; a hostile value is refused at all three write
@@ -434,7 +470,7 @@ and stays so:
   extracted from an earlier response (`internal/prober/synthetic.go:89-95`): a session or refresh
   token obtained with the secret, with no placeholder to mark it. So the Runner's client refuses a
   cross-origin 307/308 with any body. Of its types only `synthetic` sends one (the `http` monitor
-  sends none, `internal/prober/prober.go:188`), and a scenario step that must POST to another
+  sends none, `internal/prober/prober.go:195`), and a scenario step that must POST to another
   origin names that origin in its own `url`.
 - **The canary keeps the narrow rule**, because there the fact is known where the request is built:
   the stored document holds a marker and the executor resolves it. `canaryRenderValue` marks the
@@ -457,10 +493,10 @@ and stays so:
   `token` field from the body, and the secret-in-body case becomes a new test that expects the
   refusal. The other three redirect tests (same-origin, scheme downgrade, userinfo) are untouched.
 - The new refusal's reason starts with `redirect refused:` and contains no `://`, like
-  `CanaryHopViolation`'s — `failureClass` (`internal/prober/failure.go:107`) drops any text with a
+  `CanaryHopViolation`'s — `failureClass` (`internal/prober/failure.go:112`) drops any text with a
   URL in it, and the operator would see an unclassified failure.
 - `rabbitmqProber` builds a second `http.Client` when `tls_skip_verify` is set
-  (`internal/prober/rabbitmq.go:86-95`) and copies only `Transport` and `Timeout`; it must copy
+  (`internal/prober/rabbitmq.go:91-100` since iteration 2, which made it copy `CheckRedirect`) and copies only `Transport` and `Timeout`; it must copy
   `CheckRedirect`, or that branch escapes the rule entirely.
 
 **Invariant S13.** On any hop of any chain: no header the first request carried (canary: no
@@ -553,7 +589,7 @@ response headers of the page and feed routes, and in E2E on a click of the suppo
 | # | Scope | Migration | SPA | Notes |
 | --- | --- | --- | --- | --- |
 | 1 | H-1, H-5, H-6 | `users.kind` + backfill; `oidc_settings.machine_clients` | OIDC form field, `kind` badge in member lists (mock delta) | OpenAPI + `gen:api`; `mail.spec.ts` moved to a dedicated user; **CHANGELOG upgrade note** (machine clients) |
-| 2 | H-2, H-13 (canary prober included), H-1 fix 8 | `tls_skip_verify` for existing `wss`/`https` WebSocket monitors | WebSocket TLS control (existing pattern); `Grant admin` tooltip wording | **CHANGELOG upgrade notes** (MaC bundles; a token no longer issues tokens) |
+| 2 | H-2, H-13 (canary prober included), H-1 fix 8 | `tls_skip_verify` for existing `wss`/`https` WebSocket monitors, `ws://` for scheme-less ones (`00113`); the RabbitMQ management path's `/` (`00114`); edge whitespace of six types' targets (`00115`) | WebSocket TLS control (existing pattern); `Grant admin` tooltip wording | **CHANGELOG upgrade notes** (MaC bundles; a token no longer issues tokens) |
 | 3 | H-3, H-4, H-9a, H-14 | — | status-page list links, `tokenActions.ts`, `rel` on the support link | OpenAPI (`has_unlisted_token`, 403/415), E2E on the live stack |
 | 4 | H-7, H-8, H-9b, H-10, H-11, H-12 | `users.totp_last_step` | `index.html` theme script, logout call in `session.ts` | OpenAPI + `gen:api` (logout answers 200 JSON; `docs/runbook.md` and `sec-authn-authz.md` updated); prod config example (`ops_listen`); CSP enforced one release after report-only |
 

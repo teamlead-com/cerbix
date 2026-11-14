@@ -1,11 +1,12 @@
 # func-recovery-threshold — a monitor leaves DOWN only after a confirmed run of successes (FR-043 / NFR-036)
 
-> **STATUS: revision 4 — DRAFT, not approved.** Revision 1 (2026-11-14) was written from an owner
+> **STATUS: revision 5 — DRAFT, not approved.** Revision 1 (2026-11-14) was written from an owner
 > discussion and an independent code check of two design questions. Revision 2 (2026-11-14) answers
 > the first external review of that draft — CHANGES REQUIRED, 1 P0 / 6 P1 / 3 P2 / 1 P3. Revision 3
 > (2026-11-14) answers the second review, made against `main` at `58b5a32` — CHANGES REQUIRED,
 > 0 P0 / 3 P1 / 4 P2 / 1 P3. Revision 4 (2026-11-14) answers the third, made at `caf34f8` — CHANGES
-> REQUIRED, 0 P0 / 1 P1 / 0 P2 / 2 P3. Every finding of all three rounds
+> REQUIRED, 0 P0 / 1 P1 / 0 P2 / 2 P3. Revision 5 (2026-11-15) answers the confirming pass, made at
+`6fcc576` — 0 P0 / 0 P1 / 1 P2 / 0 P3, a test-matrix wording only. Every finding of all four rounds
 > was checked against the code and its disposition is in §11. Three points carry an explicit owner
 > answer of 2026-11-14 and are marked **OWNER**. Everything else the author decided is marked
 > **AUTHOR'S CALL**; the six that needed the owner were confirmed on 2026-11-14 (§10).
@@ -117,7 +118,9 @@ The clock is read **after the monitor's row lock is held**: `statement_timestamp
 that starts once the row is locked — not `now()`, which is the transaction's start and is taken
 before the wait, and not the statement that acquires the lock, whose own timestamp is taken before
 the wait as well. `RecordScheduledResult`, `RecordPushResult` and `RecordDeadmanResult` already take
-the row with a `SELECT … FOR UPDATE` of their own before they reach `recordCheckStatusTx`;
+the row with a `SELECT … FOR UPDATE` of their own before they reach `recordCheckStatusTx` (the
+latter two act only on push monitors, whose threshold is 1 under D8, and `RecordDeadmanResult`
+records failures only, so neither ever stamps `recovery_started_at`);
 `Store.RecordCheckStatus`, the exported wrapper, does not, and gains the same locking statement.
 `AddIncidentUpdateBySystem` dates `resolved_at` this way for the same reason.
 
@@ -459,7 +462,7 @@ matter to this change; the migration is still run in both.
 | Store, update | Lowering the threshold mid-run, then the next success confirms and the sentence reads `N/M` with `N > M` (I3, I11) |
 | Store, migration | Existing rows get 1 / 0 / NULL; both storage modes |
 | Domain | Range and type rules (I10); explicit 0 refused; field classification |
-| Store, clock | While another transaction holds the monitor's row, a first success is submitted through each of the four entry points and blocks; the database clock is read; the row is released. The stamped first-OK is not earlier than that reading — with `now()`, or with the timestamp of the locking statement, it is (I17). On the sequential path `RecordScheduledResult` → `Reconciler.Reconcile` → `RecordScheduledResult` the first-OK is not earlier than the incident's `started_at` |
+| Store, clock | While another transaction holds the monitor's row, a first success on a monitor with a threshold above 1 is submitted through both entry points that can start a run — `RecordScheduledResult` and `Store.RecordCheckStatus` — and is observed waiting on the row lock in `pg_stat_activity`; only then the database clock is read; the row is released. The stamped first-OK is not earlier than that reading — with `now()`, or with the timestamp of the locking statement, it is (I17). On the sequential path `RecordScheduledResult` → `Reconciler.Reconcile` → `RecordScheduledResult` the first-OK is not earlier than the incident's `started_at` |
 | Store, constraints | The CHECKs refuse 0, 11, and a value above 1 on `push` and `composite`, on insert and on update (I10) |
 | API | Create and update refuse the same inputs with a message that names the rule; update of an existing `push`/`composite` to a value above 1 refused; an update that omits the field keeps the stored value (I10). Test-connection: every body accepted today is still accepted, and `recovery_threshold` is refused as an unknown field; `TestTestConnectionBodySchemaIsWhatTheServerDecodes` stays green with `TestMonitorSpec` untouched (I16) |
 | File provider | A bundle with the field, without it, out of range, `0`, and above 1 on `push`; the hash of a bundle without the key and of one with `recovery_threshold: 1` equals the pre-change hash, and 1 ↔ 3 is drift in both directions (I15) |
@@ -609,6 +612,14 @@ found no production path that builds a monitor in process and is now refused.
 | P1-1 — I17 promised a first-OK not earlier than `incidents.started_at`, but the auto-incident is opened after the verdict's commit, in its own transaction, without the monitor's row; and `Store.RecordCheckStatus` reads the clock in the statement that takes the lock | **Confirmed**, both parts. The reviewer's variant A is taken: D6 states what the row lock does and does not order, I17 and the clock test are rebuilt on the verdict's commit, the wrapper locks first. Variant B — dating the incident with the verdict's clock — is **not** adopted: it changes `incidents.started_at` at threshold 1 and breaks I1 |
 | P3-1 — §7 expected `recovery_threshold: 1` on the composite parent where §8 says the key is omitted | **Accepted.** §7 follows §8: omitted |
 | P3-2 — the seeded monitors of `internal/api/*_test.go` were missing from the fixture list; D3 still said "a 400 on every write surface" | **Confirmed.** §4.5, §7, D3 |
+
+**Confirming pass on revision 4 (2026-11-15, against `main` at `6fcc576`): CHANGES REQUIRED,
+P0 0 / P1 0 / P2 1 / P3 0.** The pass confirmed the three findings of review 3 closed and found no
+contradiction between D6 and I1, I9, I14 or between §7 and §8; it asked for no further pass.
+
+| Finding | Disposition |
+| --- | --- |
+| P2-1 — the clock test of §7 named four entry points, two of which cannot stamp a first-OK (`RecordDeadmanResult` records failures only; `RecordPushResult` acts on push monitors, threshold 1), and read the clock without waiting for the lock wait to be visible | **Confirmed.** §7 names the two reachable entry points and the `pg_stat_activity` barrier; D6 says why the other two never stamp |
 
 ## 12. Documents the implementation updates
 

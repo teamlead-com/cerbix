@@ -860,7 +860,7 @@ onMounted(async () => {
             v-if="branding.supportUrl"
             :href="branding.supportUrl"
             target="_blank"
-            rel="noopener"
+            rel="noopener noreferrer"
             class="mb-[6px] inline-block text-ink-2 underline decoration-border-strong underline-offset-2 hover:text-accent"
             >Support</a
           >

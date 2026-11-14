@@ -28,7 +28,15 @@ func (a *Authenticator) Routes(mux *http.ServeMux) {
 		mux.Handle("POST /auth/local/reset/confirm", capBody(a.ResetConfirmHandler))
 	}
 	mux.HandleFunc("POST /auth/logout", a.LogoutHandler)
-	mux.HandleFunc("GET /auth/logout", a.LogoutHandler)
+	// No GET changes state (sec-hardening-2 H-4 fix 3): a GET /auth/logout — an <img src> on any
+	// page could fire it — is answered 405 explicitly. Merely not registering it is not enough: the
+	// application mux ends in the SPA catch-all, which would answer it 200 with index.html.
+	mux.HandleFunc("/auth/logout", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Allow", http.MethodPost)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed"})
+	})
 }
 
 // localAuthMaxBody caps the body of every unauthenticated /auth/local/* request

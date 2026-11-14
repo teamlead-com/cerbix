@@ -11,6 +11,17 @@ info:
     organizations/projects they are authorized for (non-members receive 404;
     insufficient in-org role receives 403).
 
+    Request forgery (sec-hardening-2 H-4): an unsafe request (POST, PUT, PATCH, DELETE) that a
+    browser marks as not same-origin — by `Sec-Fetch-Site`, or without it by an `Origin` whose
+    host differs from `Host` — is refused with 403 before any handler runs, on `/api/*` and
+    `/auth/*` alike. Exempt: a request to `/api/*` presenting `Authorization: Bearer …` (a token
+    is not an ambient credential), the public routes under `/api/v1/public/`, and the agent
+    routes under `/api/v1/agent/`. A request carrying neither header (curl, the CLI) is not a
+    browser and passes. A request that presents a Bearer credential is authenticated by it alone:
+    its session cookie is never read, so a missing, empty, unknown or duplicated Bearer is 401.
+    An operation that decodes a JSON request body answers 415 unless the body is sent as
+    `Content-Type: application/json`; body-less requests need no content type.
+
 servers:
   - url: /
     description: Same-origin (SPA is served by the API binary)
@@ -50,7 +61,8 @@ paths:
         The body is capped at 4 KiB and a password at 1024 bytes. Three limiters
         answer 429 (all derived from local.login_rate_limit_per_minute = L): L per
         client IP per minute (checked before the body is read), min(L, max(2, (L+1)/2)) per (IP,
-        email), and 5L failed logins per email.
+        email), and 5L failed logins per email. The body is sent as `Content-Type:
+        application/json`; any other type is 415 before every limiter, so it spends no attempt.
       requestBody:
         required: true
         content:
@@ -64,6 +76,8 @@ paths:
               schema: { type: object, properties: { ok: { type: boolean } } }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/CrossOriginRefused' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429': { description: Too many attempts. }
 
   /auth/local/reset/request:
@@ -93,6 +107,8 @@ paths:
             application/json:
               schema: { type: object, properties: { ok: { type: boolean } } }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/CrossOriginRefused' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429': { description: Too many requests. }
 
   /auth/local/reset/confirm:
@@ -118,6 +134,8 @@ paths:
       responses:
         '204': { description: Password changed; every session of the account ended. }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/CrossOriginRefused' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429': { description: Too many requests. }
 
   /auth/config:
@@ -166,11 +184,15 @@ paths:
       summary: Revoke the session and clear the cookie
       responses:
         '302': { description: Redirect to the post-logout path. }
+        '403': { $ref: '#/components/responses/CrossOriginRefused' }
 
   /api/v1/me:
     get:
       tags: [me]
       summary: Current user and memberships
+      description: >
+        Describes a user: a principal authenticated by a token (an API token or an OIDC machine
+        identity) gets 403.
       responses:
         '200':
           description: OK
@@ -178,6 +200,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Me' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/v1/version:
     get:
@@ -207,6 +230,7 @@ paths:
       responses:
         '204': { description: Password changed; the user's other sessions ended. }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '500': { description: Internal error; nothing changed. }
 
   /api/v1/me/totp/enroll:
@@ -245,6 +269,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/TOTPEnableResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/me/totp/disable:
     post:
@@ -259,11 +284,12 @@ paths:
       responses:
         '204': { description: Two-factor disabled. }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/organizations:
     get:
       tags: [organizations]
-      summary: List organizations visible to the caller
+      summary: List organizations visible to the caller (a token — its own organization, when its allow-list names `org:read` or `project:read`; else empty)
       responses:
         '200':
           description: OK
@@ -286,18 +312,20 @@ paths:
               schema: { $ref: '#/components/schemas/Organization' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/organizations/{orgID}:
     parameters: [ { $ref: '#/components/parameters/OrgID' } ]
     get:
       tags: [organizations]
-      summary: Get an organization
+      summary: Get an organization (any human member; a token needs `org:read` or `project:read` in its allow-list, else 403)
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Organization' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     delete:
       tags: [organizations]
@@ -321,13 +349,14 @@ paths:
     parameters: [ { $ref: '#/components/parameters/OrgID' } ]
     get:
       tags: [projects]
-      summary: List projects of an organization visible to the caller
+      summary: List the projects on which the caller holds `project:read` (403 to a member holding it nowhere in the org)
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema: { type: array, items: { $ref: '#/components/schemas/Project' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     post:
       tags: [projects]
@@ -345,6 +374,7 @@ paths:
               schema: { $ref: '#/components/schemas/Project' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/organizations/{orgID}/members:
     parameters: [ { $ref: '#/components/parameters/OrgID' } ]
@@ -375,6 +405,7 @@ paths:
               schema: { $ref: '#/components/schemas/Membership' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/organizations/{orgID}/audit:
     parameters:
@@ -417,6 +448,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [organizations]
       summary: Remove a member (org admin)
@@ -463,6 +495,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/projects/{projectID}/members/{membershipID}:
     parameters:
@@ -488,6 +521,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [projects]
       summary: Remove a member from the project (project admin)
@@ -500,13 +534,14 @@ paths:
     parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
     get:
       tags: [projects]
-      summary: Get a project
+      summary: Get a project (404 invisible; 403 visible without `project:read`)
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Project' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     delete:
       tags: [projects]
@@ -580,6 +615,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/projects/{projectID}/monitors/test:
     parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
@@ -596,7 +632,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/CreateMonitor' }
+            schema: { $ref: '#/components/schemas/TestMonitorSpec' }
       responses:
         '200':
           description: OK
@@ -612,6 +648,12 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '501':
+          description: Probing is not available in this deployment (no prober is wired to the API).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '502':
           description: No worker in the target region answered the test probe.
           content:
@@ -668,6 +710,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/projects/{projectID}/secrets/{name}:
     parameters:
@@ -703,6 +746,7 @@ paths:
                 properties:
                   error: { type: string }
                   count: { type: integer, description: 'File-managed references blocking the rename (secret_renamed_in_use only).' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [secrets]
       summary: Delete a project secret (editor+)
@@ -770,6 +814,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/projects/{projectID}/services/{serviceID}:
     parameters:
@@ -866,6 +911,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/projects/{projectID}/services/{serviceID}/dependencies:
     parameters:
@@ -927,6 +973,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/projects/{projectID}/services/{serviceID}/reliability:
     parameters:
@@ -1056,6 +1103,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/projects/{projectID}/services/{serviceID}/alerting:
     parameters:
@@ -1122,6 +1170,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/projects/{projectID}/services/{serviceID}/alerting/state:
     parameters:
@@ -1205,6 +1254,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/projects/{projectID}/services/{serviceID}/sla-target/burn-alerting:
     parameters:
@@ -1251,6 +1301,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/projects/{projectID}/services/{serviceID}/gate:
     parameters:
@@ -1308,6 +1359,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429': { $ref: '#/components/responses/GateTooManyRequests' }
         '503':
           description: >-
@@ -1411,6 +1463,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [gate]
       summary: Delete the gate policy (editor+, `gate:policy:write`)
@@ -1508,6 +1561,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/projects/{projectID}/services/{serviceID}/gate/overrides:
     parameters:
@@ -1821,6 +1875,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '429': { $ref: '#/components/responses/ChangeTooManyRequests' }
     get:
       tags: [changes]
@@ -2047,6 +2102,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [sla]
       summary: Clear the project's SLO objective for a window (editor+)
@@ -2086,6 +2142,7 @@ paths:
                   sla_report_weekly: { type: boolean }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/projects/{projectID}/maintenance:
     parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
@@ -2119,6 +2176,7 @@ paths:
               schema: { $ref: '#/components/schemas/MaintenanceWindow' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/monitors/{monitorID}:
     parameters: [ { $ref: '#/components/parameters/MonitorID' } ]
@@ -2149,6 +2207,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [monitors]
       summary: Delete a monitor (editor+)
@@ -2246,6 +2305,7 @@ paths:
               schema: { $ref: '#/components/schemas/SLATarget' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/maintenance/{maintenanceID}:
     parameters:
@@ -2299,6 +2359,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '422':
           description: The range is older than raw retention, so it cannot be recomputed.
           content:
@@ -2387,6 +2448,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
         '422':
           description: >
             The range reaches over sealed facts older than raw retention, so its recompute
@@ -2426,6 +2488,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/projects/{projectID}/alerts/alertmanager:
     parameters: [ { $ref: '#/components/parameters/ProjectID' } ]
@@ -2456,6 +2519,7 @@ paths:
                   ignored: { type: integer }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/incidents/{incidentID}:
     parameters: [ { $ref: '#/components/parameters/IncidentID' } ]
@@ -2504,6 +2568,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/incidents/{incidentID}/postmortem:
     parameters: [ { $ref: '#/components/parameters/IncidentID' } ]
@@ -2534,6 +2599,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/incidents/{incidentID}/acknowledge:
     parameters: [ { $ref: '#/components/parameters/IncidentID' } ]
@@ -2578,6 +2644,7 @@ paths:
               schema: { $ref: '#/components/schemas/EscalationPolicy' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/escalation-policies/{policyID}:
     parameters: [ { name: policyID, in: path, required: true, schema: { type: string } } ]
@@ -2598,6 +2665,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [escalation]
       summary: Delete an escalation policy (editor+)
@@ -2634,6 +2702,7 @@ paths:
               schema: { $ref: '#/components/schemas/OnCallSchedule' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/oncall-schedules/{scheduleID}/current:
     parameters: [ { name: scheduleID, in: path, required: true, schema: { type: string } } ]
@@ -2680,6 +2749,7 @@ paths:
               schema: { $ref: '#/components/schemas/OnCallOverride' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/oncall-overrides/{overrideID}:
     parameters: [ { name: overrideID, in: path, required: true, schema: { type: string } } ]
@@ -2710,6 +2780,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [escalation]
       summary: Delete an on-call schedule (editor+)
@@ -2722,13 +2793,14 @@ paths:
     parameters: [ { $ref: '#/components/parameters/OrgID' } ]
     get:
       tags: [status-pages]
-      summary: List an organization's status pages (org member)
+      summary: List an organization's status pages (`status_page:read` through any membership of the org — project-only members included; 403 to a token whose allow-list omits it)
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema: { type: array, items: { $ref: '#/components/schemas/StatusPage' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     post:
       tags: [status-pages]
@@ -2747,18 +2819,20 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/status-pages/{pageID}:
     parameters: [ { $ref: '#/components/parameters/PageID' } ]
     get:
       tags: [status-pages]
-      summary: Get a status page's configuration (org member)
+      summary: Get a status page's configuration (`status_page:read`; `unlisted_token` only with `org:manage`)
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema: { $ref: '#/components/schemas/StatusPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     patch:
       tags: [status-pages]
@@ -2777,6 +2851,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [status-pages]
       summary: Delete a status page and its components (org admin)
@@ -2789,13 +2864,14 @@ paths:
     parameters: [ { $ref: '#/components/parameters/PageID' } ]
     get:
       tags: [status-pages]
-      summary: Render a page for an authenticated org member (any visibility)
+      summary: Render a page for an authenticated reader holding `status_page:read` (any visibility)
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema: { $ref: '#/components/schemas/StatusPageRender' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/status-pages/{pageID}/history:
@@ -2818,7 +2894,7 @@ paths:
           not in the server's own spelling, outside the month or after now: 400 `invalid_cursor`.
     get:
       tags: [status-pages]
-      summary: Incident history of a page for an authenticated org member (any visibility)
+      summary: Incident history of a page for an authenticated reader holding `status_page:read` (any visibility)
       description: >
         Past incidents (resolved in the last 90 days) of one UTC month, newest first, at most 50 per
         response, with the per-month counts of the history. Same projection as the render's
@@ -2830,6 +2906,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/IncidentHistory' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/status-pages/{pageID}/feed:
@@ -2838,7 +2915,7 @@ paths:
       - { $ref: '#/components/parameters/FeedFormat' }
     get:
       tags: [status-pages]
-      summary: Incident feed for an org member (JSON Feed / RSS / Atom)
+      summary: Incident feed for an authenticated reader holding `status_page:read` (JSON Feed / RSS / Atom)
       responses:
         '200':
           description: OK
@@ -2846,6 +2923,7 @@ paths:
             application/feed+json: { schema: { type: string } }
             application/rss+xml: { schema: { type: string } }
             application/atom+xml: { schema: { type: string } }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/status-pages/{pageID}/subscribers:
@@ -2879,13 +2957,14 @@ paths:
     parameters: [ { $ref: '#/components/parameters/PageID' } ]
     get:
       tags: [status-pages]
-      summary: List a page's components (org member)
+      summary: List a page's components (`status_page:read`)
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema: { type: array, items: { $ref: '#/components/schemas/Component' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     post:
       tags: [status-pages]
@@ -2911,6 +2990,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/components/{componentID}:
     parameters:
@@ -2938,6 +3018,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [status-pages]
       summary: Delete a component (org admin)
@@ -2973,6 +3054,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/components/{componentID}/conversion:
     parameters:
@@ -3003,6 +3085,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/monitors/{monitorID}/successor:
     parameters: [ { $ref: '#/components/parameters/MonitorID' } ]
@@ -3035,6 +3118,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/monitors/{monitorID}/retire:
     parameters: [ { $ref: '#/components/parameters/MonitorID' } ]
@@ -3128,6 +3212,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/public/status-pages/{slug}:
     parameters:
@@ -3353,6 +3438,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/tokens/{tokenID}:
     parameters:
@@ -3409,6 +3495,7 @@ paths:
                   token: { type: string, description: 'Plaintext secret, shown only here.' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/agent-tokens/{tokenID}:
     parameters: [ { name: tokenID, in: path, required: true, schema: { type: string, format: uuid } } ]
@@ -3450,6 +3537,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/webhooks/{webhookID}:
     parameters:
@@ -3470,6 +3558,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [webhooks]
       summary: Delete a webhook subscription (org admin)
@@ -3507,6 +3596,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/notification-channels/{channelID}:
     parameters:
@@ -3527,6 +3617,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [notifications]
       summary: Delete a notification channel (editor+)
@@ -3564,6 +3655,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/monitors/{monitorID}/notifications/{channelID}:
     parameters:
@@ -3600,21 +3692,28 @@ paths:
                 properties:
                   query: { type: string }
                   hits: { type: array, items: { $ref: '#/components/schemas/SearchHit' } }
+        '403':
+          description: A token whose allow-list omits `project:read` (decided before the query is read).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/v1/events:
     get:
       tags: [monitors]
       summary: >
         Stream live monitor status changes as Server-Sent Events (text/event-stream),
-        filtered to the projects the caller may see. Consume with EventSource; each
-        `status` event's data is a JSON object {type, monitor_id, project_id, status,
-        latency_ms, ts}. 501 if realtime is not enabled.
+        filtered to the projects on which the caller holds `project:read`. Consume with
+        EventSource; each `status` event's data is a JSON object {type, monitor_id, project_id,
+        status, latency_ms, ts}. 403 to a token whose allow-list omits `project:read`; 501 if
+        realtime is not enabled.
       responses:
         '200':
           description: An event stream.
           content:
             text/event-stream:
               schema: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '501': { description: Realtime events are not enabled. }
 
   /api/v1/settings/oidc:
@@ -3653,6 +3752,7 @@ paths:
               schema: { $ref: '#/components/schemas/OIDCSettingsView' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
 
   /api/v1/settings/branding:
     get:
@@ -3817,6 +3917,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [admin]
       summary: Delete a user (global admin only)
@@ -4018,6 +4119,20 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
     Forbidden:
       description: Authenticated but insufficient role.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    CrossOriginRefused:
+      description: >-
+        A browser-originated request that is not same-origin was refused before any handler ran
+        (sec-hardening-2 H-4): `{"error": "cross-origin request refused"}`. Nothing changed.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UnsupportedMediaType:
+      description: >-
+        The request carried a body that is not declared `Content-Type: application/json`
+        (sec-hardening-2 H-4). Nothing was decoded and nothing changed.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -5258,6 +5373,29 @@ components:
         managed_monitors: { type: integer, description: 'Monitors currently managed by this provider.' }
         orphaned_monitors: { type: integer, description: 'Monitors orphaned (source removed, retained).' }
         bundle_errors: { type: integer, description: 'Bundles rejected in the last scan.' }
+    TestMonitorSpec:
+      type: object
+      description: >-
+        The probe spec of a one-off test. Exactly these fields: the server decodes the body
+        strictly and answers 400 to any other (a monitor's `name`, `retries`, `failure_threshold`
+        and the rest of `CreateMonitor` describe a saved monitor, not a probe). `target` follows
+        the rules of `CreateMonitor.target`.
+      required: [type]
+      additionalProperties: false
+      properties:
+        type: { type: string, enum: [http, tcp, icmp, dns, tls, grpc, postgres, mysql, redis, promql, rabbitmq, websocket, ssh, synthetic, async_canary] }
+        target: { type: string, description: 'As `CreateMonitor.target`.' }
+        method: { type: string, enum: [GET, POST, HEAD, PUT, DELETE], description: 'HTTP request method; defaults to GET.' }
+        region: { type: string, description: 'The region whose prober runs the test; defaults to `core`.' }
+        timeout_seconds: { type: integer, description: 'Probe timeout in seconds. Omitted or 0 or less means 10.' }
+        interval_seconds:
+          type: integer
+          description: >-
+            Irrelevant to a one-off probe, but validated as for a monitor. Omitted or 0 or less
+            means 60. For `async_canary` it must be at least `timeout_seconds` (one probe may not
+            overlap the next), else 400.
+        conditions: { type: array, items: { type: string } }
+        config: { type: object, additionalProperties: { type: string }, description: 'As `CreateMonitor.config`.' }
     CreateMonitor:
       type: object
       required: [name, type]
@@ -6350,7 +6488,17 @@ components:
         slug: { type: string }
         title: { type: string }
         visibility: { $ref: '#/components/schemas/Visibility' }
-        unlisted_token: { type: string, description: 'Present only for unlisted pages.' }
+        unlisted_token:
+          type: string
+          description: >-
+            The unlisted page's secret link token. Served only to a principal holding `org:manage`
+            on the page's organization; every other reader gets it absent (sec-hardening-2 H-3) and
+            opens the page through the authenticated preview (`/status/{slug}?preview={pageID}`).
+        has_unlisted_token:
+          type: boolean
+          description: >-
+            True when the page has a secret link, whether or not `unlisted_token` was served to
+            this reader. Read-only.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     CreateStatusPage:
@@ -6578,7 +6726,11 @@ components:
             (else 400 `action_not_granted`) — the list only narrows. A CI token is `role: editor,
             actions: [gate:evaluate, change:record]`: it asks the gate and records changes and can do
             nothing else, not even read the service page. Written into the `token.create` audit row.
-            Immutable: a different list is a new token.
+            Immutable: a different list is a new token. The catalogue: `org:read`, `org:manage`,
+            `project:read`, `project:manage`, `project:write`, `gate:evaluate`,
+            `gate:policy:write`, `gate:override`, `change:record`, `status_page:read` (every role
+            grants it; a token with a list reads the organization's status pages only when the
+            list names it).
     CreatedApiToken:
       type: object
       description: Issue response — the plaintext secret is present only here.

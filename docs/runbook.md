@@ -172,14 +172,74 @@ are served:
 | --- | --- |
 | `GET /auth/login?redirect=/path` | Start Authorization Code + PKCE; redirects to Keycloak. |
 | `GET /auth/callback` | Verify ID token, JIT-provision user, create session, set cookie. |
-| `GET\|POST /auth/logout` | Revoke session, clear cookie, redirect to post-logout URL. |
-| `/api/v1/*` | Requires a valid session cookie (401 otherwise). |
+| `POST /auth/logout` | Revoke session, clear cookie, redirect to post-logout URL. `GET` is 405 since D-0278: no GET changes state. |
+| `/api/v1/*` | Requires a valid session cookie or a Bearer credential (401 otherwise). |
+
+### Request forgery, the Bearer rule and `Referer` (sec-hardening-2 H-4, H-9a, D-0278)
+
+- **Cross-origin mutations are refused before any handler.** A `POST`/`PUT`/`PATCH`/`DELETE` on
+  `/api/*` or `/auth/*` is judged in this order, and a refusal is 403
+  `{"error":"cross-origin request refused"}`:
+  1. With `Sec-Fetch-Site`: `same-origin` or `none` passes; `same-site` and `cross-site` are refused.
+  2. Without it, with `Origin`: the host and port of `Origin` are compared with the request's `Host`
+     header **as cerbix receives it**. Equal passes, different is refused. The scheme is not compared,
+     so `https://` in `Origin` against a plain-HTTP hop from a TLS-terminating proxy is fine.
+  3. With neither header (curl, the CLI, scripts): not a browser, passes.
+- **Behind a reverse proxy, keep the browser's `Host`.** Browsers send `Sec-Fetch-Site` only to
+  potentially trustworthy origins — HTTPS, and `localhost`. So:
+  - **Browser on HTTPS:** `Sec-Fetch-Site: same-origin` decides (step 1), and a proxy that replaces
+    `Host` with its upstream name (`cerbix:8080`) does no harm.
+  - **Browser on plain HTTP** (for example `http://cerbix.company.com` through a proxy): there is no
+    `Sec-Fetch-Site`, step 2 compares `Origin: http://cerbix.company.com` with `Host: cerbix:8080`, and
+    **every change is refused — sign-in (`POST /auth/local/login`) included**. The symptom is 403
+    `cross-origin request refused` on the login form.
+  - **Fix:** make the proxy pass the browser's `Host` through, or serve cerbix to browsers over HTTPS
+    (or both). nginx's `proxy_pass` sends the upstream's name unless told otherwise:
+
+    ```nginx
+    location / {
+        proxy_pass http://cerbix:8080;
+        proxy_set_header Host $http_host;   # the browser's Host exactly, port included
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    ```
+
+    Traefik and Caddy pass `Host` through by default (`passHostHeader`, Caddy's `reverse_proxy`).
+- **A proxy that adds `Authorization: Bearer …` breaks the web app.** An authenticating proxy that
+  forwards its own token to cerbix in `Authorization` turns every SPA request into a Bearer request:
+  cerbix then never reads the session cookie and answers 401 to the whole SPA (unless that token is
+  itself a cerbix credential). With oauth2-proxy this is `--pass-authorization-header` (proxy mode),
+  or `--set-authorization-header` in `auth_request` mode when nginx copies the header upstream
+  (`auth_request_set $auth $upstream_http_authorization; proxy_set_header Authorization $auth;`).
+  **Fix:** do not forward it to cerbix — turn those options off, or drop the header at the proxy
+  (nginx: `proxy_set_header Authorization "";`). `--pass-access-token` is harmless here: it sends
+  `X-Forwarded-Access-Token`, which cerbix ignores. A proxy's `Basic` or `Negotiate` header is not
+  affected (see the Bearer point below).
+- **Exempt:** `/api/*` requests that present `Authorization: Bearer …` (a token is not an ambient
+  credential), the public routes under `/api/v1/public/` and the agent routes under `/api/v1/agent/`.
+  `POST /auth/logout` is never exempt.
+- **A Bearer request is authenticated by its Bearer alone.** Its session cookie is never read: a
+  missing, empty, unknown or duplicated Bearer is 401 even beside a live session. A proxy's
+  `Authorization: Basic …` or `Negotiate …` beside the cookie is not a Bearer — the cookie
+  authenticates, and the request is checked for forgery like any other.
+- **JSON bodies need `Content-Type: application/json`** on every API route that decodes one and on
+  `/auth/local/*`: anything else is 415 (parameters such as `charset` are fine; body-less requests need
+  no type).
+- **`Referrer-Policy`:** the application handler sets `no-referrer` on `/status/*` and
+  `/api/v1/public/*`, in any letter case — an unlisted page's `?token=` never leaves in a `Referer` —
+  and `strict-origin-when-cross-origin` on every other response it serves, refusals and 404s included.
+  Two kinds of response do not pass through it and carry no `Referrer-Policy`: the operational
+  endpoints `/healthz`, `/readyz` and `/metrics`, and the redirects that canonicalize a path (`//x`,
+  `/a/../b`) — the outer multiplexer of `internal/httpsrv` answers both before the application
+  handler runs. Neither renders a page. The support link carries `rel="noopener noreferrer"`.
 
 ### Local login (no Keycloak)
 
 cerbix also supports a built-in username/password login, enabled with `local.enabled: true`
 (requires `database.dsn`). It can run alone or alongside OIDC. Routes registered when
-enabled: `POST /auth/local/login` (`{"username","password"}` → session cookie),
+enabled: `POST /auth/local/login` (`{"username","password"}`, sent as `Content-Type: application/json`
+→ session cookie; any other content type is 415 before every limiter, so it spends no attempt — D-0278),
 `POST /api/v1/me/password` (change own password). Passwords are argon2id-hashed; only the
 hash is stored; failures return a uniform 401.
 
@@ -1605,6 +1665,11 @@ because visibility is membership and the list narrows actions only). Rules of th
 - an entry outside the action catalogue is 400 `action_unknown`; an entry the token's ROLE does not grant
   is 400 `action_not_granted` naming it (D-0212) — a viewer token cannot list `change:record`, and the
   mistake surfaces at the form, not at the pipeline's first 403;
+- `status_page:read` (D-0278): every role grants it. A token WITH a list reads the organization's status
+  pages (list, configuration, preview render, history, feed, components) only when the list names it —
+  a list made before the action existed does not, so such a token now gets 403 there and needs a new
+  token. Only `org:manage` receives an unlisted page's token; every other reader gets
+  `has_unlisted_token: true`;
 - the list is immutable: `PATCH`/`PUT` of a token are 405. A pipeline that needs one more action gets a
   NEW token — tokens are cheap, audit is not;
 - the list is in the token's read model and in the `token.create` audit row; recording a change is NOT an

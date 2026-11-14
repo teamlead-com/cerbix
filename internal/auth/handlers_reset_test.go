@@ -33,7 +33,7 @@ func TestResetRequestCreatesToken(t *testing.T) {
 
 	// Known local email → 200 and a reset token is created.
 	rec := httptest.NewRecorder()
-	a.ResetRequestHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/reset/request",
+	a.ResetRequestHandler(rec, jsonPost("/auth/local/reset/request",
 		strings.NewReader(`{"email":"user@x"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("request code = %d, want 200", rec.Code)
@@ -44,7 +44,7 @@ func TestResetRequestCreatesToken(t *testing.T) {
 
 	// Unknown email → still 200 (no enumeration) and no new token.
 	rec = httptest.NewRecorder()
-	a.ResetRequestHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/reset/request",
+	a.ResetRequestHandler(rec, jsonPost("/auth/local/reset/request",
 		strings.NewReader(`{"email":"ghost@x"}`)))
 	if rec.Code != http.StatusOK || len(fs.resetTokens) != 1 {
 		t.Fatalf("unknown email: code=%d tokens=%d, want 200/1", rec.Code, len(fs.resetTokens))
@@ -58,7 +58,7 @@ func TestResetRequestDisabledWithoutMailer(t *testing.T) {
 	a := resetAuthenticator(t, fs, false) // no mailer
 
 	rec := httptest.NewRecorder()
-	a.ResetRequestHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/reset/request",
+	a.ResetRequestHandler(rec, jsonPost("/auth/local/reset/request",
 		strings.NewReader(`{"email":"user@x"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("request code = %d, want 200", rec.Code)
@@ -86,7 +86,7 @@ func TestResetConfirm(t *testing.T) {
 	// Valid token → 204 and the password is updated.
 	seed("goodtok", time.Now().Add(time.Hour), false)
 	rec := httptest.NewRecorder()
-	a.ResetConfirmHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/reset/confirm",
+	a.ResetConfirmHandler(rec, jsonPost("/auth/local/reset/confirm",
 		strings.NewReader(`{"token":"goodtok","new_password":"brandnewpass"}`)))
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("confirm code = %d, want 204 (%s)", rec.Code, rec.Body.String())
@@ -99,7 +99,7 @@ func TestResetConfirm(t *testing.T) {
 
 	// Reusing the same token → 400 (single-use).
 	rec = httptest.NewRecorder()
-	a.ResetConfirmHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/reset/confirm",
+	a.ResetConfirmHandler(rec, jsonPost("/auth/local/reset/confirm",
 		strings.NewReader(`{"token":"goodtok","new_password":"anotherpass1"}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("reused token code = %d, want 400", rec.Code)
@@ -108,7 +108,7 @@ func TestResetConfirm(t *testing.T) {
 	// Expired token → 400.
 	seed("expiredtok", time.Now().Add(-time.Minute), false)
 	rec = httptest.NewRecorder()
-	a.ResetConfirmHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/reset/confirm",
+	a.ResetConfirmHandler(rec, jsonPost("/auth/local/reset/confirm",
 		strings.NewReader(`{"token":"expiredtok","new_password":"anotherpass1"}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expired token code = %d, want 400", rec.Code)
@@ -116,7 +116,7 @@ func TestResetConfirm(t *testing.T) {
 
 	// Unknown token → 400.
 	rec = httptest.NewRecorder()
-	a.ResetConfirmHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/reset/confirm",
+	a.ResetConfirmHandler(rec, jsonPost("/auth/local/reset/confirm",
 		strings.NewReader(`{"token":"nope","new_password":"anotherpass1"}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown token code = %d, want 400", rec.Code)
@@ -125,7 +125,7 @@ func TestResetConfirm(t *testing.T) {
 	// Too-short new password → 400 (before touching the token).
 	seed("shortpwtok", time.Now().Add(time.Hour), false)
 	rec = httptest.NewRecorder()
-	a.ResetConfirmHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/reset/confirm",
+	a.ResetConfirmHandler(rec, jsonPost("/auth/local/reset/confirm",
 		strings.NewReader(`{"token":"shortpwtok","new_password":"short"}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("short password code = %d, want 400", rec.Code)
@@ -150,14 +150,14 @@ func TestResetConfirmUsesLivePolicyMinLength(t *testing.T) {
 
 	// 10 chars passes the config default but must fail the live policy.
 	rec := httptest.NewRecorder()
-	a.ResetConfirmHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/reset/confirm",
+	a.ResetConfirmHandler(rec, jsonPost("/auth/local/reset/confirm",
 		strings.NewReader(`{"token":"`+tok+`","new_password":"pw12345678"}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("short-for-policy password = %d, want 400", rec.Code)
 	}
 	// 12 chars passes.
 	rec = httptest.NewRecorder()
-	a.ResetConfirmHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/reset/confirm",
+	a.ResetConfirmHandler(rec, jsonPost("/auth/local/reset/confirm",
 		strings.NewReader(`{"token":"`+tok+`","new_password":"pw1234567890"}`)))
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("policy-length password = %d, want 204 (body: %s)", rec.Code, rec.Body.String())

@@ -13,66 +13,101 @@ import (
 	"github.com/teamlead-com/cerbix/internal/store"
 )
 
-// RequireAuth is middleware that resolves the caller into a principal and stores
-// it in the request context. It accepts either a session cookie (interactive
-// users) or an `Authorization: Bearer <token>` service-account token. Requests
-// with neither get 401.
+// RequireAuth is middleware that resolves the caller into a principal and stores it in the request
+// context. The credential is chosen by the SCHEME of the Authorization header (sec-hardening-2 H-4
+// fix 1):
+//   - a request that presents a Bearer credential (HasBearerAuth) is authenticated by that one
+//     credential or not at all — a cerbix service-account token, else an OIDC client-credentials
+//     JWT. Its session cookie is NEVER read: the forgery check exempts bearer requests, so a
+//     cookie beside a junk, empty or duplicated Bearer must answer 401, never run as the session;
+//   - any other request — no Authorization, or a proxy's Basic/Negotiate beside the browser's
+//     cookie — is authenticated by the session cookie alone.
+//
+// Requests with neither get 401.
 func (a *Authenticator) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 1. Session cookie.
-		if c, err := r.Cookie(a.sessionCfg.CookieName); err == nil && c.Value != "" {
-			sess, err := a.store.SessionByToken(r.Context(), c.Value)
-			switch {
-			case errors.Is(err, store.ErrNotFound):
-				a.clearSessionCookie(w) // stale cookie; fall through to bearer
-			case err != nil:
-				a.logger.Error("session_lookup_failed", "error", err.Error())
-				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-				return
-			default:
-				principal, err := a.loadPrincipal(r.Context(), sess.UserID)
-				if err != nil {
-					a.logger.Error("principal_load_failed", "error", err.Error())
-					http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-					return
-				}
-				a.refreshSeen(r.Context(), sess.UserID)
-				ctx := WithSessionToken(WithPrincipal(r.Context(), principal), c.Value)
-				next.ServeHTTP(w, r.WithContext(ctx))
-				return
-			}
+		if HasBearerAuth(r) {
+			a.serveBearer(w, r, next)
+			return
 		}
-
-		// 2. Bearer credential: a cerbix service-account token, else a OIDC
-		// client-credentials JWT.
-		if tok := bearerToken(r); tok != "" {
-			principal, err := a.principalFromToken(r.Context(), tok)
-			switch {
-			case err == nil:
-				next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), principal)))
-				return
-			case !errors.Is(err, store.ErrNotFound):
-				a.logger.Error("token_lookup_failed", "error", err.Error())
-				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-				return
-			}
-			// Not a service token — try a OIDC client-credentials JWT.
-			jwtPrincipal, ok, jerr := a.principalFromJWT(r.Context(), tok)
-			if jerr != nil {
-				a.logger.Error("jwt_principal_failed", "error", jerr.Error())
-				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-				return
-			}
-			if ok {
-				next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), jwtPrincipal)))
-				return
-			}
+		c, err := r.Cookie(a.sessionCfg.CookieName)
+		if err != nil || c.Value == "" {
 			unauthorized(w)
 			return
 		}
-
-		unauthorized(w)
+		sess, err := a.store.SessionByToken(r.Context(), c.Value)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			a.clearSessionCookie(w) // stale cookie
+			unauthorized(w)
+			return
+		case err != nil:
+			a.logger.Error("session_lookup_failed", "error", err.Error())
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		principal, err := a.loadPrincipal(r.Context(), sess.UserID)
+		if err != nil {
+			a.logger.Error("principal_load_failed", "error", err.Error())
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		a.refreshSeen(r.Context(), sess.UserID)
+		ctx := WithSessionToken(WithPrincipal(r.Context(), principal), c.Value)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// serveBearer authenticates a request that presents a Bearer credential: exactly one
+// Authorization value carrying a non-empty token, which is a cerbix service-account token or an
+// OIDC client-credentials JWT. Anything else is 401.
+func (a *Authenticator) serveBearer(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 {
+		unauthorized(w)
+		return
+	}
+	tok := bearerToken(values[0])
+	if tok == "" {
+		unauthorized(w)
+		return
+	}
+	principal, err := a.principalFromToken(r.Context(), tok)
+	switch {
+	case err == nil:
+		next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), principal)))
+		return
+	case !errors.Is(err, store.ErrNotFound):
+		a.logger.Error("token_lookup_failed", "error", err.Error())
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	// Not a service token — try an OIDC client-credentials JWT.
+	jwtPrincipal, ok, jerr := a.principalFromJWT(r.Context(), tok)
+	if jerr != nil {
+		a.logger.Error("jwt_principal_failed", "error", jerr.Error())
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	if ok {
+		next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), jwtPrincipal)))
+		return
+	}
+	unauthorized(w)
+}
+
+// HasBearerAuth reports whether some Authorization value names the Bearer scheme,
+// case-insensitively — with or without a token after it. It is the one predicate both RequireAuth
+// (which then never reads the cookie) and the forgery check (which then exempts an /api/*
+// request) decide by, so the two cannot disagree about what a bearer request is.
+func HasBearerAuth(r *http.Request) bool {
+	for _, v := range r.Header.Values("Authorization") {
+		scheme, _, _ := strings.Cut(strings.TrimSpace(v), " ")
+		if strings.EqualFold(scheme, "Bearer") {
+			return true
+		}
+	}
+	return false
 }
 
 // refreshSeen stamps users.last_seen_at for a request made with a session, at most once per
@@ -139,9 +174,8 @@ func tokenActions(actions []string) []authz.Action {
 	return out
 }
 
-// bearerToken extracts the token from an `Authorization: Bearer <token>` header.
-func bearerToken(r *http.Request) string {
-	h := r.Header.Get("Authorization")
+// bearerToken extracts the token from one `Authorization: Bearer <token>` value.
+func bearerToken(h string) string {
 	const prefix = "Bearer "
 	if len(h) > len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
 		return strings.TrimSpace(h[len(prefix):])

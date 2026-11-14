@@ -12,9 +12,12 @@ import type { components } from "@/api/schema";
 
 export type Role = components["schemas"]["Role"];
 
-/** The central action catalogue, in the order the chips are laid out (reads, writes, the gate, the record, the org). */
+/** The central action catalogue, in the order the chips are laid out (reads, writes, the gate, the record, the org).
+ *  `status_page:read` (sec-hardening-2 H-3) sits with the reads: every role grants it, and a token with a list reads
+ *  the organization's status pages only when the list names it. */
 export const TOKEN_ACTIONS = [
   "project:read",
+  "status_page:read",
   "project:write",
   "project:manage",
   "gate:evaluate",
@@ -28,10 +31,10 @@ export type TokenAction = (typeof TOKEN_ACTIONS)[number];
 
 /** Mirrors `roleGrants` in internal/authz/authz.go — the server is the authority; this only decides what to OFFER. */
 export const ROLE_GRANTS: Record<Role, readonly TokenAction[]> = {
-  org_admin: ["org:read", "org:manage", "project:read", "project:manage", "project:write", "gate:evaluate", "gate:policy:write", "gate:override", "change:record"],
-  project_admin: ["project:read", "project:manage", "project:write", "gate:evaluate", "gate:policy:write", "gate:override", "change:record"],
-  editor: ["org:read", "project:read", "project:write", "gate:evaluate", "gate:policy:write", "change:record"],
-  viewer: ["org:read", "project:read", "gate:evaluate"],
+  org_admin: ["org:read", "org:manage", "project:read", "project:manage", "project:write", "gate:evaluate", "gate:policy:write", "gate:override", "change:record", "status_page:read"],
+  project_admin: ["project:read", "project:manage", "project:write", "gate:evaluate", "gate:policy:write", "gate:override", "change:record", "status_page:read"],
+  editor: ["org:read", "project:read", "project:write", "gate:evaluate", "gate:policy:write", "change:record", "status_page:read"],
+  viewer: ["org:read", "project:read", "gate:evaluate", "status_page:read"],
 };
 
 /** The roles from the narrowest up, so `neededRole` names the LOWEST role that grants an action. */

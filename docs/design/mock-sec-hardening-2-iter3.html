@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Status page links and token chips</title>
+<style>
+/* Tokens VERBATIM from frontend/src/style.css. No new colour, no new control: every element below
+   already exists on the screen it belongs to (StatusPagesView.vue, SettingsView.vue's token form,
+   PublicStatusView.vue / LoginView.vue's footer). Dashed outline = what this iteration changes. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-weak:rgba(88,84,242,.10);
+  --down:#e0393f; --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-weak:rgba(125,121,255,.15);
+    --down:#ff5f64; --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-weak:rgba(125,121,255,.15);
+  --down:#ff5f64; --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.wrap{max-width:880px; margin:0 auto; padding:24px 16px 64px}
+h1{font-size:20px; margin:0 0 4px} .crumb{color:var(--ink-3); font-size:12px}
+.switch{display:flex; flex-wrap:wrap; gap:6px; margin:18px 0}
+.switch button{border:1px solid var(--border); background:var(--surface); color:var(--ink-2);
+  border-radius:6px; padding:6px 10px; font-size:12.5px; cursor:pointer}
+.switch button[aria-pressed="true"]{background:var(--accent-weak); color:var(--accent); border-color:var(--note-border)}
+.card{background:var(--surface); border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow); padding:16px}
+.row{display:flex; flex-wrap:wrap; align-items:center; gap:8px}
+h2{font-size:16px; margin:0; font-weight:600}
+.pill{border:1px solid var(--border); border-radius:999px; padding:0 8px; font-size:11px; color:var(--ink-2)}
+.links{margin-top:8px; display:flex; flex-wrap:wrap; gap:4px 16px; font-size:12.5px}
+.links a{color:var(--ink-3); text-decoration:none} .links a.primary{color:var(--accent)}
+.small{margin:8px 0 0; font-size:11.5px; color:var(--ink-3)}
+.href{display:block; margin-top:10px; font-size:11.5px; color:var(--ink-3); word-break:break-all}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+.chips{display:flex; flex-wrap:wrap; gap:6px; margin-top:6px}
+.chip{display:inline-flex; align-items:center; border:1px solid var(--border); background:var(--surface);
+  color:var(--ink-2); border-radius:5px; padding:2px 7px; font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}
+.chip.on{border-color:var(--accent); background:var(--accent-weak); color:var(--accent)}
+.chip.lack{border-style:dashed; color:var(--ink-3); cursor:not-allowed}
+.hint{font-size:12px; color:var(--ink-3); margin:6px 0 0}
+.new{outline:1px dashed var(--note-border); outline-offset:4px; border-radius:4px}
+.note{margin-top:12px; padding:10px 12px; border:1px solid var(--note-border); background:var(--note-bg);
+  border-radius:6px; font-size:12.5px; color:var(--ink-2)}
+.foot{text-align:center; font-size:12px; color:var(--ink-3)}
+.foot a{color:var(--ink-2); text-decoration:underline; text-decoration-color:var(--border-strong); text-underline-offset:2px}
+pre{background:var(--inset); border:1px solid var(--border); border-radius:6px; padding:10px 12px;
+  font-size:11.5px; overflow-x:auto; margin:10px 0 0}
+[hidden]{display:none !important}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Status page links · token chips · support link</h1>
+  <div class="crumb mono">sec-hardening-2 iteration 3 · H-3 fix 4 (the unlisted token only for org:manage) · H-3 fix 2 (status_page:read) · H-9a (rel on the support link)</div>
+
+  <div class="switch" role="group" aria-label="State">
+    <button type="button" data-s="admin" aria-pressed="true">Status page · org admin</button>
+    <button type="button" data-s="member" aria-pressed="false">Status page · project member</button>
+    <button type="button" data-s="viewer" aria-pressed="false">Token form · viewer role</button>
+    <button type="button" data-s="padmin" aria-pressed="false">Token form · project admin role</button>
+    <button type="button" data-s="support" aria-pressed="false">Support link</button>
+  </div>
+
+  <!-- 1. StatusPagesView.vue, the selected page (unlisted) -->
+  <section id="page">
+    <div class="card">
+      <div class="row"><h2>Customer status</h2><span class="pill">unlisted</span></div>
+      <div class="links" id="links">
+        <a class="primary" href="#" id="view">View public page ↗</a>
+        <a class="mono" href="#">rss</a><a class="mono" href="#">atom</a><a class="mono" href="#">json</a>
+      </div>
+      <p class="small mono" id="tok">unlisted token: 3f9c1d0a7be24e6c9d51a08f2c7e4b13</p>
+      <p class="small new" id="secret" hidden>Secret link · only organization admins see the token</p>
+      <span class="href mono" id="hrefs"></span>
+    </div>
+    <div class="note" id="pageNote"></div>
+  </section>
+
+  <!-- 2. SettingsView.vue, the token form's allow-list (lib/tokenActions.ts) -->
+  <section id="tokens" hidden>
+    <div class="card">
+      <span class="lbl">Limit to these actions <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional — leave empty for the role's full set)</span></span>
+      <div class="chips" id="chips"></div>
+      <p class="hint" id="hint"></p>
+    </div>
+    <div class="note"><b>Mock notes.</b> One chip is added to the catalogue,
+      <span class="mono">status_page:read</span>, placed with the reads right after
+      <span class="mono">project:read</span>. Every role grants it, so it is offered to every role, never shown
+      dormant. Nothing else in the form changes. That includes the warning shown when
+      <span class="mono">project:read</span> is left out. A token with a list reads the organization's status
+      pages only when the list names this chip. A token without a list (the role decides) reads them as
+      before. <span class="mono">ROLE_GRANTS</span> mirrors <span class="mono">roleGrants</span> in
+      <span class="mono">internal/authz/authz.go</span>, as it already does.</div>
+  </section>
+
+  <!-- 3. PublicStatusView.vue / LoginView.vue footer -->
+  <section id="support" hidden>
+    <div class="card foot">
+      <p style="margin:0 0 6px">Questions? We answer within a business day.</p>
+      <a href="#" class="new">Support</a>
+      <div style="margin-top:6px">Powered by <b style="color:var(--accent)">cerbix</b></div>
+    </div>
+    <pre class="mono">&lt;a :href="branding.supportUrl" target="_blank" rel="noopener <b>noreferrer</b>" …&gt;Support&lt;/a&gt;</pre>
+    <div class="note"><b>Mock notes.</b> Nothing visible changes. The link in both footers (the public status page
+      and the login page) gains <span class="mono">noreferrer</span>, so opening it sends no
+      <span class="mono">Referer</span>: the unlisted page's <span class="mono">?token=</span> never reaches the
+      support site. The server also sends <span class="mono">Referrer-Policy: no-referrer</span> on
+      <span class="mono">/status/*</span> and <span class="mono">/api/v1/public/*</span>, so this holds even for
+      a link the page does not mark.</div>
+  </section>
+</div>
+<script>
+(function () {
+  var CATALOGUE = ["project:read", "status_page:read", "project:write", "project:manage", "gate:evaluate",
+    "gate:policy:write", "gate:override", "change:record", "org:read", "org:manage"];
+  var GRANTS = {
+    viewer: ["org:read", "project:read", "gate:evaluate", "status_page:read"],
+    project_admin: ["project:read", "project:manage", "project:write", "gate:evaluate", "gate:policy:write", "gate:override", "change:record", "status_page:read"]
+  };
+  var NEEDS = { "project:write": "editor", "project:manage": "project_admin", "gate:policy:write": "editor",
+    "gate:override": "project_admin", "change:record": "editor", "org:read": "viewer", "org:manage": "org_admin" };
+  function chips(role) {
+    var box = document.getElementById("chips"); box.innerHTML = "";
+    var lacking = [];
+    CATALOGUE.forEach(function (a) {
+      var el = document.createElement("span");
+      el.className = "chip" + (a === "status_page:read" ? " new" : "") + (a === "project:read" ? " on" : "");
+      el.textContent = (a === "project:read" ? "✓ " : "") + a;
+      if (GRANTS[role].indexOf(a) < 0) { el.className = "chip lack"; el.title = "needs " + NEEDS[a]; lacking.push(a); }
+      box.appendChild(el);
+    });
+    document.getElementById("hint").innerHTML = "only actions the role grants are offered" + (lacking.length ? "; " +
+      lacking.map(function (a) { return '<span class="mono">' + a + '</span> needs <span class="mono">' + NEEDS[a] + "</span>"; }).join(" · ") : "");
+  }
+  function page(admin) {
+    document.getElementById("tok").hidden = !admin;
+    document.getElementById("secret").hidden = admin;
+    document.getElementById("links").className = "links" + (admin ? "" : " new");
+    document.getElementById("hrefs").innerHTML = admin
+      ? "page → /status/customer?token=3f9c…4b13<br>rss → /api/v1/public/status-pages/customer/feed?format=rss&amp;token=3f9c…4b13"
+      : "page → /status/customer?preview=8d2e…c41a<br>rss → /api/v1/status-pages/8d2e…c41a/feed?format=rss";
+    document.getElementById("pageNote").innerHTML = admin
+      ? "<b>Mock notes.</b> No change for an organization admin, who holds <span class='mono'>org:manage</span>: the server still sends the token, the links still carry it, and the token line still shows it."
+      : "<b>Mock notes.</b> This is what changes. A member without <span class='mono'>org:manage</span> (an org editor or viewer, or any project-only member) no longer receives <span class='mono'>unlisted_token</span>. The server sends <span class='mono'>has_unlisted_token: true</span> instead. The links then open the page the way an <span class='mono'>internal</span> page already opens: the page through <span class='mono'>?preview=&lt;pageID&gt;</span>, the feeds through the authenticated feed route. Without this change the links would 404. The token line is replaced by a muted one, <i>Secret link · only organization admins see the token</i>, so the member knows a secret link exists and whom to ask for it. The link label stays <i>View public page ↗</i>, as it already is for an internal page.";
+  }
+  var show = {
+    admin:   function () { sec("page"); page(true); },
+    member:  function () { sec("page"); page(false); },
+    viewer:  function () { sec("tokens"); chips("viewer"); },
+    padmin:  function () { sec("tokens"); chips("project_admin"); },
+    support: function () { sec("support"); }
+  };
+  function sec(id) { ["page", "tokens", "support"].forEach(function (s) { document.getElementById(s).hidden = s !== id; }); }
+  document.querySelectorAll(".switch button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      document.querySelectorAll(".switch button").forEach(function (x) { x.setAttribute("aria-pressed", "false"); });
+      b.setAttribute("aria-pressed", "true"); show[b.getAttribute("data-s")]();
+    });
+  });
+  show.admin();
+})();
+</script>
+</body>
+</html>

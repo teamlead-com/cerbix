@@ -15,7 +15,7 @@ export interface paths {
         put?: never;
         /**
          * Local username/password login (issues a session cookie)
-         * @description The body is capped at 4 KiB and a password at 1024 bytes. Three limiters answer 429 (all derived from local.login_rate_limit_per_minute = L): L per client IP per minute (checked before the body is read), min(L, max(2, (L+1)/2)) per (IP, email), and 5L failed logins per email.
+         * @description The body is capped at 4 KiB and a password at 1024 bytes. Three limiters answer 429 (all derived from local.login_rate_limit_per_minute = L): L per client IP per minute (checked before the body is read), min(L, max(2, (L+1)/2)) per (IP, email), and 5L failed logins per email. The body is sent as `Content-Type: application/json`; any other type is 415 before every limiter, so it spends no attempt.
          */
         post: {
             parameters: {
@@ -43,6 +43,8 @@ export interface paths {
                 };
                 400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
+                403: components["responses"]["CrossOriginRefused"];
+                415: components["responses"]["UnsupportedMediaType"];
                 /** @description Too many attempts. */
                 429: {
                     headers: {
@@ -99,6 +101,8 @@ export interface paths {
                     };
                 };
                 400: components["responses"]["BadRequest"];
+                403: components["responses"]["CrossOriginRefused"];
+                415: components["responses"]["UnsupportedMediaType"];
                 /** @description Too many requests. */
                 429: {
                     headers: {
@@ -156,6 +160,8 @@ export interface paths {
                     content?: never;
                 };
                 400: components["responses"]["BadRequest"];
+                403: components["responses"]["CrossOriginRefused"];
+                415: components["responses"]["UnsupportedMediaType"];
                 /** @description Too many requests. */
                 429: {
                     headers: {
@@ -314,6 +320,7 @@ export interface paths {
                     };
                     content?: never;
                 };
+                403: components["responses"]["CrossOriginRefused"];
             };
         };
         delete?: never;
@@ -329,7 +336,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Current user and memberships */
+        /**
+         * Current user and memberships
+         * @description Describes a user: a principal authenticated by a token (an API token or an OIDC machine identity) gets 403.
+         */
         get: {
             parameters: {
                 query?: never;
@@ -349,6 +359,7 @@ export interface paths {
                     };
                 };
                 401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
             };
         };
         put?: never;
@@ -430,6 +441,7 @@ export interface paths {
                     content?: never;
                 };
                 400: components["responses"]["BadRequest"];
+                415: components["responses"]["UnsupportedMediaType"];
                 /** @description Internal error; nothing changed. */
                 500: {
                     headers: {
@@ -522,6 +534,7 @@ export interface paths {
                     };
                 };
                 400: components["responses"]["BadRequest"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -564,6 +577,7 @@ export interface paths {
                     content?: never;
                 };
                 400: components["responses"]["BadRequest"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -579,7 +593,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List organizations visible to the caller */
+        /** List organizations visible to the caller (a token — its own organization, when its allow-list names `org:read` or `project:read`; else empty) */
         get: {
             parameters: {
                 query?: never;
@@ -626,6 +640,7 @@ export interface paths {
                 };
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -643,7 +658,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get an organization */
+        /** Get an organization (any human member; a token needs `org:read` or `project:read` in its allow-list, else 403) */
         get: {
             parameters: {
                 query?: never;
@@ -664,6 +679,7 @@ export interface paths {
                         "application/json": components["schemas"]["Organization"];
                     };
                 };
+                403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -718,7 +734,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** List projects of an organization visible to the caller */
+        /** List the projects on which the caller holds `project:read` (403 to a member holding it nowhere in the org) */
         get: {
             parameters: {
                 query?: never;
@@ -739,6 +755,7 @@ export interface paths {
                         "application/json": components["schemas"]["Project"][];
                     };
                 };
+                403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -770,6 +787,7 @@ export interface paths {
                 };
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -840,6 +858,7 @@ export interface paths {
                 };
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -969,6 +988,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         trace?: never;
@@ -1040,6 +1060,7 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -1119,6 +1140,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         trace?: never;
@@ -1132,7 +1154,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get a project */
+        /** Get a project (404 invisible; 403 visible without `project:read`) */
         get: {
             parameters: {
                 query?: never;
@@ -1153,6 +1175,7 @@ export interface paths {
                         "application/json": components["schemas"]["Project"];
                     };
                 };
+                403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -1305,6 +1328,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -1339,7 +1363,7 @@ export interface paths {
             };
             requestBody: {
                 content: {
-                    "application/json": components["schemas"]["CreateMonitor"];
+                    "application/json": components["schemas"]["TestMonitorSpec"];
                 };
             };
             responses: {
@@ -1361,6 +1385,16 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
+                /** @description Probing is not available in this deployment (no prober is wired to the API). */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
                 /** @description No worker in the target region answered the test probe. */
                 502: {
                     headers: {
@@ -1461,6 +1495,7 @@ export interface paths {
                         "application/json": components["schemas"]["Error"];
                     };
                 };
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -1570,6 +1605,7 @@ export interface paths {
                         };
                     };
                 };
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         trace?: never;
@@ -1653,6 +1689,7 @@ export interface paths {
                         "application/json": components["schemas"]["Error"];
                     };
                 };
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -1808,6 +1845,7 @@ export interface paths {
                         "application/json": components["schemas"]["Error"];
                     };
                 };
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -1904,6 +1942,7 @@ export interface paths {
                         "application/json": components["schemas"]["Error"];
                     };
                 };
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -2109,6 +2148,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -2208,6 +2248,7 @@ export interface paths {
                         "application/json": components["schemas"]["Error"];
                     };
                 };
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         trace?: never;
@@ -2321,6 +2362,7 @@ export interface paths {
                         "application/json": components["schemas"]["Error"];
                     };
                 };
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -2394,6 +2436,7 @@ export interface paths {
                         "application/json": components["schemas"]["Error"];
                     };
                 };
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -2455,6 +2498,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
                 429: components["responses"]["GateTooManyRequests"];
                 /** @description The evaluation could not complete: `snapshot_conflict`, `ledger_unwritable` or `timeout`. No decision was made and nothing was recorded. */
                 503: {
@@ -2679,6 +2723,7 @@ export interface paths {
                         "application/json": components["schemas"]["Error"];
                     };
                 };
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -2830,6 +2875,7 @@ export interface paths {
                         "application/json": components["schemas"]["Error"];
                     };
                 };
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -3264,6 +3310,7 @@ export interface paths {
                         "application/json": components["schemas"]["Error"];
                     };
                 };
+                415: components["responses"]["UnsupportedMediaType"];
                 429: components["responses"]["ChangeTooManyRequests"];
             };
         };
@@ -3515,6 +3562,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -3593,6 +3641,7 @@ export interface paths {
                 };
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -3666,6 +3715,7 @@ export interface paths {
                 };
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -3762,6 +3812,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         trace?: never;
@@ -3990,6 +4041,7 @@ export interface paths {
                 };
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -4093,6 +4145,7 @@ export interface paths {
                         "application/json": components["schemas"]["Error"];
                     };
                 };
+                415: components["responses"]["UnsupportedMediaType"];
                 /** @description The range is older than raw retention, so it cannot be recomputed. */
                 422: {
                     headers: {
@@ -4201,6 +4254,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
                 /** @description The range reaches over sealed facts older than raw retention, so its recompute has nothing to read from. The error names the earliest repairable instant — failing closed HERE, rather than issuing a token the confirm was always going to refuse. */
                 422: {
                     headers: {
@@ -4280,6 +4334,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -4333,6 +4388,7 @@ export interface paths {
                 };
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -4447,6 +4503,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -4516,6 +4573,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -4635,6 +4693,7 @@ export interface paths {
                 };
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -4681,6 +4740,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -4773,6 +4833,7 @@ export interface paths {
                 };
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -4887,6 +4948,7 @@ export interface paths {
                 };
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -4973,6 +5035,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -5013,7 +5076,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** List an organization's status pages (org member) */
+        /** List an organization's status pages (`status_page:read` through any membership of the org — project-only members included; 403 to a token whose allow-list omits it) */
         get: {
             parameters: {
                 query?: never;
@@ -5034,6 +5097,7 @@ export interface paths {
                         "application/json": components["schemas"]["StatusPage"][];
                     };
                 };
+                403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -5066,6 +5130,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -5083,7 +5148,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get a status page's configuration (org member) */
+        /** Get a status page's configuration (`status_page:read`; `unlisted_token` only with `org:manage`) */
         get: {
             parameters: {
                 query?: never;
@@ -5104,6 +5169,7 @@ export interface paths {
                         "application/json": components["schemas"]["StatusPage"];
                     };
                 };
+                403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -5162,6 +5228,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         trace?: never;
@@ -5175,7 +5242,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Render a page for an authenticated org member (any visibility) */
+        /** Render a page for an authenticated reader holding `status_page:read` (any visibility) */
         get: {
             parameters: {
                 query?: never;
@@ -5196,6 +5263,7 @@ export interface paths {
                         "application/json": components["schemas"]["StatusPageRender"];
                     };
                 };
+                403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -5222,7 +5290,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Incident history of a page for an authenticated org member (any visibility)
+         * Incident history of a page for an authenticated reader holding `status_page:read` (any visibility)
          * @description Past incidents (resolved in the last 90 days) of one UTC month, newest first, at most 50 per response, with the per-month counts of the history. Same projection as the render's `recent_incidents` (func-status-pages-incidents.md §13.4).
          */
         get: {
@@ -5251,6 +5319,7 @@ export interface paths {
                     };
                 };
                 400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -5274,7 +5343,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Incident feed for an org member (JSON Feed / RSS / Atom) */
+        /** Incident feed for an authenticated reader holding `status_page:read` (JSON Feed / RSS / Atom) */
         get: {
             parameters: {
                 query?: {
@@ -5300,6 +5369,7 @@ export interface paths {
                         "application/atom+xml": string;
                     };
                 };
+                403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -5399,7 +5469,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** List a page's components (org member) */
+        /** List a page's components (`status_page:read`) */
         get: {
             parameters: {
                 query?: never;
@@ -5420,6 +5490,7 @@ export interface paths {
                         "application/json": components["schemas"]["Component"][];
                     };
                 };
+                403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -5455,6 +5526,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -5531,6 +5603,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         trace?: never;
@@ -5577,6 +5650,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -5628,6 +5702,7 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -5683,6 +5758,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -5838,6 +5914,7 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -6279,6 +6356,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -6395,6 +6473,7 @@ export interface paths {
                 };
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -6506,6 +6585,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -6579,6 +6659,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         trace?: never;
@@ -6645,6 +6726,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -6718,6 +6800,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         trace?: never;
@@ -6785,6 +6868,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         delete?: never;
@@ -6867,6 +6951,15 @@ export interface paths {
                         };
                     };
                 };
+                /** @description A token whose allow-list omits `project:read` (decided before the query is read). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
         put?: never;
@@ -6884,7 +6977,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Stream live monitor status changes as Server-Sent Events (text/event-stream), filtered to the projects the caller may see. Consume with EventSource; each `status` event's data is a JSON object {type, monitor_id, project_id, status, latency_ms, ts}. 501 if realtime is not enabled. */
+        /** Stream live monitor status changes as Server-Sent Events (text/event-stream), filtered to the projects on which the caller holds `project:read`. Consume with EventSource; each `status` event's data is a JSON object {type, monitor_id, project_id, status, latency_ms, ts}. 403 to a token whose allow-list omits `project:read`; 501 if realtime is not enabled. */
         get: {
             parameters: {
                 query?: never;
@@ -6903,6 +6996,7 @@ export interface paths {
                         "text/event-stream": string;
                     };
                 };
+                403: components["responses"]["Forbidden"];
                 /** @description Realtime events are not enabled. */
                 501: {
                     headers: {
@@ -6980,6 +7074,7 @@ export interface paths {
                 };
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         post?: never;
@@ -7539,6 +7634,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
             };
         };
         trace?: never;
@@ -8708,6 +8804,29 @@ export interface components {
             orphaned_monitors?: number;
             /** @description Bundles rejected in the last scan. */
             bundle_errors?: number;
+        };
+        /** @description The probe spec of a one-off test. Exactly these fields: the server decodes the body strictly and answers 400 to any other (a monitor's `name`, `retries`, `failure_threshold` and the rest of `CreateMonitor` describe a saved monitor, not a probe). `target` follows the rules of `CreateMonitor.target`. */
+        TestMonitorSpec: {
+            /** @enum {string} */
+            type: "http" | "tcp" | "icmp" | "dns" | "tls" | "grpc" | "postgres" | "mysql" | "redis" | "promql" | "rabbitmq" | "websocket" | "ssh" | "synthetic" | "async_canary";
+            /** @description As `CreateMonitor.target`. */
+            target?: string;
+            /**
+             * @description HTTP request method; defaults to GET.
+             * @enum {string}
+             */
+            method?: "GET" | "POST" | "HEAD" | "PUT" | "DELETE";
+            /** @description The region whose prober runs the test; defaults to `core`. */
+            region?: string;
+            /** @description Probe timeout in seconds. Omitted or 0 or less means 10. */
+            timeout_seconds?: number;
+            /** @description Irrelevant to a one-off probe, but validated as for a monitor. Omitted or 0 or less means 60. For `async_canary` it must be at least `timeout_seconds` (one probe may not overlap the next), else 400. */
+            interval_seconds?: number;
+            conditions?: string[];
+            /** @description As `CreateMonitor.config`. */
+            config?: {
+                [key: string]: string;
+            };
         };
         CreateMonitor: {
             name: string;
@@ -9922,8 +10041,10 @@ export interface components {
             slug?: string;
             title?: string;
             visibility?: components["schemas"]["Visibility"];
-            /** @description Present only for unlisted pages. */
+            /** @description The unlisted page's secret link token. Served only to a principal holding `org:manage` on the page's organization; every other reader gets it absent (sec-hardening-2 H-3) and opens the page through the authenticated preview (`/status/{slug}?preview={pageID}`). */
             unlisted_token?: string;
+            /** @description True when the page has a secret link, whether or not `unlisted_token` was served to this reader. Read-only. */
+            has_unlisted_token?: boolean;
             /** Format: date-time */
             created_at?: string;
             /** Format: date-time */
@@ -10169,7 +10290,7 @@ export interface components {
              * @description Omit for an org-scoped token.
              */
             project_id?: string;
-            /** @description Optional allow-list (FR-025 D12). Omit or null: the role decides. Each entry must name an action of the central catalogue (else 400 `action_unknown`) that the token's role grants (else 400 `action_not_granted`) — the list only narrows. A CI token is `role: editor, actions: [gate:evaluate, change:record]`: it asks the gate and records changes and can do nothing else, not even read the service page. Written into the `token.create` audit row. Immutable: a different list is a new token. */
+            /** @description Optional allow-list (FR-025 D12). Omit or null: the role decides. Each entry must name an action of the central catalogue (else 400 `action_unknown`) that the token's role grants (else 400 `action_not_granted`) — the list only narrows. A CI token is `role: editor, actions: [gate:evaluate, change:record]`: it asks the gate and records changes and can do nothing else, not even read the service page. Written into the `token.create` audit row. Immutable: a different list is a new token. The catalogue: `org:read`, `org:manage`, `project:read`, `project:manage`, `project:write`, `gate:evaluate`, `gate:policy:write`, `gate:override`, `change:record`, `status_page:read` (every role grants it; a token with a list reads the organization's status pages only when the list names it). */
             actions?: string[] | null;
         };
         /** @description Issue response — the plaintext secret is present only here. */
@@ -10288,6 +10409,24 @@ export interface components {
         };
         /** @description Authenticated but insufficient role. */
         Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description A browser-originated request that is not same-origin was refused before any handler ran (sec-hardening-2 H-4): `{"error": "cross-origin request refused"}`. Nothing changed. */
+        CrossOriginRefused: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description The request carried a body that is not declared `Content-Type: application/json` (sec-hardening-2 H-4). Nothing was decoded and nothing changed. */
+        UnsupportedMediaType: {
             headers: {
                 [name: string]: unknown;
             };

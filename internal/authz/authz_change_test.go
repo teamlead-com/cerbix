@@ -29,8 +29,8 @@ func TestChangeRecordIsEditorAndAbove(t *testing.T) {
 	if !ValidAction(ActionChangeRecord) || ValidAction("change:read") || ValidAction("not:an:action") {
 		t.Fatal("the catalogue names change:record and no change:read (reads are project:read)")
 	}
-	if len(Actions()) != 10 {
-		t.Fatalf("the catalogue has %d actions; the six core, three gate and change:record make ten", len(Actions()))
+	if len(Actions()) != 11 {
+		t.Fatalf("the catalogue has %d actions; the six core, three gate, change:record and status_page:read make eleven", len(Actions()))
 	}
 }
 

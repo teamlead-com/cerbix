@@ -15,7 +15,7 @@ import (
 
 const feedMaxItems = 20
 
-// renderFeedAuthed serves a status page's incident feed to an org member.
+// renderFeedAuthed serves a status page's incident feed to a principal holding status_page:read.
 func (h *Handler) renderFeedAuthed(w http.ResponseWriter, r *http.Request) {
 	sp, ok := h.statusPageAccess(w, r, false)
 	if !ok {

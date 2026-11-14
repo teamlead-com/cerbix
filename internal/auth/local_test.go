@@ -58,7 +58,7 @@ func TestLocalLogin(t *testing.T) {
 
 	// Success.
 	rec := httptest.NewRecorder()
-	a.LocalLoginHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/login",
+	a.LocalLoginHandler(rec, jsonPost("/auth/local/login",
 		strings.NewReader(`{"username":"admin@x","password":"pw12345678"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("login code = %d, want 200 (%s)", rec.Code, rec.Body.String())
@@ -72,7 +72,7 @@ func TestLocalLogin(t *testing.T) {
 
 	// Wrong password → 401.
 	rec = httptest.NewRecorder()
-	a.LocalLoginHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/login",
+	a.LocalLoginHandler(rec, jsonPost("/auth/local/login",
 		strings.NewReader(`{"username":"admin@x","password":"wrong"}`)))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong password code = %d, want 401", rec.Code)
@@ -80,7 +80,7 @@ func TestLocalLogin(t *testing.T) {
 
 	// Unknown user → 401 (uniform).
 	rec = httptest.NewRecorder()
-	a.LocalLoginHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/login",
+	a.LocalLoginHandler(rec, jsonPost("/auth/local/login",
 		strings.NewReader(`{"username":"ghost@x","password":"whatever"}`)))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unknown user code = %d, want 401", rec.Code)
@@ -113,7 +113,7 @@ func TestLoginNoUserEnumerationTiming(t *testing.T) {
 
 	post := func(user, pw string) {
 		rec := httptest.NewRecorder()
-		a.LocalLoginHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/login",
+		a.LocalLoginHandler(rec, jsonPost("/auth/local/login",
 			strings.NewReader(`{"username":"`+user+`","password":"`+pw+`"}`)))
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("%s: code = %d, want 401", user, rec.Code)
@@ -165,7 +165,7 @@ func TestLocalLoginWithTOTP(t *testing.T) {
 			body += `,"totp":"` + code + `"`
 		}
 		body += `}`
-		a.LocalLoginHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/login", strings.NewReader(body)))
+		a.LocalLoginHandler(rec, jsonPost("/auth/local/login", strings.NewReader(body)))
 		return rec
 	}
 
@@ -241,7 +241,7 @@ func TestLocalRoutesRegistered(t *testing.T) {
 	a.Routes(mux)
 	// OIDC disabled → /auth/login must NOT be routed; /auth/local/login must be.
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/auth/local/login", strings.NewReader(`{}`)))
+	mux.ServeHTTP(rec, jsonPost("/auth/local/login", strings.NewReader(`{}`)))
 	if rec.Code == http.StatusNotFound {
 		t.Fatal("/auth/local/login should be registered when local is enabled")
 	}

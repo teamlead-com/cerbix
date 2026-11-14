@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/teamlead-com/cerbix/internal/authz"
 	"github.com/teamlead-com/cerbix/internal/events"
 )
 
@@ -23,18 +24,30 @@ func (h *Handler) events(w http.ResponseWriter, r *http.Request) {
 	}
 	p, _ := h.principal(r)
 
-	// Resolve the visible project set once. Global admins see everything (nil
-	// filter); others are limited to the projects they belong to.
+	// Resolve the visible project set once, through VisibleScope(project:read) — the scoping
+	// mirror of Can, allow-list included — rather than by the principal's user id, which for an
+	// API token is synthetic and not a uuid (sec-hardening-2 H-3 fix 5). A token whose allow-list
+	// omits project:read is refused; nil means no filter (global admin).
+	if p.ViaToken && !p.AllowListed(authz.ActionProjectRead) {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	allOrgs, orgIDs, projectIDs := p.VisibleScope(authz.ActionProjectRead)
 	var visible map[string]bool
-	if !p.IsGlobalAdmin {
-		projects, err := h.store.ListProjectsForUser(r.Context(), p.UserID)
-		if err != nil {
-			h.serverError(w, "list_projects_for_user", err)
-			return
+	if !allOrgs {
+		visible = make(map[string]bool, len(projectIDs))
+		for _, id := range projectIDs {
+			visible[id] = true
 		}
-		visible = make(map[string]bool, len(projects))
-		for _, pr := range projects {
-			visible[pr.ID] = true
+		for _, orgID := range orgIDs {
+			projects, err := h.store.ListProjectsByOrg(r.Context(), orgID)
+			if err != nil {
+				h.serverError(w, "list_projects_by_org", err)
+				return
+			}
+			for _, pr := range projects {
+				visible[pr.ID] = true
+			}
 		}
 	}
 

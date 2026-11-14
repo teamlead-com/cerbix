@@ -89,12 +89,17 @@ func (s *Store) DeleteSubscriberByToken(ctx context.Context, token string) error
 // which is neither half of that axis. It missed the page's own project, and it missed every
 // service-backed component — so a page made only of Service components rendered the incident and
 // emailed nobody, which is the worst of both.
+//
+// Only pages a subscriber can still open count (sec-hardening-2 H-14): a page made `internal`
+// stops mailing its subscribers — their rows are kept, so making it public or unlisted again
+// resumes the mail without anyone re-subscribing.
 func (s *Store) ConfirmedSubscriberEmailsForProject(ctx context.Context, projectID string) ([]string, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT DISTINCT sub.email
 		  FROM subscribers sub
 		  JOIN status_pages sp ON sp.id = sub.status_page_id
 		 WHERE sub.confirmed_at IS NOT NULL
+		   AND sp.visibility IN ('public', 'unlisted')
 		   AND `+statusPageReportsProjectSQL, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("store: subscriber emails for project: %w", err)

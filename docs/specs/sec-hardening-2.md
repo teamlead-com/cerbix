@@ -3,7 +3,9 @@
 > **STATUS: revision 7 — APPROVED by the OWNER, 2026-11-13. Iteration 1 (H-1, H-5, H-6) implemented in
 > [iter-0209](../iterations/iter-0209.md) (D-0276); iteration 2 (H-2, H-13, H-1 fix 8) in
 > [iter-0210](../iterations/iter-0210.md) (D-0277; H-2 amended 2026-11-14 by two owner rulings and
-> the external review of that iteration); iterations 3–4 not yet implemented. The two owner questions are answered (§8).**
+> the external review of that iteration); iteration 3 (H-3, H-4, H-9a, H-14) in
+> [iter-0211](../iterations/iter-0211.md) (D-0278; the S4 content-type rule extended to `/auth/local/*`
+> by an owner ruling of 2026-11-14); iteration 4 not yet implemented. The two owner questions are answered (§8).**
 > Six independent review rounds: **4/6/5/1**, **1/5/2/1**, **0/3/3/1**, **0/1/3/0**, **0/1/1/0**,
 > **0/0/1/0** (P0/P1/P2/P3). Round 6 found no P0 or P1, called the design of all four iterations
 > complete, and stated that once its one mechanical P2 was written in — it is — the spec needs no
@@ -36,10 +38,10 @@
 | --- | --- | --- | --- | --- |
 | H-1 | P0 | A bearer JWT minted by the realm for ANY client authenticates as the human whose `sub` it carries | `internal/auth/auth.go:227`, `internal/auth/middleware.go` (pre-iter-0209 `principalFromJWT`, now `internal/auth/machine.go`), `internal/store/users.go:35-67` | D-0034 |
 | H-2 | P0 | The WebSocket prober writes an unvalidated target into a raw socket and accepts any TLS certificate; the RabbitMQ management URL is built by concatenation from `config.path` | pre-iter-0210 `wsTarget` and the concatenated handshake in `internal/prober/websocket.go`, `rabbitMgmtURL` in `internal/prober/rabbitmq.go`; the userinfo check at `internal/domain/monitor.go:360`; the parsers are now in `internal/domain/targets.go` | — |
-| H-3 | P1 | Reads gated by `InOrg` alone ignore a token's action allow-list and return `unlisted_token` to every reader | `internal/api/handlers_statuspage.go:55-62`, `internal/api/handlers_feed.go:19-25`, `internal/authz/authz.go:230-240`, `internal/api/handlers.go:51-60` | D-0139 preamble |
-| H-4 | P1 | No request-forgery defence beyond `SameSite=Lax`; a state-changing `GET /auth/logout` | `internal/auth/auth.go:374-384`, `internal/api/handlers.go:543-557`, `internal/auth/handlers.go:30-31` | — |
-| H-5 | P1 | A password reset does not revoke the account's sessions | `internal/store/users_reset.go`, `internal/auth/handlers_reset.go:70-96` | D-0139 item 3 |
-| H-6 | P1 | Unbounded bodies and passwords reach Argon2id; `reset/confirm` hashes before any limiter or token check | `internal/auth/local.go:54-56`, `internal/auth/handlers_reset.go:75-91`, `internal/auth/ratelimit.go` | — |
+| H-3 | P1 | Reads gated by `InOrg` alone ignore a token's action allow-list and return `unlisted_token` to every reader | `internal/api/handlers_statuspage.go:58-69`, `internal/api/handlers_feed.go:19-25`, `internal/authz/authz.go:273-283`, `internal/api/handlers.go:55-90` | D-0139 preamble |
+| H-4 | P1 | No request-forgery defence beyond `SameSite=Lax`; a state-changing `GET /auth/logout` | `internal/auth/auth.go:374-384`, `internal/api/handlers.go:603-628`, `internal/auth/handlers.go:30-40` | — |
+| H-5 | P1 | A password reset does not revoke the account's sessions | `internal/store/users_reset.go`, `internal/auth/handlers_reset.go:76-126` | D-0139 item 3 |
+| H-6 | P1 | Unbounded bodies and passwords reach Argon2id; `reset/confirm` hashes before any limiter or token check | `internal/auth/local.go:57-59`, `internal/auth/handlers_reset.go:78-110`, `internal/auth/ratelimit.go` | — |
 | H-13 | P1 | A credential header follows a redirect to another host: always for the shared prober client (synthetic `{{secret:…}}` headers), and on any two-hop chain for the canary prober, whose guard compares with the previous hop while `net/http` restores headers from the first | `internal/prober/prober.go:63-68`, `internal/prober/synthetic.go:68-72`, `internal/prober/canary.go:196-207` | D-0218 (D3c1: three points, listed in H-13) |
 | H-9a | P1 | The unlisted page's `?token=` leaks through `Referer` to any external link (no `Referrer-Policy`) | `internal/web/web.go:28-55`, `frontend/src/views/PublicStatusView.vue` | — |
 | H-7 | P2 | A TOTP code is accepted again inside its ±1-step window | `internal/totp/totp.go:60-73`, `internal/store/users_totp.go` | — |
@@ -48,7 +50,7 @@
 | H-10 | P2 | `branding.support_url` accepts any string and is rendered as `<a :href>` | `internal/domain/settings.go:35-53`, `frontend/src/views/LoginView.vue` | — |
 | H-11 | P2 | `/metrics` and the raw `readyz` error text are unauthenticated on the application port | `internal/httpsrv/server.go:60-74` | — |
 | H-12 | P2 | `/readyz` ignores `brokerUp` although the registry tracks it | `internal/metrics/metrics.go:900-905` | — |
-| H-14 | P2 | Subscribers of a page later made `internal` keep receiving incident mail | `internal/store/subscribers.go:92-98` (no visibility predicate) | — |
+| H-14 | P2 | Subscribers of a page later made `internal` keep receiving incident mail | `internal/store/subscribers.go:96-103` (no visibility predicate) | — |
 
 Severity: P0 — an authentication or tenant boundary is crossed, or arbitrary bytes reach the private
 network; P1 — a realistic attacker gains a capability they do not hold; P2 — defence in depth.
@@ -115,7 +117,7 @@ and it shipped no migration for the column it relied on.
      `FOR UPDATE` (the old `kind` must be known: `INSERT … ON CONFLICT … RETURNING` yields only the
      new one), then sets `kind = 'human'`, permanently. If the row was `machine`, in the same
      transaction **all its memberships are deleted and `is_global_admin` is set to false** — the
-     bootstrap-admin rule (`internal/auth/handlers.go:177-184`) then re-grants it only on a verified
+     bootstrap-admin rule (`internal/auth/handlers.go:203-211`) then re-grants it only on a verified
      bootstrap email — with a security log line and an audit row. A person must never inherit what
      was granted to something badged as a machine.
      **When that `FOR UPDATE` read finds no row it locks nothing**, and a bearer request may insert
@@ -266,7 +268,7 @@ stands. Two boundaries created since then are not honoured by `InOrg`: action-sc
 3. **Project-only members DO read the organization's status pages. OWNER, 2026-11-13.** The page is
    an org-level aggregation (D-0139) and membership of any project of the org is membership of the
    tenant. `Principal.Can(action, orgID, "")` rejects a project-scoped membership today
-   (`internal/authz/authz.go:196-218`), so the status-page read check is "the principal holds
+   (`internal/authz/authz.go:216-244`), so the status-page read check is "the principal holds
    `ActionStatusPageRead` through ANY membership in this org, org-level or project-level, and its
    token allow-list (if any) lists it" — a dedicated predicate with its own test, not a call with an
    empty project id. `NavigationLinks.vue` is unchanged. What H-3 removes is therefore exactly two
@@ -279,7 +281,7 @@ stands. Two boundaries created since then are not honoured by `InOrg`: action-sc
    actions", which would have answered 403 to every project-only member on the two calls the SPA makes
    at start (`frontend/src/stores/workspace.ts:51` and `:182`): `RoleProjectAdmin` holds no
    `ActionOrgRead`, and `Can(action, org, "")` skips project-scoped memberships
-   (`internal/authz/authz.go:209-220`).
+   (`internal/authz/authz.go:229-241`).
    - `getProject`: `!VisibleProject` → 404; `!Can(ActionProjectRead, org, project)` → 403.
    - `listProjects`: `!InOrg` → 404; a principal holding `ActionProjectRead` through no membership of
      the org (the any-membership predicate of fix 3) → 403; the list is filtered by
@@ -321,8 +323,8 @@ token. A route-enumeration test asserts the first clause.
    library's `text/plain`, and that **skips a request to `/api/*` carrying a bearer credential** — an API
    token or JWT is not an ambient credential.
    That skip is only sound with a change to `RequireAuth`, which revision 3 wrongly said was already
-   true: today it tries the **session cookie first** (`internal/auth/middleware.go:22`) and reaches
-   the bearer only afterwards (`:48`), so a request with a cookie *and* any `Authorization: Bearer x`
+   true: it tried the **session cookie first** and reached the bearer only afterwards (`RequireAuth`
+   before iter-0211), so a request with a cookie *and* any `Authorization: Bearer x`
    would skip the forgery check and still run as the session. Revision 4 answered with "any
    `Authorization` header disables the cookie", which is wrong the other way: behind a reverse proxy
    that adds HTTP Basic (or Negotiate) authentication the browser sends `Authorization: Basic …`
@@ -337,7 +339,7 @@ token. A route-enumeration test asserts the first clause.
    - The wrapper skips the forgery check only for `/api/*` requests with `hasBearerAuth(r)`. So a
      cookie beside a non-bearer `Authorization` is still checked, and `POST /auth/logout` — mounted
      on the application mux outside `RequireAuth`, reading the cookie itself
-     (`internal/auth/handlers.go:216`) — is never skipped whatever it carries.
+     (`internal/auth/handlers.go:224`) — is never skipped whatever it carries.
    The wrapper therefore sits in front of the whole application mux, `/auth/*` included, with the
    bypass patterns above.
 2. `decodeJSON` requires `Content-Type: application/json` **when it decodes a body** → 415. Body-less
@@ -612,7 +614,7 @@ for 1, 2 and 4 (each carries a migration); `make spa-snapshot` after any fronten
 
 - `secrets.dispatch_envelope` absent from `docker/config.prod.yaml` — **not a defect**: that file is
   `role=all`, whose dispatcher is in-process; no credential crosses a broker.
-- The last-org-admin check (`internal/api/handlers.go:306-315`) reads then writes without a lock —
+- The last-org-admin check (`internal/api/handlers.go:358-367`) reads then writes without a lock —
   **confirmed, left parked (P3)**: needs two org admins demoting each other in the same instant, and
   a global admin restores the role.
 

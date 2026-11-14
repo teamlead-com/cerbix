@@ -16,6 +16,12 @@ import (
 // 2 characters returns nothing.
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	p, _ := h.principal(r)
+	// A token whose allow-list omits project:read reads nothing here: 403, decided before the
+	// query is even looked at (review of iter-0211, finding 4).
+	if !p.AllowListed(authz.ActionProjectRead) {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if len([]rune(q)) < 2 {
 		writeJSON(w, http.StatusOK, map[string]any{"query": q, "hits": []domain.SearchHit{}})

@@ -202,7 +202,7 @@ function oidcLogin() {
       </div>
       <div v-if="branding.footerText || branding.supportUrl" class="mt-4 text-center text-[12px] text-ink-3">
         <p v-if="branding.footerText">{{ branding.footerText }}</p>
-        <a v-if="branding.supportUrl" :href="branding.supportUrl" target="_blank" rel="noopener" class="text-ink-2 underline decoration-border-strong underline-offset-2 hover:text-accent">Support</a>
+        <a v-if="branding.supportUrl" :href="branding.supportUrl" target="_blank" rel="noopener noreferrer" class="text-ink-2 underline decoration-border-strong underline-offset-2 hover:text-accent">Support</a>
       </div>
     </div>
   </main>

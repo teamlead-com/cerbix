@@ -57,7 +57,7 @@ func TestLocalAuthBodyCap(t *testing.T) {
 			t.Fatalf("fixture is %d bytes", len(big))
 		}
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(big)))
+		h.ServeHTTP(rec, jsonPost(path, strings.NewReader(big)))
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s with 4097 bytes = %d, want 400", path, rec.Code)
 		}
@@ -82,7 +82,7 @@ func TestResetConfirmTooLongIs400(t *testing.T) {
 
 	body := `{"token":"tok","new_password":"` + strings.Repeat("p", MaxPasswordBytes+1) + `"}`
 	rec := httptest.NewRecorder()
-	a.ResetConfirmHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/reset/confirm", strings.NewReader(body)))
+	a.ResetConfirmHandler(rec, jsonPost("/auth/local/reset/confirm", strings.NewReader(body)))
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "new password too long") {
 		t.Fatalf("1025-byte password = %d %s, want 400 new password too long", rec.Code, rec.Body.String())
 	}

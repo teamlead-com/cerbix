@@ -26,6 +26,12 @@ func (h *Handler) resolveUserEmails(r *http.Request, iter func(yield func(string
 		if _, seen := out[id]; seen {
 			return
 		}
+		// A row created by an API token records its synthetic id, which names no user (and is not
+		// a uuid, so PostgreSQL would refuse the lookup): there is no email to resolve.
+		if strings.HasPrefix(id, authz.SyntheticTokenActorPrefix) {
+			out[id] = ""
+			return
+		}
 		if u, err := h.store.GetUser(r.Context(), id); err == nil {
 			out[id] = u.Email
 		} else {

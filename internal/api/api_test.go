@@ -2163,6 +2163,11 @@ func (f fakeFPStatus) FileProviderRuntimeStatuses() []api.FileProviderRuntimeSta
 
 func do(h http.Handler, p authz.Principal, method, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	if body != "" {
+		// Every real client declares its JSON (the SPA, the CLI, Alertmanager); a JSON body under
+		// any other content type is 415 (sec-hardening-2 H-4 fix 2).
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req = req.WithContext(auth.WithPrincipal(req.Context(), p))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

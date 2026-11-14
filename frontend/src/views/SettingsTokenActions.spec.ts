@@ -112,7 +112,7 @@ describe("SettingsView API-token allow-list (FR-025 D12)", () => {
 
     // The editor's grants, in the catalogue order the grid lays them out. Hard-coded on purpose: this
     // mirrors `roleGrants["editor"]` in internal/authz/authz.go, so a drift in either table fails here.
-    expect(offered(w)).toEqual(["project:read", "project:write", "gate:evaluate", "gate:policy:write", "change:record", "org:read"]);
+    expect(offered(w)).toEqual(["project:read", "status_page:read", "project:write", "gate:evaluate", "gate:policy:write", "change:record", "org:read"]);
     expect([...offered(w)].sort(), "…and that is precisely the role's grant set").toEqual([...ROLE_GRANTS.editor].sort());
     expect(dormant(w), "what the editor lacks is shown, not hidden and not offered").toEqual([
       "project:manage",

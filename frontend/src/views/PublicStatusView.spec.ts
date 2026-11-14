@@ -218,7 +218,7 @@ describe("PublicStatusView service-first active incidents", () => {
     expect(support).toBeDefined();
     expect(support!.attributes("href")).toBe("https://support.example.invalid/cerbix");
     expect(support!.attributes("target")).toBe("_blank");
-    expect(support!.attributes("rel")).toBe("noopener");
+    expect(support!.attributes("rel")).toBe("noopener noreferrer");
   });
 
   it("communicates the next theme state on the public status control", async () => {

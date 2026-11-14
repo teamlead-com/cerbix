@@ -180,8 +180,12 @@ type StatusPage struct {
 	Title         string     `json:"title"`
 	Visibility    Visibility `json:"visibility"`
 	UnlistedToken string     `json:"unlisted_token,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	// HasUnlistedToken is a READ-MODEL field, never stored: the page has a secret link. The token
+	// itself is served only to a principal holding org:manage (sec-hardening-2 H-3 fix 4); every
+	// other reader gets this flag and opens the page through the authenticated preview.
+	HasUnlistedToken bool      `json:"has_unlisted_token"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // Validate enforces status-page invariants.

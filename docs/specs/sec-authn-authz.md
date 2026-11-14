@@ -11,7 +11,7 @@ local login, API tokens and machine access. The provider is **not hardcoded** (D
 - OIDC Authorization Code + PKCE (S256) against any conformant issuer; discovery via
   `oidc.issuer`; ID token verification (JWKS, `iss`/`aud`, signature, exp) + nonce.
 - Endpoints: `GET /auth/login` (state+nonce+PKCE in `auth_flows`, redirect to the provider),
-  `GET /auth/callback` (code exchange, verify, JIT, session, cookie), `GET|POST /auth/logout`.
+  `GET /auth/callback` (code exchange, verify, JIT, session, cookie), `POST /auth/logout` (`GET` is 405 since D-0278).
 - **Discovery for the UI** (D-0045): public `GET /auth/config` → `{local, oidc,
   oidc_button_label}`; the SPA renders a provider-neutral login button labeled from
   `oidc.button_label` (default "Continue with SSO"). The local form — only if `local`.
@@ -30,8 +30,12 @@ local login, API tokens and machine access. The provider is **not hardcoded** (D
   `Can(action, orgID, projectID)` + `VisibleScope` (its query-scope mirror) + `InOrg` +
   `VisibleOrg`/`VisibleProject`.
 - A single source of access rules; global admin — bypass. For the matrix see `func-tenancy-rbac.md`.
-- Middleware `RequireAuth`: cookie → session → user+memberships → `Principal` in the context;
-  then service-token (Bearer) → client-credentials JWT; 401 without a valid principal.
+- Middleware `RequireAuth` chooses the credential by the SCHEME of `Authorization` (sec-hardening-2
+  H-4, D-0278): a request with a `Bearer` value (`auth.HasBearerAuth`, case-insensitive) is
+  authenticated by exactly one non-empty Bearer — a service-account token, else a client-credentials
+  JWT — and its session cookie is never read; any other request (no `Authorization`, or a proxy's
+  `Basic`/`Negotiate`) by the cookie alone: cookie → session → user+memberships → `Principal` in the
+  context. 401 without a valid principal.
   Handlers call `Can`; isolation on every read/write.
 
 ## Default local login (FR-015, implemented in iter-0005)

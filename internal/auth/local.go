@@ -46,6 +46,9 @@ func (a *Authenticator) LocalLoginHandler(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "too many login attempts, try again later"})
 	}
+	if refuseNonJSON(w, r) {
+		return
+	}
 	ip := clientIP(r, a.trustedProxies, a.trustedProxyNets)
 	if !a.limits.perIP.allow("login|"+ip, time.Now()) {
 		tooMany()

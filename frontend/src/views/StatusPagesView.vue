@@ -242,24 +242,31 @@ async function removePage() {
   }
 }
 
+// sec-hardening-2 H-3 fix 4: the unlisted token reaches org admins only. A member who reads the
+// page without it (has_unlisted_token, no token) opens it the way an internal page opens — the
+// authed preview and the authed feed — or every link would 404.
+function opensThroughPreview(p: StatusPage): boolean {
+  return p.visibility === "internal" || (p.visibility === "unlisted" && !p.unlisted_token);
+}
+
 // Feed link that actually opens, mirroring publicPath: unlisted carries its
-// token, internal uses the authed feed endpoint (members only).
+// token, internal (and unlisted without the token) uses the authed feed endpoint.
 function feedHref(fmt: string): string {
   const p = selected.value;
   if (!p) return "";
-  if (p.visibility === "internal") return `/api/v1/status-pages/${p.id}/feed?format=${fmt}`;
+  if (opensThroughPreview(p)) return `/api/v1/status-pages/${p.id}/feed?format=${fmt}`;
   const tok = p.visibility === "unlisted" && p.unlisted_token ? `&token=${p.unlisted_token}` : "";
   return `/api/v1/public/status-pages/${p.slug}/feed?format=${fmt}${tok}`;
 }
 
-// Preview path that actually opens: unlisted carries its token, internal falls
-// back to the authed render endpoint via ?preview=<pageID> (members only).
+// Preview path that actually opens: unlisted carries its token, internal (and
+// unlisted without the token) falls back to the authed render via ?preview=<pageID>.
 const publicPath = computed(() => {
   const p = selected.value;
   if (!p) return "";
   const base = `/status/${p.slug}`;
   if (p.visibility === "unlisted" && p.unlisted_token) return `${base}?token=${p.unlisted_token}`;
-  if (p.visibility === "internal") return `${base}?preview=${p.id}`;
+  if (opensThroughPreview(p)) return `${base}?preview=${p.id}`;
   return base;
 });
 const monitorName = (id?: string) => monitors.value.find((m) => m.id === id)?.name ?? "—";
@@ -490,6 +497,7 @@ watch(() => ws.orgId, loadPages);
               <a :href="feedHref('json')" class="font-mono text-ink-3 hover:text-accent">json</a>
             </div>
             <p v-if="selected.unlisted_token" class="mt-2 font-mono text-[11.5px] text-ink-3">unlisted token: {{ selected.unlisted_token }}</p>
+            <p v-else-if="selected.has_unlisted_token" class="mt-2 text-[11.5px] text-ink-3" data-testid="secret-link-note">Secret link · only organization admins see the token</p>
           </div>
 
           <!-- components -->

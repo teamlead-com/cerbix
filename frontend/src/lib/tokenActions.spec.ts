@@ -24,13 +24,13 @@ import {
 
 const AUTHZ_GO_ROLE_GRANTS: Record<Role, string[]> = {
   // domain.RoleOrgAdmin
-  org_admin: ["org:read", "org:manage", "project:read", "project:manage", "project:write", "gate:evaluate", "gate:policy:write", "gate:override", "change:record"],
+  org_admin: ["org:read", "org:manage", "project:read", "project:manage", "project:write", "gate:evaluate", "gate:policy:write", "gate:override", "change:record", "status_page:read"],
   // domain.RoleProjectAdmin
-  project_admin: ["project:read", "project:manage", "project:write", "gate:evaluate", "gate:policy:write", "gate:override", "change:record"],
+  project_admin: ["project:read", "project:manage", "project:write", "gate:evaluate", "gate:policy:write", "gate:override", "change:record", "status_page:read"],
   // domain.RoleEditor
-  editor: ["org:read", "project:read", "project:write", "gate:evaluate", "gate:policy:write", "change:record"],
+  editor: ["org:read", "project:read", "project:write", "gate:evaluate", "gate:policy:write", "change:record", "status_page:read"],
   // domain.RoleViewer
-  viewer: ["org:read", "project:read", "gate:evaluate"],
+  viewer: ["org:read", "project:read", "gate:evaluate", "status_page:read"],
 };
 
 const ROLES = Object.keys(AUTHZ_GO_ROLE_GRANTS) as Role[];
@@ -57,7 +57,7 @@ describe("tokenActions — ROLE_GRANTS mirrors internal/authz/authz.go, grant fo
     for (const a of ROLE_GRANTS.viewer) expect(ROLE_GRANTS.editor, `editor must grant ${a}`).toContain(a);
     for (const a of ROLE_GRANTS.project_admin) expect(ROLE_GRANTS.org_admin, `org_admin must grant ${a}`).toContain(a);
     expect(ROLE_GRANTS.project_admin, "project_admin is a PROJECT role: no org read").not.toContain("org:read");
-    expect(ladder.map((r) => roleGrants(r).length)).toEqual([3, 6, 7, 9]);
+    expect(ladder.map((r) => roleGrants(r).length)).toEqual([4, 7, 8, 10]);
   });
 
   it("an unknown role grants nothing — a form for a role this SPA does not know offers no chip", () => {
@@ -77,9 +77,9 @@ describe("tokenActions — actionsFor: what the form offers, and what it shows d
     }
   });
 
-  it("a viewer is offered the three reads and is told which role each other action needs", () => {
+  it("a viewer is offered the four reads and is told which role each other action needs", () => {
     const { offered, lacking } = actionsFor("viewer");
-    expect(offered).toEqual(["project:read", "gate:evaluate", "org:read"]);
+    expect(offered).toEqual(["project:read", "status_page:read", "gate:evaluate", "org:read"]);
     expect(lacking.map((l) => [l.action, l.needs])).toEqual([
       ["project:write", "editor"],
       ["project:manage", "project_admin"],
@@ -98,6 +98,7 @@ describe("tokenActions — actionsFor: what the form offers, and what it shows d
     expect(neededRole("gate:override")).toBe("project_admin");
     expect(neededRole("org:manage")).toBe("org_admin");
     expect(neededRole("project:read")).toBe("viewer");
+    expect(neededRole("status_page:read"), "sec-hardening-2 H-3: every role reads the org's status pages").toBe("viewer");
   });
 
   it("an unknown role offers nothing and lacks everything — no chip that could only 400", () => {

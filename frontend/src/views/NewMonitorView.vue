@@ -40,6 +40,7 @@ import { useWorkspace } from "@/stores/workspace";
 type MonitorType = "http" | "tcp" | "icmp" | "dns" | "tls" | "grpc" | "composite" | "postgres" | "mysql" | "redis" | "promql" | "rabbitmq" | "websocket" | "ssh" | "synthetic" | "async_canary" | "push";
 type CreateMonitor = components["schemas"]["CreateMonitor"];
 type UpdateMonitor = components["schemas"]["UpdateMonitor"];
+type TestMonitorSpec = components["schemas"]["TestMonitorSpec"];
 type Channel = components["schemas"]["NotificationChannel"];
 type ProjectSecret = components["schemas"]["ProjectSecret"];
 
@@ -980,20 +981,22 @@ async function testConnection() {
   testError.value = "";
   testResult.value = null;
   try {
-    const body: Record<string, unknown> = {
-      type: form.type,
+    // The test body is TestMonitorSpec — exactly the fields the server decodes (iter-0211). The
+    // type is narrowed: isTestable has already excluded push and composite, which it does not list.
+    const body: TestMonitorSpec = {
+      type: form.type as TestMonitorSpec["type"],
       region: form.region.trim() || "core",
       timeout_seconds: form.timeout_seconds,
       interval_seconds: form.interval_seconds,
     };
     if (showTarget.value) body.target = form.target.trim();
-    if (form.type === "http") body.method = form.method;
+    if (form.type === "http") body.method = form.method as TestMonitorSpec["method"];
     if (showConditions.value) body.conditions = assembled.value;
     const cfg = typeConfig();
     if (cfg) body.config = cfg;
     const res = await api.POST("/api/v1/projects/{projectID}/monitors/test", {
       params: { path: { projectID: ws.projectId } },
-      body: body as never,
+      body,
     });
     if (res.error) {
       testError.value = (res.error as { error?: string })?.error || "Test failed.";

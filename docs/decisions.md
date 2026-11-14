@@ -9314,3 +9314,72 @@ public IdPs. H-5: a password reset kept every session alive. H-6: unbounded bodi
 - Automation that issued tokens with a token gets 403.
 - Two canary header tests drop the body's `token` field, as the spec requires. The same-origin,
   downgrade and userinfo canary tests are unchanged.
+
+## D-0278 — reads follow the token's allow-list, cross-origin mutations are refused before any handler, public pages send no Referer, hidden pages mail no subscriber (sec-hardening-2 iteration 3, 2026-11-14)
+
+**Context.** [`sec-hardening-2.md`](specs/sec-hardening-2.md) iteration 3 covers four findings.
+- **H-3 (P1).** Reads gated by `InOrg` alone ignored an action-scoped token's allow-list (D-0212) and
+  served an unlisted page's token to every reader. Three adjacent reads (`/me`, `/organizations`,
+  `/events`) put an API token's synthetic actor id into a uuid comparison and answered 500 on
+  PostgreSQL — invisible on the fakes.
+- **H-4 (P1).** Nothing inspected `Origin` or `Sec-Fetch-Site`, so a sibling host could post with the
+  session cookie; `RequireAuth` read the cookie before a Bearer header; `decodeJSON` ignored the
+  content type; `GET /auth/logout` ended the session.
+- **H-9a (P1).** An unlisted page's `?token=` could leave in a `Referer`.
+- **H-14 (P2).** Subscribers of a page made `internal` kept receiving incident mail.
+
+**Decision.**
+1. **`status_page:read`** joins the action catalogue, granted by every role. The status-page reads
+   apply the D-0212 two-step — outside the org 404, inside without the action 403 — where the action
+   is held through ANY membership of the org (`authz.CanAnyScopeInOrg`), so project-only members keep
+   reading the org's pages (owner, 2026-11-13). `unlisted_token` is served only with `org:manage`;
+   every reader gets `has_unlisted_token`.
+2. **One contract per adjacent read**, as H-3 fix 5 lists: `getProject` (404 invisible, 403 without
+   `project:read`), `listProjects` (403 to a principal holding `project:read` nowhere in the org,
+   filtered per project), `getOrganization` and `listOrganizations` (a token by its own memberships,
+   needing `org:read` or `project:read` in its list), `/events` (`VisibleScope`, 403 to a token without
+   `project:read`), `/me` (403 to a token). `version`, `regions` and `monitor-defaults` are the entire
+   tenant-free list.
+3. **`http.CrossOriginProtection` in front of the whole application mux**, through a wrapper in the new
+   `internal/appmux` (the one place the port is composed): a JSON 403, bypass for `/api/v1/public/` and
+   `/api/v1/agent/`, and no check for an `/api/*` request presenting a Bearer credential.
+   `auth.HasBearerAuth` is the one predicate: `RequireAuth` never reads the cookie of such a request,
+   and demands exactly one non-empty Bearer. `GET /auth/logout` answers 405 explicitly (the SPA
+   catch-all would otherwise answer it 200).
+4. **One content-type rule, `auth.HasJSONContentType`** (media type `application/json`, parameters
+   allowed; a declared-empty body passes): every API JSON decoder (`decodeJSON`, `decodeJSONBody`,
+   `gateDecodeBody`, `gateDecodeEmptyBody` when a body is present) and the three `/auth/local/*`
+   handlers answer 415 otherwise. On `/auth/local/*` it runs before every limiter and before the body
+   is read. The extension to `/auth/local/*` is the owner's ruling of 2026-11-14 on the boundary of S4
+   ("a JSON body is decoded only under a JSON content type", with no carve-out for the API) — a
+   clarification of the invariant, not a departure from the spec.
+5. **`Referrer-Policy`**: `no-referrer` on `/status/*` and `/api/v1/public/*`,
+   `strict-origin-when-cross-origin` elsewhere; `rel="noopener noreferrer"` on the support link.
+6. **`ConfirmedSubscriberEmailsForProject`** counts public and unlisted pages only.
+
+**Outside the spec, one contract fix.** The OpenAPI body of test-connection named `CreateMonitor`,
+whose `name` (and every other saved-monitor field) the server's strict decoder refuses. It is now
+`TestMonitorSpec` — exactly the eight fields the server decodes — and a test sends every property the
+contract declares.
+
+**Consequences.** Breaking, with CHANGELOG upgrade notes: an allow-listed token made before
+`status_page:read` existed gets 403 on status pages; tokens get 403 on `/me` and where their list
+names no read; a cross-origin browser mutation is 403; a non-JSON body is 415, including
+a script calling `/auth/local/login` without the header; `GET /auth/logout` is 405. The status-page
+list opens an unlisted page through the preview for a member without `org:manage` (mock
+[`mock-sec-hardening-2-iter3.html`](design/mock-sec-hardening-2-iter3.html), approved by the owner).
+
+**Amended after the external review (2026-11-14).**
+- A token principal is refused (403) on every `POST /api/v1/me/*` before any store call; a failed TOTP
+  read is 500; a synthetic token id is never looked up as a user.
+- The forgery check exempts `/api/v1/agent/` only when the agent router is mounted, and decides the
+  Bearer exemption by asking a `ServeMux` holding the one pattern `/api/` whether it routes the request
+  there (a comparable marker handler, as `CrossOriginProtection` asks its own mux about bypass
+  patterns) — the router's own answer, not a string approximation of it (second review).
+- `gateDecodeEmptyBody` checks the content type before it reads; a body of unknown length without a
+  JSON type is probed for at most one byte — none is "no body" and passes, one is 415 (second review).
+- `GET /api/v1/search` answers 403 to a token whose list omits `project:read`; the route enumeration
+  demands 403/404 outside an explicit list that cites each clause.
+- `TestMonitorSpec` declares no defaults the server applies itself; test-connection documents 501.
+- `Referrer-Policy` is set by the application handler on every response it serves; the operational
+  endpoints and path-canonicalization redirects of `internal/httpsrv` carry none.

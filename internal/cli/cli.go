@@ -18,6 +18,7 @@ import (
 
 	"github.com/teamlead-com/cerbix/internal/agent"
 	"github.com/teamlead-com/cerbix/internal/api"
+	"github.com/teamlead-com/cerbix/internal/appmux"
 	"github.com/teamlead-com/cerbix/internal/auth"
 	"github.com/teamlead-com/cerbix/internal/buildinfo"
 	"github.com/teamlead-com/cerbix/internal/config"
@@ -603,8 +604,6 @@ func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 		}
 		spawn(func() { authn.RunOIDC(ctx) }) // first sync + reloader (non-fatal, retrying)
 		authn.WithSettings(settingsSvc)
-		appMux := http.NewServeMux()
-		authn.Routes(appMux)
 		apiHandler = api.New(st, logger, cfg.Local.MinPasswordLength).WithMetrics(registry).WithEvents(broker).WithOIDC(authn).WithSettings(settingsSvc).
 			WithSecretsEnabled(cfg.Secrets.Enabled).
 			WithHeartbeatRetention(cfg.Heartbeats.RetentionDays).
@@ -644,7 +643,8 @@ func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 		// Enable the pull transport (agent endpoints) when any pull config is present:
 		// config tokens, per-region agents, or pull-served regions (database-managed
 		// agent tokens can be issued at runtime regardless).
-		if cfg.Pull.Token != "" || len(cfg.Pull.Agents) > 0 || len(cfg.Pull.Regions) > 0 {
+		pullEnabled := cfg.Pull.Token != "" || len(cfg.Pull.Agents) > 0 || len(cfg.Pull.Regions) > 0
+		if pullEnabled {
 			regionTokens := make(map[string]string, len(cfg.Pull.Agents))
 			for _, a := range cfg.Pull.Agents {
 				if a.Region != "" && a.Token != "" {
@@ -656,20 +656,15 @@ func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 			spawn(func() { notifier.Run(ctx) })
 			apiHandler.WithAgentToken(cfg.Pull.Token).WithAgentRegionTokens(regionTokens).
 				WithAgentDBTokens().WithPullWaiter(notifier)
-			appMux.Handle("/api/v1/agent/", apiHandler.AgentRouter())
 		}
-		appMux.Handle("/api/", authn.RequireAuth(apiHandler.APIRouter()))
-		// Public status-page rendering is unauthenticated; its more-specific prefix
-		// takes precedence over the auth-gated /api/ handler (ServeMux longest-match).
-		appMux.Handle("/api/v1/public/", apiHandler.PublicRouter())
 		spa, err := web.New()
 		if err != nil {
 			logging.Critical(logger, "web_init_failed", "error", err.Error())
 			return 1
 		}
-		appMux.Handle("/", spa) // catch-all: serve the embedded SPA
+		appHandler := appmux.New(appmux.Config{Auth: authn, API: apiHandler, SPA: spa, Agent: pullEnabled})
 		// Access log around the whole app: API/auth at INFO, static at DEBUG.
-		app = logging.AccessLog(logger, appMux)
+		app = logging.AccessLog(logger, appHandler)
 		logger.Info("auth_enabled", "oidc_active", authn.OIDCActive(), "local", cfg.Local.Enabled)
 	}
 

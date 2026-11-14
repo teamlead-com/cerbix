@@ -670,6 +670,9 @@ labels:
 - `/metrics` and `/healthz` are **on the same port**. If Traefik routes `/*` externally, `/metrics`
   becomes public. Restrict it: a separate router with an IP allowlist/basic-auth middleware on
   `server.metrics_path`, or scrape Prometheus over the internal network, or don't publish that path.
+- Keep Traefik's default `passHostHeader: true`: the request-forgery check compares a browser's
+  `Origin` with the `Host` cerbix receives when the browser sends no `Sec-Fetch-Site` (plain HTTP),
+  and a rewritten `Host` would refuse every change, sign-in included (D-0278; runbook, "Request forgery").
 - Multiple `api` replicas — a regular Traefik load balancer (a service with multiple backends);
   sessions are server-side in Postgres, so sticky sessions are not required.
 

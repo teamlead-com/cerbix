@@ -21,11 +21,17 @@ func (h *Handler) version(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, buildinfo.Current())
 }
 
-// me returns the current user and their memberships.
+// me returns the current user and their memberships. It describes a USER: a token principal
+// (an API token, whose id is synthetic, or an OIDC machine identity) gets 403 rather than a
+// lookup of an id that names no user (sec-hardening-2 H-3 fix 5).
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if p.ViaToken {
+		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
 	user, err := h.store.GetUser(r.Context(), p.UserID)
@@ -41,16 +47,38 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// listOrganizations lists organizations visible to the caller.
+// listOrganizations lists organizations visible to the caller. A token principal gets the
+// organizations of its own memberships, by id, under the allow-list rule of getOrganization — never
+// a lookup by its user id, which for an API token is synthetic and not a uuid (sec-hardening-2 H-3
+// fix 5); a token that may read none gets an empty list.
 func (h *Handler) listOrganizations(w http.ResponseWriter, r *http.Request) {
 	p, _ := h.principal(r)
 	var (
 		orgs []domain.Organization
 		err  error
 	)
-	if p.IsGlobalAdmin {
+	switch {
+	case p.IsGlobalAdmin:
 		orgs, err = h.store.ListOrganizations(r.Context())
-	} else {
+	case p.ViaToken:
+		orgs = []domain.Organization{}
+		seen := map[string]bool{}
+		for _, m := range p.Memberships {
+			if seen[m.OrgID] || !tokenReadsOrg(p, m.OrgID) {
+				continue
+			}
+			seen[m.OrgID] = true
+			org, gerr := h.store.GetOrganization(r.Context(), m.OrgID)
+			if errors.Is(gerr, store.ErrNotFound) {
+				continue
+			}
+			if gerr != nil {
+				err = gerr
+				break
+			}
+			orgs = append(orgs, org)
+		}
+	default:
 		orgs, err = h.store.ListOrganizationsForUser(r.Context(), p.UserID)
 	}
 	if err != nil {
@@ -58,6 +86,13 @@ func (h *Handler) listOrganizations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, orgs)
+}
+
+// tokenReadsOrg is the token half of the organization read (sec-hardening-2 H-3 fix 5): a token
+// reads its organization's metadata when it holds org:read or project:read there — through any
+// membership, and only if its allow-list names one of them. A human member reads it as before.
+func tokenReadsOrg(p authz.Principal, orgID string) bool {
+	return p.CanAnyScopeInOrg(authz.ActionOrgRead, orgID) || p.CanAnyScopeInOrg(authz.ActionProjectRead, orgID)
 }
 
 // createOrganization creates an organization (global admin only).
@@ -87,12 +122,17 @@ func (h *Handler) createOrganization(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, org)
 }
 
-// getOrganization returns one organization if the caller belongs to it.
+// getOrganization returns one organization if the caller belongs to it: outside it 404; any human
+// member reads its metadata; a token needs org:read or project:read in its allow-list, else 403.
 func (h *Handler) getOrganization(w http.ResponseWriter, r *http.Request) {
 	p, _ := h.principal(r)
 	orgID := r.PathValue("orgID")
 	if !p.InOrg(orgID) {
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if p.ViaToken && !tokenReadsOrg(p, orgID) {
+		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
 	org, err := h.store.GetOrganization(r.Context(), orgID)
@@ -143,12 +183,18 @@ func (h *Handler) deleteOrganization(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// listProjects lists the projects of an org visible to the caller.
+// listProjects lists the projects of an org the caller may read: outside the org 404; a principal
+// holding project:read through no membership of the org (or whose allow-list omits it) 403; the
+// list is filtered by project:read on each project (sec-hardening-2 H-3 fix 5).
 func (h *Handler) listProjects(w http.ResponseWriter, r *http.Request) {
 	p, _ := h.principal(r)
 	orgID := r.PathValue("orgID")
 	if !p.InOrg(orgID) {
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if !p.CanAnyScopeInOrg(authz.ActionProjectRead, orgID) {
+		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
 	all, err := h.store.ListProjectsByOrg(r.Context(), orgID)
@@ -158,7 +204,7 @@ func (h *Handler) listProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	visible := make([]domain.Project, 0, len(all))
 	for _, proj := range all {
-		if p.VisibleProject(orgID, proj.ID) {
+		if p.Can(authz.ActionProjectRead, orgID, proj.ID) {
 			visible = append(visible, proj)
 		}
 	}
@@ -197,7 +243,8 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, proj)
 }
 
-// getProject returns one project if the caller may see it.
+// getProject returns one project: invisible 404, visible without project:read 403 (the D-0212
+// two-step, sec-hardening-2 H-3 fix 5).
 func (h *Handler) getProject(w http.ResponseWriter, r *http.Request) {
 	p, _ := h.principal(r)
 	proj, err := h.store.GetProject(r.Context(), r.PathValue("projectID"))
@@ -211,6 +258,10 @@ func (h *Handler) getProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if !p.VisibleProject(proj.OrgID, proj.ID) {
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if !p.Can(authz.ActionProjectRead, proj.OrgID, proj.ID) {
+		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
 	writeJSON(w, http.StatusOK, proj)
@@ -454,11 +505,16 @@ func (h *Handler) addMember(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
-// changePassword lets a local user change their own password.
+// changePassword lets a local user change their own password. A token principal is refused before
+// any store call: its id is synthetic and names no user (review of iter-0211, finding 1).
 func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	p, ok := h.principal(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if p.ViaToken {
+		writeError(w, http.StatusForbidden, "a password belongs to an interactive local account")
 		return
 	}
 	var body struct {
@@ -540,7 +596,22 @@ func maxBytes(next http.Handler, limit int64) http.Handler {
 	})
 }
 
+// hasJSONContentType answers 415 unless auth.HasJSONContentType holds — the one content-type rule
+// of sec-hardening-2 H-4 (S4), shared with the /auth/local/* handlers. Every API decoder calls it
+// when, and only when, it decodes a body: body-less mutations are unaffected, and a request that
+// declares an empty body keeps the decoder's own 400.
+func hasJSONContentType(w http.ResponseWriter, r *http.Request) bool {
+	if !auth.HasJSONContentType(r) {
+		writeError(w, http.StatusUnsupportedMediaType, auth.JSONContentTypeError)
+		return false
+	}
+	return true
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	if !hasJSONContentType(w, r) {
+		return false
+	}
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {

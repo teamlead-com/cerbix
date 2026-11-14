@@ -59,7 +59,7 @@ func TestLoginTOTPPolicyFailsClosed(t *testing.T) {
 	delete(fs.usersByID, u.ID)
 
 	rec := httptest.NewRecorder()
-	a.LocalLoginHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/local/login",
+	a.LocalLoginHandler(rec, jsonPost("/auth/local/login",
 		strings.NewReader(`{"username":"u@x","password":"pw12345678"}`)))
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("code = %d, want 500 (fail-closed, no MFA-less session)", rec.Code)

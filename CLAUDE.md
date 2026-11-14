@@ -65,7 +65,7 @@ build output).
 ```bash
 # Canonical single-stack gate starts the required SSO and mail dependencies:
 make dev-up
-make dev-test                         # 89 pass + 1 skip (no file-managed monitor in this stack) as of iter-0206.
+make dev-test                         # 90 pass + 1 skip (no file-managed monitor in this stack) as of iter-0211.
                                       # The dev stack runs with `ledger.carrier_enabled: true` (D-0244) and the
                                       # target DERIVES CERBIX_LEDGER_CARRIER from docker/config.dev.yaml, so the
                                       # generation-4 path is exercised by the ordinary gate rather than by hand.

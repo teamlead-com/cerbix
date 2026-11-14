@@ -31,7 +31,6 @@ type Store interface {
 	CreateProject(ctx context.Context, orgID, slug, name string) (domain.Project, error)
 	GetProject(ctx context.Context, id string) (domain.Project, error)
 	DeleteProject(ctx context.Context, orgID, projectID string) error
-	ListProjectsForUser(ctx context.Context, userID string) ([]domain.Project, error)
 	CreateMembership(ctx context.Context, m domain.Membership) (domain.Membership, error)
 	ListOrgMembers(ctx context.Context, orgID string) ([]domain.Member, error)
 	GetMembership(ctx context.Context, id string) (domain.Membership, error)

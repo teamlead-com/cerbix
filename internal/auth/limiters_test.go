@@ -44,7 +44,7 @@ func limitedAuthenticator(t *testing.T, perMinute int) (*Authenticator, *fakeSto
 }
 
 func login(a *Authenticator, ip, email, password string) int {
-	req := httptest.NewRequest(http.MethodPost, "/auth/local/login",
+	req := jsonPost("/auth/local/login",
 		strings.NewReader(fmt.Sprintf(`{"username":%q,"password":%q}`, email, password)))
 	req.RemoteAddr = ip + ":40000"
 	rec := httptest.NewRecorder()
@@ -137,7 +137,7 @@ func TestLoginIPEmailKeyCannotCollideWithReset(t *testing.T) {
 	a, _ := limitedAuthenticator(t, 4) // per-(IP, email) = 2
 	a.trustedProxies = 1
 	forged := func() int {
-		req := httptest.NewRequest(http.MethodPost, "/auth/local/login", strings.NewReader(`{"username":"u@x.com","password":"wrong"}`))
+		req := jsonPost("/auth/local/login", strings.NewReader(`{"username":"u@x.com","password":"wrong"}`))
 		req.RemoteAddr = "198.51.100.9:40000"
 		req.Header.Set("X-Forwarded-For", "reset|203.0.113.7")
 		rec := httptest.NewRecorder()
@@ -146,7 +146,7 @@ func TestLoginIPEmailKeyCannotCollideWithReset(t *testing.T) {
 	}
 	forged()
 	forged()
-	req := httptest.NewRequest(http.MethodPost, "/auth/local/reset/request", strings.NewReader(`{"email":"u@x.com"}`))
+	req := jsonPost("/auth/local/reset/request", strings.NewReader(`{"email":"u@x.com"}`))
 	req.RemoteAddr = "203.0.113.7:40000"
 	rec := httptest.NewRecorder()
 	a.ResetRequestHandler(rec, req)
@@ -177,11 +177,11 @@ func (g readGuard) Read([]byte) (int, error) {
 
 func TestResetConfirmLimitedBeforeBodyRead(t *testing.T) {
 	a, _ := limitedAuthenticator(t, 1)
-	first := httptest.NewRequest(http.MethodPost, "/auth/local/reset/confirm", strings.NewReader(`{"token":"x","new_password":"longenough1"}`))
+	first := jsonPost("/auth/local/reset/confirm", strings.NewReader(`{"token":"x","new_password":"longenough1"}`))
 	first.RemoteAddr = "10.0.0.1:40000"
 	a.ResetConfirmHandler(httptest.NewRecorder(), first)
 
-	second := httptest.NewRequest(http.MethodPost, "/auth/local/reset/confirm", readGuard{t})
+	second := jsonPost("/auth/local/reset/confirm", readGuard{t})
 	second.RemoteAddr = "10.0.0.1:40000"
 	rec := httptest.NewRecorder()
 	a.ResetConfirmHandler(rec, second)
@@ -192,7 +192,7 @@ func TestResetConfirmLimitedBeforeBodyRead(t *testing.T) {
 
 func TestResetRequestPerIPAndPerIPEmail(t *testing.T) {
 	request := func(a *Authenticator, ip, email string) int {
-		req := httptest.NewRequest(http.MethodPost, "/auth/local/reset/request", strings.NewReader(fmt.Sprintf(`{"email":%q}`, email)))
+		req := jsonPost("/auth/local/reset/request", strings.NewReader(fmt.Sprintf(`{"email":%q}`, email)))
 		req.RemoteAddr = ip + ":40000"
 		rec := httptest.NewRecorder()
 		a.ResetRequestHandler(rec, req)

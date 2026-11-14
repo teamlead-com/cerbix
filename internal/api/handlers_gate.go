@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/teamlead-com/cerbix/internal/auth"
 	"github.com/teamlead-com/cerbix/internal/authz"
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
@@ -303,6 +304,9 @@ func (h *Handler) recordGateEvaluateError(kind string) {
 // 400 naming the field"). Missing fields are the caller's to detect — the request structs use
 // pointers so absence is visible. A trailing second value fails closed, as decodeJSONBody does.
 func gateDecodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if !hasJSONContentType(w, r) {
+		return false
+	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, serviceMaxBody))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
@@ -364,6 +368,27 @@ func gateWantType(t reflect.Type) string {
 // naming it (D9, §7 "the same field in a decision body is refused as unknown-field"), so the
 // override path stays the one endpoint that can create one.
 func gateDecodeEmptyBody(w http.ResponseWriter, r *http.Request) bool {
+	// The content type is checked FIRST, before the body is read (review of iter-0211, finding 3):
+	// a declared-empty body passes (auth.HasJSONContentType), and a body of whitespace is still a
+	// body that must be declared JSON. A body of UNKNOWN length (ContentLength -1: HTTP/1.1
+	// chunked, HTTP/2 without content-length) may still be empty, and "no body needs no type": at
+	// most one byte is read to tell — none is "no body", one (a space too) is 415 and the rest is
+	// never read (second review of iter-0211, finding 1).
+	if !auth.HasJSONContentType(r) {
+		if r.ContentLength < 0 {
+			var one [1]byte
+			n, err := io.ReadFull(http.MaxBytesReader(w, r.Body, 1), one[:])
+			if n == 0 && errors.Is(err, io.EOF) {
+				return true
+			}
+			if n == 0 {
+				writeError(w, http.StatusBadRequest, "invalid request body")
+				return false
+			}
+		}
+		writeError(w, http.StatusUnsupportedMediaType, auth.JSONContentTypeError)
+		return false
+	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, serviceMaxBody))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")

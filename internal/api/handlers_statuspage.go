@@ -39,8 +39,11 @@ type createComponentRequest struct {
 	ManualStatus string `json:"manual_status"`
 }
 
-// statusPageAccess loads a status page and checks the caller may see it (org
-// member) and, when requireManage is set, may manage it (org admin).
+// statusPageAccess loads a status page and applies the D-0212 two-step (sec-hardening-2 H-3): a
+// principal with no membership in the page's org gets 404; a member without the action gets 403.
+// The action is org:manage when requireManage is set, else status_page:read held through ANY
+// membership of the org — project-only members read the org's pages (OWNER, 2026-11-13), and an
+// action-scoped token reads them only when its allow-list names the action.
 func (h *Handler) statusPageAccess(w http.ResponseWriter, r *http.Request, requireManage bool) (domain.StatusPage, bool) {
 	p, _ := h.principal(r)
 	sp, err := h.store.GetStatusPage(r.Context(), r.PathValue("pageID"))
@@ -56,14 +59,29 @@ func (h *Handler) statusPageAccess(w http.ResponseWriter, r *http.Request, requi
 		writeError(w, http.StatusNotFound, "not found")
 		return domain.StatusPage{}, false
 	}
-	if requireManage && !p.Can(authz.ActionOrgManage, sp.OrgID, "") {
+	allowed := p.CanAnyScopeInOrg(authz.ActionStatusPageRead, sp.OrgID)
+	if requireManage {
+		allowed = p.Can(authz.ActionOrgManage, sp.OrgID, "")
+	}
+	if !allowed {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return domain.StatusPage{}, false
 	}
 	return sp, true
 }
 
-// listStatusPages lists an org's status pages (org member).
+// statusPageFor is the page as this principal may read it: the unlisted token goes to org
+// managers only (sec-hardening-2 H-3 fix 4) — every other reader gets "" and has_unlisted_token,
+// and opens the page through the authenticated preview, as for an internal page.
+func statusPageFor(p authz.Principal, sp domain.StatusPage) domain.StatusPage {
+	sp.HasUnlistedToken = sp.UnlistedToken != ""
+	if !p.Can(authz.ActionOrgManage, sp.OrgID, "") {
+		sp.UnlistedToken = ""
+	}
+	return sp
+}
+
+// listStatusPages lists an org's status pages (status_page:read through any membership).
 func (h *Handler) listStatusPages(w http.ResponseWriter, r *http.Request) {
 	p, _ := h.principal(r)
 	orgID := r.PathValue("orgID")
@@ -71,10 +89,17 @@ func (h *Handler) listStatusPages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
+	if !p.CanAnyScopeInOrg(authz.ActionStatusPageRead, orgID) {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
 	pages, err := h.store.ListStatusPagesByOrg(r.Context(), orgID)
 	if err != nil {
 		h.serverError(w, "list_status_pages", err)
 		return
+	}
+	for i := range pages {
+		pages[i] = statusPageFor(p, pages[i])
 	}
 	writeJSON(w, http.StatusOK, pages)
 }
@@ -119,16 +144,17 @@ func (h *Handler) createStatusPage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "could not create status page")
 		return
 	}
-	writeJSON(w, http.StatusCreated, created)
+	writeJSON(w, http.StatusCreated, statusPageFor(p, created))
 }
 
-// getStatusPage returns a status page's configuration (org member).
+// getStatusPage returns a status page's configuration (status_page:read).
 func (h *Handler) getStatusPage(w http.ResponseWriter, r *http.Request) {
 	sp, ok := h.statusPageAccess(w, r, false)
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, sp)
+	p, _ := h.principal(r)
+	writeJSON(w, http.StatusOK, statusPageFor(p, sp))
 }
 
 // updateStatusPage edits a page's title and/or visibility (org admin). Slug and
@@ -164,7 +190,8 @@ func (h *Handler) updateStatusPage(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "update_status_page", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
+	p, _ := h.principal(r)
+	writeJSON(w, http.StatusOK, statusPageFor(p, updated))
 }
 
 // deleteStatusPage removes a page and its components (org admin).
@@ -180,7 +207,7 @@ func (h *Handler) deleteStatusPage(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// listComponents lists a page's components (org member).
+// listComponents lists a page's components (status_page:read).
 func (h *Handler) listComponents(w http.ResponseWriter, r *http.Request) {
 	sp, ok := h.statusPageAccess(w, r, false)
 	if !ok {

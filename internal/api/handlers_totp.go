@@ -53,6 +53,10 @@ func (h *Handler) totpEnroll(w http.ResponseWriter, r *http.Request) {
 // enables 2FA, and returns freshly-generated single-use recovery codes.
 func (h *Handler) totpEnable(w http.ResponseWriter, r *http.Request) {
 	p, _ := h.principal(r)
+	if p.ViaToken {
+		writeError(w, http.StatusForbidden, "2FA is for interactive local accounts")
+		return
+	}
 	var body struct {
 		Code string `json:"code"`
 	}
@@ -60,6 +64,10 @@ func (h *Handler) totpEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret, enabled, err := h.store.GetTOTP(r.Context(), p.UserID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		h.serverError(w, "totp_get", err)
+		return
+	}
 	if err != nil || secret == "" {
 		writeError(w, http.StatusBadRequest, "start enrollment first")
 		return
@@ -95,6 +103,10 @@ func (h *Handler) totpEnable(w http.ResponseWriter, r *http.Request) {
 // totpDisable turns off 2FA after re-verifying the account password.
 func (h *Handler) totpDisable(w http.ResponseWriter, r *http.Request) {
 	p, _ := h.principal(r)
+	if p.ViaToken {
+		writeError(w, http.StatusForbidden, "2FA is for interactive local accounts")
+		return
+	}
 	var body struct {
 		Password string `json:"password"`
 	}

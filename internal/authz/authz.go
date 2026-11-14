@@ -47,6 +47,14 @@ const (
 
 	// ActionChangeRecord: record a change phase on a service. editor+.
 	ActionChangeRecord Action = "change:record"
+
+	// ActionStatusPageRead: read the organization's status pages through the authenticated API —
+	// their configuration, components, preview render, history and feed (sec-hardening-2 H-3).
+	// Held by every role, org-level AND project-level: a status page is an org-level aggregation
+	// (D-0139) and membership of any project of the org is membership of the tenant (OWNER,
+	// 2026-11-13). It is checked with CanAnyScopeInOrg, never with Can(action, org, ""), which
+	// skips project-scoped memberships. A token holds it only when its allow-list names it.
+	ActionStatusPageRead Action = "status_page:read"
 )
 
 // actionCatalogue is the CLOSED list of every Action — what a token's `actions` allow-list is
@@ -62,6 +70,7 @@ var actionCatalogue = []Action{
 	ActionGatePolicyWrite,
 	ActionGateOverride,
 	ActionChangeRecord,
+	ActionStatusPageRead,
 }
 
 // Actions returns a copy of the central action catalogue.
@@ -94,6 +103,7 @@ var roleGrants = map[domain.Role]map[Action]bool{
 		ActionGatePolicyWrite: true,
 		ActionGateOverride:    true,
 		ActionChangeRecord:    true,
+		ActionStatusPageRead:  true,
 	},
 	domain.RoleProjectAdmin: {
 		ActionProjectRead:     true,
@@ -103,6 +113,7 @@ var roleGrants = map[domain.Role]map[Action]bool{
 		ActionGatePolicyWrite: true,
 		ActionGateOverride:    true,
 		ActionChangeRecord:    true,
+		ActionStatusPageRead:  true,
 	},
 	domain.RoleEditor: {
 		ActionOrgRead:         true,
@@ -111,11 +122,13 @@ var roleGrants = map[domain.Role]map[Action]bool{
 		ActionGateEvaluate:    true,
 		ActionGatePolicyWrite: true,
 		ActionChangeRecord:    true,
+		ActionStatusPageRead:  true,
 	},
 	domain.RoleViewer: {
-		ActionOrgRead:      true,
-		ActionProjectRead:  true,
-		ActionGateEvaluate: true,
+		ActionOrgRead:        true,
+		ActionProjectRead:    true,
+		ActionGateEvaluate:   true,
+		ActionStatusPageRead: true,
 	},
 }
 
@@ -155,6 +168,13 @@ func (p Principal) allows(action Action) bool {
 		}
 	}
 	return false
+}
+
+// AllowListed reports the allow-list half alone: true when the principal carries no list (the
+// role decides), or when its list names the action. For a route that must tell "this token was
+// not given the action" apart from "this principal has no membership granting it".
+func (p Principal) AllowListed(action Action) bool {
+	return p.allows(action)
 }
 
 // AuditActorLabel returns the label to record for this principal, falling back
@@ -217,6 +237,29 @@ func (p Principal) Can(action Action, orgID, projectID string) bool {
 			}
 		}
 		if roleGrants[m.Role][action] {
+			return true
+		}
+	}
+	return false
+}
+
+// CanAnyScopeInOrg reports whether the principal holds action through ANY membership in the
+// organization — org-level or project-level — and its allow-list (if any) names it; global admins
+// hold every action the list allows. It answers "may this principal perform an ORG-level read
+// that every member of the tenant may perform" (sec-hardening-2 H-3 fix 3), where
+// Can(action, orgID, "") would wrongly skip project-scoped memberships.
+func (p Principal) CanAnyScopeInOrg(action Action, orgID string) bool {
+	if !p.allows(action) {
+		return false
+	}
+	if p.IsGlobalAdmin {
+		return true
+	}
+	if action == ActionGlobalManage || orgID == "" {
+		return false
+	}
+	for _, m := range p.Memberships {
+		if m.OrgID == orgID && roleGrants[m.Role][action] {
 			return true
 		}
 	}

@@ -17,6 +17,9 @@ const resetTokenTTL = time.Hour
 // reset link to the address if it belongs to a local account. The response is
 // always 200 with a generic message so it can't be used to enumerate accounts.
 func (a *Authenticator) ResetRequestHandler(w http.ResponseWriter, r *http.Request) {
+	if refuseNonJSON(w, r) {
+		return
+	}
 	ip := clientIP(r, a.trustedProxies, a.trustedProxyNets)
 	if !a.limits.perIP.allow("reset|"+ip, time.Now()) {
 		writeJSONError(w, http.StatusTooManyRequests, "too many requests, try again later")
@@ -73,6 +76,9 @@ func (a *Authenticator) ResetRequestHandler(w http.ResponseWriter, r *http.Reque
 // ResetConfirmHandler completes a reset: it consumes a valid token and sets the
 // new password. Tokens are single-use and expire after resetTokenTTL.
 func (a *Authenticator) ResetConfirmHandler(w http.ResponseWriter, r *http.Request) {
+	if refuseNonJSON(w, r) {
+		return
+	}
 	// sec-hardening-2 H-6: limited per IP BEFORE the body is read — this path runs Argon2id
 	// (64 MiB) before it looks at the token.
 	if !a.limits.perIP.allow("reset|"+clientIP(r, a.trustedProxies, a.trustedProxyNets), time.Now()) {

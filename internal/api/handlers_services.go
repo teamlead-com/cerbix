@@ -453,6 +453,9 @@ func (h *Handler) deleteService(w http.ResponseWriter, r *http.Request) {
 
 // decodeJSONBody reads a bounded JSON body, answering 400 on anything malformed.
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, max int64, dst any) bool {
+	if !hasJSONContentType(w, r) {
+		return false
+	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, max))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {

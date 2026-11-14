@@ -1,6 +1,7 @@
 # func-recovery-threshold — a monitor leaves DOWN only after a confirmed run of successes (FR-043 / NFR-036)
 
-> **STATUS: revision 5 — DRAFT, not approved.** Revision 1 (2026-11-14) was written from an owner
+> **STATUS: revision 5 — APPROVED by the owner on 2026-11-15; not implemented.** Implementation
+> follows sec-hardening-3. Revision 1 (2026-11-14) was written from an owner
 > discussion and an independent code check of two design questions. Revision 2 (2026-11-14) answers
 > the first external review of that draft — CHANGES REQUIRED, 1 P0 / 6 P1 / 3 P2 / 1 P3. Revision 3
 > (2026-11-14) answers the second review, made against `main` at `58b5a32` — CHANGES REQUIRED,

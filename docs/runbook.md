@@ -65,6 +65,9 @@ curl -s localhost:8080/readyz    # {"status":"ready"}
 curl -s localhost:8080/metrics   # cerbix_* series
 ```
 
+With `server.ops_listen` set (the production example sets `:9091`) `/readyz` and `/metrics` live on
+that port instead and the application port answers them 404; see [Endpoints](#endpoints).
+
 ## Run the dev stack
 
 `docker/config.dev.yaml` contains a fixed, public development-only at-rest key so the persistent
@@ -98,8 +101,45 @@ The Make facade is not broker-upgrade tooling: use the raw staged procedure belo
 | Endpoint | Meaning |
 | --- | --- |
 | `/healthz` | Process liveness (always 200 while serving). |
-| `/readyz` | Readiness; 503 with reason when not ready (e.g. during shutdown). |
+| `/readyz` | Readiness; 503 `{"status":"not_ready","error":"<code>"}` when not ready — the codes below. |
 | `/metrics` | Prometheus text (`cerbix_*`). |
+
+**Where they are served (sec-hardening-2 H-11, D-0279).** Without `server.ops_listen` (the default,
+and every dev stack) one port serves all three and the application. With `server.ops_listen` set — the
+production example sets `":9091"` — `/readyz` and `/metrics` are served **only** on the ops port, the
+application port answers both with an explicit 404 (not the SPA's 200), and `/healthz` answers on both.
+Point Prometheus and readiness probes at the ops port; keep it off the public interface. **Where the
+loopback comes from:** `":9091"` listens on every interface inside the container, and it is
+`docker-compose.prod.yml` that publishes it on the host's loopback only (`CERBIX_OPS_BIND`). Outside
+Docker, or with `network_mode: host`, nothing narrows it — write `ops_listen: "127.0.0.1:9091"`.
+`config.Validate` parses both as `host:port` with a port written in digits, 1–65535 (`08080` is port
+8080; `:0`, `:99999` and a service name such as `:http` are refused), a bracketed host must be an IP
+address, and it refuses an `ops_listen` on `listen`'s port when either host is a wildcard (`""`, or any
+IP that is unspecified — `0.0.0.0`, `::`, `[0:0:0:0:0:0:0:0]`) or the hosts are the same: IPs compare
+as unmapped addresses (`[::ffff:127.0.0.1]` is `127.0.0.1`), names case-insensitively, and a name
+never equals an IP (nothing is resolved). One with surrounding whitespace is refused too. The ops port serves nothing else (404).
+
+**Readiness is one predicate (H-12).** `/readyz`, `cerbix_ready` and the reason all come from the same
+check, in this order — the 503 body carries the code, never a raw error; the raw reason (a driver
+message, an address) is logged once per change as `not_ready` with `reason` and `detail`:
+
+| Code | Meaning |
+| --- | --- |
+| `starting` | The process has not finished starting. |
+| `shutting_down` | Graceful shutdown in progress. |
+| `database_unreachable` | The periodic database ping failed (`cerbix_database_up` 0). |
+| `broker_unreachable` | The AMQP broker connection is lost (`cerbix_broker_up` 0) — api, scheduler and worker roles of the distributed topology. |
+| `credential_unavailable` | An executor cannot open credential envelopes (see FR-020 below). |
+| `service_wedged` | Service-reliability work is wedged (FR-021 §21). |
+| `alert_evaluation_stalled` | A service alert evaluator is stalled (FR-021 §16.6b). |
+
+Before this release the body carried the raw reason text and the broker was not part of readiness: a
+probe that matched on the old text (`database unreachable`) must match the code.
+
+**HTTP server bounds (H-8).** `ReadTimeout` 15 s, `ReadHeaderTimeout` 5 s, `IdleTimeout` 60 s, no
+`WriteTimeout` — the SSE stream (`/api/v1/events`) and the agents' long-poll are not cut by any of
+them. A proxy in front should keep its own idle timeout for upstream keep-alive connections below 60 s
+or it may reuse a connection cerbix has just closed.
 
 ## Config
 
@@ -172,7 +212,7 @@ are served:
 | --- | --- |
 | `GET /auth/login?redirect=/path` | Start Authorization Code + PKCE; redirects to Keycloak. |
 | `GET /auth/callback` | Verify ID token, JIT-provision user, create session, set cookie. |
-| `POST /auth/logout` | Revoke session, clear cookie, redirect to post-logout URL. `GET` is 405 since D-0278: no GET changes state. |
+| `POST /auth/logout` | Revoke session, clear cookie, answer **200 `{"redirect_to": …}`** (since D-0279; it was a 302). The SPA navigates there itself. `redirect_to` is the post-logout URL when it is a local path or an http(s) URL with a host, else `/`. `GET` is 405 since D-0278: no GET changes state. |
 | `/api/v1/*` | Requires a valid session cookie or a Bearer credential (401 otherwise). |
 
 ### Request forgery, the Bearer rule and `Referer` (sec-hardening-2 H-4, H-9a, D-0278)
@@ -229,10 +269,48 @@ are served:
 - **`Referrer-Policy`:** the application handler sets `no-referrer` on `/status/*` and
   `/api/v1/public/*`, in any letter case — an unlisted page's `?token=` never leaves in a `Referer` —
   and `strict-origin-when-cross-origin` on every other response it serves, refusals and 404s included.
-  Two kinds of response do not pass through it and carry no `Referrer-Policy`: the operational
-  endpoints `/healthz`, `/readyz` and `/metrics`, and the redirects that canonicalize a path (`//x`,
-  `/a/../b`) — the outer multiplexer of `internal/httpsrv` answers both before the application
-  handler runs. Neither renders a page. The support link carries `rel="noopener noreferrer"`.
+  "Public" is one predicate (`isPublicPage` in `internal/appmux`) for every header that differs there
+  (below). Two kinds of response do not pass through the application handler and carry none of these
+  headers but `nosniff`: the operational endpoints — `/healthz` always, `/readyz` and `/metrics` when
+  `server.ops_listen` is unset (with it set, their 404 on the application port and their answers on the
+  ops port both come from `internal/httpsrv`) — and the redirects that canonicalize a path (`//x`,
+  `/a/../b`). The outer multiplexer of `internal/httpsrv` answers them before the application handler
+  runs; none renders a page. The support link carries `rel="noopener noreferrer"`.
+
+### Security headers and the Content-Security-Policy (sec-hardening-2 H-9b, D-0279)
+
+Every response of the application handler carries `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: DENY` (`SAMEORIGIN` on the public status pages) and this policy, with
+`frame-ancestors 'self'` on the public pages:
+
+```
+default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:;
+font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'
+```
+
+- **This release sends it as `Content-Security-Policy-Report-Only`**: a violation is reported in the
+  browser console and blocks nothing. **The next release enforces it** (`Content-Security-Policy`).
+  Before upgrading to that release, open the SPA and a public status page with the browser's console
+  open; any `[Report Only]` violation there is what enforcement will block — typically a `logo_url`
+  that is not `https:`/`data:`, or a reverse proxy or browser extension injecting a script.
+- `img-src` admits any `https:` image because `branding.logo_url` is a documented external URL. An
+  `http://` logo will stop loading under enforcement — serve it over HTTPS.
+- A public status page can be framed only by the instance's own pages; embedding it in another site
+  is refused (`X-Frame-Options: SAMEORIGIN`, `frame-ancestors 'self'`).
+- The E2E suite fails any test during which a cerbix page reports a violation
+  (`e2e/tests/fixtures.ts`), so the shipped SPA reports none.
+
+**Sign-out.** `POST /auth/logout` answers 200 `{"redirect_to": …}` instead of a 302: the SPA calls it
+with `fetch`, which would follow a redirect to an external post-logout URL as a cross-origin request
+`connect-src 'self'` refuses; the SPA now navigates with `window.location.assign`. Because that
+executes a `javascript:` URL where a `Location` header never did, the OIDC `post_logout_url` is
+checked when saved (400 otherwise) and again when served: a local path (`/…`, not `//…`, no backslash
+or control character) or an `http(s)://` URL with a host; anything else is served as `/` and logged
+(`post_logout_url_refused`). A script that relied on the 302 reads `redirect_to` from the JSON.
+
+**Branding `support_url` (H-10)** must be an `http(s)` URL with a host or a `mailto:` with an address
+(400 otherwise). A value saved before this release that fails the rule is served as empty by
+`/api/v1/public/branding` — re-save it from Settings → Branding.
 
 ### Local login (no Keycloak)
 
@@ -255,6 +333,11 @@ Since D-0276 that setting (L) drives three limiters on `/auth/local/*`:
 - min(L, max(2, (L+1)/2)) per (IP, email): never below 2, so the two-step TOTP sign-in fits.
 - 5L **failed** logins per email, so failures from other addresses cannot lock a user out of a
   clean address.
+
+A TOTP code signs in **once** (sec-hardening-2 H-7): the accepted 30-second step is recorded, and the
+same code — or an older one — is refused afterwards, also when two sign-ins race. Enabling 2FA does
+not spend the code: the code that confirmed enrollment may still sign in once. A person who signs in
+twice inside 30 s waits for the next code. Recovery codes are single-use as before.
 
 Bodies are capped at 4 KiB and passwords at 1024 bytes. A password **reset** ends every session of
 the account, including the browser that requested it. A password **change** keeps the caller's
@@ -604,8 +687,10 @@ TimescaleDB hypertable + continuous aggregates is a future optimization for larg
 | Exit code 1, `oidc_init_failed` | Keycloak issuer URL reachable? discovery endpoint correct? |
 | `/api/*` returns 401 | Missing/expired session cookie; log in via `/auth/login`. |
 | `/auth/callback` 400 `invalid or expired login state` | Flow expired (>10m) or reused; retry login. |
-| `/readyz` returns 503 with `database unreachable` | DB down or network; check `cerbix_database_up`. |
-| `/readyz` returns 503 during stop | Expected during graceful shutdown. |
+| `/readyz` returns 503 `database_unreachable` | DB down or network; check `cerbix_database_up` and the `db_ping_failed` / `not_ready` log lines. |
+| `/readyz` returns 503 `broker_unreachable` | RabbitMQ down or unreachable from this process; check `cerbix_broker_up` and the `broker_lost` log. Readiness recovers on reconnect. |
+| `/readyz` returns 503 `shutting_down` | Expected during graceful shutdown. |
+| `/readyz` or `/metrics` returns 404 | `server.ops_listen` is set: they are served on the ops port only. |
 | Port already in use | Change `server.listen` in config. |
 
 > Sections for broker outages, scheduler failover, and SLA backfill are added as those

@@ -37,7 +37,13 @@ func (h *Handler) totpEnroll(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "totp_generate", err)
 		return
 	}
+	// The check above is advisory; this write is the guard: it never replaces the secret of an
+	// enabled 2FA, so a confirmation that commits between the check and here is not undone.
 	if err := h.store.SetTOTPSecret(r.Context(), p.UserID, secret); err != nil {
+		if errors.Is(err, store.ErrTOTPAlreadyEnabled) {
+			writeError(w, http.StatusBadRequest, "two-factor auth is already enabled; disable it before re-enrolling")
+			return
+		}
 		h.serverError(w, "totp_set_secret", err)
 		return
 	}
@@ -76,24 +82,33 @@ func (h *Handler) totpEnable(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "two-factor auth is already enabled")
 		return
 	}
-	if !totp.Validate(secret, body.Code) {
+	// The step is NOT recorded here (sec-hardening-2 H-7): a person who enables 2FA and signs in
+	// with the same code inside the same 30 s must succeed both times. The confirmation is made
+	// single-use by EnableTOTP's own guard instead.
+	if _, ok := totp.Validate(secret, body.Code); !ok {
 		writeError(w, http.StatusBadRequest, "code did not match — check the time on your device")
 		return
 	}
-	// Generate and store the recovery codes BEFORE flipping the enabled flag: if code
-	// generation/storage fails, the account stays not-enabled (the user can retry) rather
-	// than becoming TOTP-required with no recovery codes — a permanent lockout on a lost
-	// device. EnableTOTP is the last, committing step.
+	// The recovery codes are stored in the SAME transaction that flips the enabled flag, and only
+	// if 2FA is not enabled yet: the account is never TOTP-required without recovery codes (a
+	// permanent lockout on a lost device), and of concurrent confirmations exactly one enables and
+	// stores the codes it shows — a loser writes nothing.
 	codes, hashes, err := generateRecoveryCodes(8)
 	if err != nil {
 		h.serverError(w, "totp_recovery_generate", err)
 		return
 	}
-	if err := h.store.ReplaceRecoveryCodes(r.Context(), p.UserID, hashes); err != nil {
-		h.serverError(w, "totp_recovery_store", err)
-		return
-	}
-	if err := h.store.EnableTOTP(r.Context(), p.UserID); err != nil {
+	// EnableTOTP is given the secret the code was validated against and refuses if the stored one
+	// changed since this handler read it (a concurrent disable or re-enrollment).
+	if err := h.store.EnableTOTP(r.Context(), p.UserID, secret, hashes); err != nil {
+		if errors.Is(err, store.ErrTOTPAlreadyEnabled) {
+			writeError(w, http.StatusBadRequest, "two-factor auth is already enabled")
+			return
+		}
+		if errors.Is(err, store.ErrTOTPSecretChanged) {
+			writeError(w, http.StatusBadRequest, "the pending two-factor setup changed — start enrollment again")
+			return
+		}
 		h.serverError(w, "totp_enable", err)
 		return
 	}

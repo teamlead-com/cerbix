@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, ensureE2EWorkspace } from "./helpers";
 
 // iter-0202 BUG-0202-3: the paging-ownership card's escalation-policy row sat OUTSIDE the card's

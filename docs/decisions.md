@@ -9383,3 +9383,103 @@ list opens an unlisted page through the preview for a member without `org:manage
 - `TestMonitorSpec` declares no defaults the server applies itself; test-connection documents 501.
 - `Referrer-Policy` is set by the application handler on every response it serves; the operational
   endpoints and path-canonicalization redirects of `internal/httpsrv` carry none.
+
+## D-0279 — a TOTP code signs in once, probed peers are read with a bound, security headers and a report-only CSP, link-shaped settings are links, the operational endpoints leave the application port, one readiness predicate (sec-hardening-2 iteration 4, 2026-11-14)
+
+**Context.** [`sec-hardening-2.md`](specs/sec-hardening-2.md) iteration 4 covers the six P2 findings
+(§4): H-7 (a TOTP code accepted again inside its ±1-step window), H-8 (no `IdleTimeout` or
+`ReadHeaderTimeout`; ssh, redis and the WebSocket handshake read from a peer without a bound), H-9b (no
+`X-Content-Type-Options`, `X-Frame-Options` or CSP; an inline pre-paint script), H-10 (`support_url`
+accepts any string and is rendered as `<a :href>`), H-11 (`/metrics` and raw `readyz` text on the
+application port), H-12 (`Ready()`, `LastError()` and `cerbix_ready` were three formulas; the broker was
+in none).
+
+**Decision.**
+1. **H-7.** Migration `00116` adds `users.totp_last_step bigint NULL`; `SetTOTPSecret` and `DisableTOTP`
+   write NULL. `totp.Validate` returns the matched step, and the local sign-in accepts it with one
+   compare-and-set (`… WHERE totp_last_step IS NULL OR totp_last_step < $2`). `totpEnable` records no
+   step; `EnableTOTP` is `… WHERE NOT totp_enabled` and stores the recovery codes in the same
+   transaction — the guard alone would have let a losing concurrent confirmation overwrite the codes
+   the winner showed (they were written before the flip, by design, for lockout safety; the
+   transaction keeps that property). Recovery codes are otherwise unchanged.
+2. **H-8.** `ReadHeaderTimeout` 5 s and `IdleTimeout` 60 s beside the 15 s `ReadTimeout`, no
+   `WriteTimeout`; one constructor serves the application and the ops listener. ssh and redis read
+   through `io.LimitReader(conn, 4 KiB)` for the whole exchange, the WebSocket handshake response
+   through 16 KiB.
+3. **H-9b.** `withResponseHeaders` in `internal/appmux` (it replaces `withReferrerPolicy`) sets
+   `X-Content-Type-Options: nosniff`, `X-Frame-Options` (`DENY`, `SAMEORIGIN` public) and the spec's
+   policy verbatim (`frame-ancestors 'self'` public) **as `Content-Security-Policy-Report-Only`**, beside
+   the Referrer-Policy of D-0278; `isPublicPage` is the one predicate for all of them, case-insensitive.
+   `internal/httpsrv` sets `nosniff` on the operational endpoints it answers. The theme script is
+   `frontend/public/theme-init.js`. `POST /auth/logout` answers 200 `{"redirect_to": …}`; `session.ts`
+   fetches it with `redirect: "manual"` and navigates with `window.location.assign`, to `/` when the
+   answer names nothing. `post_logout_url` is checked by `domain.PostLogoutURLAllowed` in
+   `setOIDCSettings` (400) and in `LogoutHandler` (served as `/`, logged `post_logout_url_refused`),
+   whatever its source. The Playwright fixture `e2e/tests/fixtures.ts` watches every page of every
+   context for `securitypolicyviolation` and fails a test on one on the cerbix origin; every spec
+   imports `test` from it.
+4. **H-10.** `domain.SupportURLAllowed`: `http(s)` with a host or `mailto:` with an address (or empty).
+   `Branding.Validate` refuses anything else; `publicBranding` serves a stored failing value as `""`.
+5. **H-11.** `server.ops_listen` (new; empty by default). When set, `/readyz` and `/metrics` are served on
+   a second listener and registered on the application port as `http.NotFoundHandler()`; `/healthz` is
+   on both; the ops listener serves nothing else. `config.Validate` refuses `ops_listen == listen`. Set
+   only in `docker/config.prod.yaml` (`":9091"`, published on `127.0.0.1` by the prod compose file via
+   `CERBIX_OPS_BIND`); the dev stacks and `wait_ready` are unchanged; no container healthcheck is added.
+6. **H-12.** `Registry.readiness()` is the one predicate behind `Ready()`, `LastError()`, `Readiness()`
+   and the gauge, in order: lifecycle (`starting`, `shutting_down`), `database_unreachable`,
+   `broker_unreachable`, `credential_unavailable`, `service_wedged`, `alert_evaluation_stalled`.
+   `LastError()` returns the code; `/readyz`'s 503 body carries only the code, and `httpsrv` logs the
+   raw reason once per change (`not_ready`). `pingDatabase` sets only `cerbix_database_up`: it no longer
+   flips the lifecycle flag, which let a successful ping erase a shutdown's not-ready.
+
+**Departures from the spec.** None in the six findings. Readings, stated:
+- H-7: the recovery codes move into `EnableTOTP`'s transaction (above). The spec names the guard, not
+  the codes; without this the guard's single winner could be shown codes a loser had replaced.
+- H-9b: `httpsrv` adds `nosniff` to `/healthz`, `/readyz`, `/metrics` (the spec's "any surface"); the
+  page headers (`X-Frame-Options`, CSP) stay on the application handler, which serves every page.
+- H-12: the lifecycle flag reports `starting` before the first ready and `shutting_down` after it; its
+  free-text reason goes to the log.
+
+**Outside the spec, by the owner's ruling (recorded as a departure).** `NewMonitorView.vue`'s
+`applyInstanceDefaults()` ran after the workspace and five lists loaded and overwrote a timeout and
+interval the person had already typed (`e2e/tests/canary-ui.spec.ts:22` flaked on it). A synchronous
+watcher now marks each defaulted field as the person's on any write the prefill did not make; the
+defaults fill only the rest. No visible change.
+
+**Consequences.** Breaking, with CHANGELOG upgrade notes: `POST /auth/logout` is 200 JSON, not a 302; a
+saved `post_logout_url` or `support_url` that is not a link is refused (400) and not served; `/readyz`'s
+body is a code and distributed roles fail readiness without RabbitMQ; deployments from the prod example
+scrape `/metrics` and probe `/readyz` on 9091. **The CSP is report-only in this release and enforced in
+the next** (one constant, `cspHeader`); the runbook says how to look for reports before that upgrade.
+Not implemented here: enforcement itself, which the spec schedules one release later.
+
+**Amended after the external review of the branch (2026-11-14; CHANGES REQUIRED, 0/2/5/3, all accepted by the
+owner).**
+- **P1-1.** Enabling 2FA enables only the secret the code was checked against: `EnableTOTP` takes it, locks the
+  row (`SELECT … FOR UPDATE`) and refuses an enabled 2FA or a pending secret that is empty or another
+  (`ErrTOTPSecretChanged`, 400); `SetTOTPSecret` never writes over an enabled 2FA (`ErrTOTPAlreadyEnabled`,
+  `totp/enroll` 400); `totp.Code` refuses an empty key. The point-1 transaction above was not enough: a
+  disable or a re-enrollment between the handler's read and the flip left 2FA on with an empty secret (whose
+  codes anyone can compute) or an unconfirmed one, and an enrollment that read "off" before a confirmation
+  committed switched a live 2FA off.
+- **P1-2.** The ssh banner counts only as a complete line: the 4 KiB bound had turned a truncated `SSH-…` flood
+  into an UP.
+- **P2-1.** S8's "every read": promql decodes through 1 MiB, and postgres and mysql read each connection through
+  a 1 MiB total (`boundedConn`) — their drivers accept a ~1 GiB message and unbounded 16 MiB packet chains.
+  iter-0212 lists every read from a probed peer and its bound.
+- **P2-2.** The broker's state lives in `dispatch.AMQP` under `stateMu`, set before the supervisor starts; the
+  hook gets the current state when wired and is called under the same lock.
+- **P2-3.** Both URL predicates refuse edge whitespace and control bytes, require `u.Hostname()` for http(s) and a
+  clean address for `mailto:`; `putBranding` trims first.
+- **P2-4, P2-5.** `Config.Validate` refuses an unsafe `oidc.post_logout_redirect_url`, and parses `listen` and
+  `ops_listen` as `host:port` with a port, refusing the same port on equal or wildcard hosts.
+- **P3.** Parallel `Shutdown` with joined errors; the readiness log is deduplicated by code under one lock;
+  `pingDatabase` takes a narrow pinger; the docs say the ops port's loopback comes from the compose file.
+  `iter-0211.md` is restored to its closed text; the difference is recorded in iter-0212.
+- **Clarified, not adopted:** the review's statement that a `mailto:` with 0x7f was admitted — the parser already
+  refused it; it is kept as a guard case.
+- **Second pass (0/0/0/2).** P3-1: listen values are compared parsed, not spelled — the port is a number 1–65535
+  (no service names, no 0: nothing reaches `Config.Validate` with port 0), a bracketed host must be an IP, IPs
+  compare unmapped with any unspecified address as a wildcard, names compare case-insensitively, and a name never
+  equals an IP because nothing is resolved at validation. P3-2: `sec-authn-authz.md` describes the 2FA
+  enrollment guards as the code has them.

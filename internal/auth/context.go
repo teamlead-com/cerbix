@@ -25,6 +25,7 @@ type Store interface {
 	CreateLocalUser(ctx context.Context, email, displayName, passwordHash string, globalAdmin bool) (domain.User, error)
 	LocalCredentialByEmail(ctx context.Context, email string) (store.LocalCredential, error)
 	ConsumeRecoveryCode(ctx context.Context, userID, codeHash string) (bool, error)
+	AcceptTOTPStep(ctx context.Context, userID string, step int64) (bool, error)
 	CreatePasswordResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error
 	ConsumePasswordResetToken(ctx context.Context, tokenHash string) (string, error)
 	ResetPasswordWithToken(ctx context.Context, tokenHash, passwordHash string) (string, error)

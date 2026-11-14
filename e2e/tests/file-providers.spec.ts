@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, firstProject } from "./helpers";
 
 // Monitoring-as-Code UI surface (FR-017 §15). File-managed monitors are created by the file

@@ -266,8 +266,9 @@ func TestLogoutClearsSession(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: "cerbix_session", Value: "tok-10"})
 	a.LogoutHandler(rec, req)
 
-	if rec.Code != http.StatusFound {
-		t.Fatalf("logout code = %d, want 302", rec.Code)
+	// 200 {"redirect_to": …}, not a 302 (sec-hardening-2 H-9b; TestLogoutServesOnlyASafePostLogoutURL*).
+	if rec.Code != http.StatusOK || rec.Body.String() != "{\"redirect_to\":\"/\"}\n" {
+		t.Fatalf("logout = %d %q, want 200 {\"redirect_to\":\"/\"}", rec.Code, rec.Body.String())
 	}
 	if _, err := fs.SessionByToken(context.Background(), "tok-10"); err != store.ErrNotFound {
 		t.Fatal("session should be deleted after logout")
@@ -309,8 +310,8 @@ func TestLogoutWithoutCookie(t *testing.T) {
 	a := testAuthenticator(t, fs, newMockOIDC(t, "cerbix"))
 	rec := httptest.NewRecorder()
 	a.LogoutHandler(rec, httptest.NewRequest(http.MethodPost, "/auth/logout", nil))
-	if rec.Code != http.StatusFound {
-		t.Fatalf("logout without cookie = %d, want 302", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logout without cookie = %d, want 200", rec.Code)
 	}
 }
 

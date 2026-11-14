@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, ensureE2EWorkspace } from "./helpers";
 
 // The §9 browser gate for FR-020. The shell smoke proves the API and dispatch path; this

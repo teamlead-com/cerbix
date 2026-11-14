@@ -5,7 +5,9 @@
 > [iter-0210](../iterations/iter-0210.md) (D-0277; H-2 amended 2026-11-14 by two owner rulings and
 > the external review of that iteration); iteration 3 (H-3, H-4, H-9a, H-14) in
 > [iter-0211](../iterations/iter-0211.md) (D-0278; the S4 content-type rule extended to `/auth/local/*`
-> by an owner ruling of 2026-11-14); iteration 4 not yet implemented. The two owner questions are answered (§8).**
+> by an owner ruling of 2026-11-14); iteration 4 (H-7, H-8, H-9b, H-10, H-11, H-12) in
+> [iter-0212](../iterations/iter-0212.md) (D-0279), with the CSP report-only — its enforcement is the one
+> item left, scheduled for the release after. The two owner questions are answered (§8).**
 > Six independent review rounds: **4/6/5/1**, **1/5/2/1**, **0/3/3/1**, **0/1/3/0**, **0/1/1/0**,
 > **0/0/1/0** (P0/P1/P2/P3). Round 6 found no P0 or P1, called the design of all four iterations
 > complete, and stated that once its one mechanical P2 was written in — it is — the spec needs no
@@ -39,16 +41,16 @@
 | H-1 | P0 | A bearer JWT minted by the realm for ANY client authenticates as the human whose `sub` it carries | `internal/auth/auth.go:227`, `internal/auth/middleware.go` (pre-iter-0209 `principalFromJWT`, now `internal/auth/machine.go`), `internal/store/users.go:35-67` | D-0034 |
 | H-2 | P0 | The WebSocket prober writes an unvalidated target into a raw socket and accepts any TLS certificate; the RabbitMQ management URL is built by concatenation from `config.path` | pre-iter-0210 `wsTarget` and the concatenated handshake in `internal/prober/websocket.go`, `rabbitMgmtURL` in `internal/prober/rabbitmq.go`; the userinfo check at `internal/domain/monitor.go:360`; the parsers are now in `internal/domain/targets.go` | — |
 | H-3 | P1 | Reads gated by `InOrg` alone ignore a token's action allow-list and return `unlisted_token` to every reader | `internal/api/handlers_statuspage.go:58-69`, `internal/api/handlers_feed.go:19-25`, `internal/authz/authz.go:273-283`, `internal/api/handlers.go:55-90` | D-0139 preamble |
-| H-4 | P1 | No request-forgery defence beyond `SameSite=Lax`; a state-changing `GET /auth/logout` | `internal/auth/auth.go:374-384`, `internal/api/handlers.go:603-628`, `internal/auth/handlers.go:30-40` | — |
+| H-4 | P1 | No request-forgery defence beyond `SameSite=Lax`; a state-changing `GET /auth/logout` | `internal/auth/auth.go:374-384`, `internal/api/handlers.go:603-628`, `internal/auth/handlers.go:31-41` | — |
 | H-5 | P1 | A password reset does not revoke the account's sessions | `internal/store/users_reset.go`, `internal/auth/handlers_reset.go:76-126` | D-0139 item 3 |
 | H-6 | P1 | Unbounded bodies and passwords reach Argon2id; `reset/confirm` hashes before any limiter or token check | `internal/auth/local.go:57-59`, `internal/auth/handlers_reset.go:78-110`, `internal/auth/ratelimit.go` | — |
 | H-13 | P1 | A credential header follows a redirect to another host: always for the shared prober client (synthetic `{{secret:…}}` headers), and on any two-hop chain for the canary prober, whose guard compares with the previous hop while `net/http` restores headers from the first | `internal/prober/prober.go:63-68`, `internal/prober/synthetic.go:68-72`, `internal/prober/canary.go:196-207` | D-0218 (D3c1: three points, listed in H-13) |
 | H-9a | P1 | The unlisted page's `?token=` leaks through `Referer` to any external link (no `Referrer-Policy`) | `internal/web/web.go:28-55`, `frontend/src/views/PublicStatusView.vue` | — |
 | H-7 | P2 | A TOTP code is accepted again inside its ±1-step window | `internal/totp/totp.go:60-73`, `internal/store/users_totp.go` | — |
-| H-8 | P2 | No `IdleTimeout`/`ReadHeaderTimeout`; three probers read from a peer with no length bound | `internal/httpsrv/server.go:26-32`; `internal/prober/ssh.go:42`, `internal/prober/redis.go:59`, `internal/prober/websocket.go:92` | — |
+| H-8 | P2 | No `IdleTimeout`/`ReadHeaderTimeout`; three probers read from a peer with no length bound | pre-iter-0212 `http.Server` literal in `httpsrv.New` (now `newHTTPServer`, `internal/httpsrv/server.go:86-94`); `internal/prober/ssh.go:54`, `internal/prober/redis.go:62`, `internal/prober/websocket.go:95` (the reads, now bounded) | — |
 | H-9b | P2 | No `X-Content-Type-Options`, `X-Frame-Options` or CSP on any surface | `internal/web/web.go:28-55`, `frontend/index.html` | — |
 | H-10 | P2 | `branding.support_url` accepts any string and is rendered as `<a :href>` | `internal/domain/settings.go:35-53`, `frontend/src/views/LoginView.vue` | — |
-| H-11 | P2 | `/metrics` and the raw `readyz` error text are unauthenticated on the application port | `internal/httpsrv/server.go:60-74` | — |
+| H-11 | P2 | `/metrics` and the raw `readyz` error text are unauthenticated on the application port | pre-iter-0212 `readyz` and the single mux in `httpsrv.New` (now `internal/httpsrv/server.go:144`) | — |
 | H-12 | P2 | `/readyz` ignores `brokerUp` although the registry tracks it | `internal/metrics/metrics.go:900-905` | — |
 | H-14 | P2 | Subscribers of a page later made `internal` keep receiving incident mail | `internal/store/subscribers.go:96-103` (no visibility predicate) | — |
 
@@ -117,7 +119,7 @@ and it shipped no migration for the column it relied on.
      `FOR UPDATE` (the old `kind` must be known: `INSERT … ON CONFLICT … RETURNING` yields only the
      new one), then sets `kind = 'human'`, permanently. If the row was `machine`, in the same
      transaction **all its memberships are deleted and `is_global_admin` is set to false** — the
-     bootstrap-admin rule (`internal/auth/handlers.go:203-211`) then re-grants it only on a verified
+     bootstrap-admin rule (`internal/auth/handlers.go:204-212`) then re-grants it only on a verified
      bootstrap email — with a security log line and an audit row. A person must never inherit what
      was granted to something badged as a machine.
      **When that `FOR UPDATE` read finds no row it locks nothing**, and a bearer request may insert
@@ -472,7 +474,7 @@ and stays so:
   extracted from an earlier response (`internal/prober/synthetic.go:89-95`): a session or refresh
   token obtained with the secret, with no placeholder to mark it. So the Runner's client refuses a
   cross-origin 307/308 with any body. Of its types only `synthetic` sends one (the `http` monitor
-  sends none, `internal/prober/prober.go:195`), and a scenario step that must POST to another
+  sends none, `internal/prober/prober.go:196`), and a scenario step that must POST to another
   origin names that origin in its own `url`.
 - **The canary keeps the narrow rule**, because there the fact is known where the request is built:
   the stored document holds a marker and the executor resolves it. `canaryRenderValue` marks the
@@ -569,7 +571,7 @@ response headers of the page and feed routes, and in E2E on a click of the suppo
 - **H-11 operational endpoints.** With `server.ops_listen` set, `/metrics` **and** `/readyz` answer
   an explicit **404** on the application port (`/healthz` stays on both — it reveals nothing). They
   are registered as `http.NotFoundHandler()`, not merely left out: the application mux ends in the
-  SPA catch-all (`internal/httpsrv/server.go:36-38`), which would answer `/readyz` with 200 and
+  SPA catch-all (`internal/httpsrv/server.go:70-72`), which would answer `/readyz` with 200 and
   `index.html` while the database is down. `ops_listen` is set in the **production** config example
   only (bound to loopback or the internal network in the compose file); the dev stacks keep one port,
   so `wait_ready` in the `Makefile` is untouched. No container healthcheck is added: the `cerbix`

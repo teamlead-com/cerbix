@@ -91,9 +91,13 @@ func TestExampleConfigGateBlockLoadsAndEqualsTheDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	// The header mentions ${ENV_VAR} in prose and the loader expands the whole file, so the
-	// variable must exist for Load to run at all — as it would for a real deployment.
-	t.Setenv("ENV_VAR", "example")
+	// No environment is set up: the example must load as the runbook's "Run locally" runs it. The
+	// loader expands the whole file, comments included, so a ${NAME} written in prose would stop it
+	// (the header once said "${ENV_VAR} references are expanded", and this test had to define it).
+	if _, ok := os.LookupEnv("ENV_VAR"); ok {
+		t.Setenv("ENV_VAR", "")
+		os.Unsetenv("ENV_VAR") //nolint:errcheck // restored by t.Setenv's cleanup
+	}
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load(%s): %v", path, err)

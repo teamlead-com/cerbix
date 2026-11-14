@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiSend, firstProject } from "./helpers";
 
 // FR-018 — deleting a project from Settings → Danger Zone. Non-admin visibility is

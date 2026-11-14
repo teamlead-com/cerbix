@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiSend } from "./helpers";
 
 // FR-019 — deleting an organization from Settings → Danger Zone (global admin). The dev

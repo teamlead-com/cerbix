@@ -90,11 +90,26 @@ export const useSession = defineStore("session", {
       this.version = data?.version ?? "";
       this.commit = data?.commit ?? "";
     },
+    // Sign out, then leave the SPA for the destination the server names (sec-hardening-2 H-9b).
+    // POST /auth/logout answers 200 {"redirect_to": …}: fetch must not follow a redirect to an
+    // external post_logout_url (`connect-src 'self'` blocks it), so the SPA navigates itself, with a
+    // full page load that also drops every in-memory store. The server validates the destination;
+    // without one in the answer — an error, an older server's 302 — the SPA goes to "/".
     async logout() {
       useLive().disconnect(); // close the SSE stream before the session ends
-      await fetch("/auth/logout", { method: "POST", credentials: "include" }).catch(() => {});
+      let to = "/";
+      try {
+        const res = await fetch("/auth/logout", { method: "POST", credentials: "include", redirect: "manual" });
+        if (res.ok) {
+          const body = (await res.json()) as { redirect_to?: unknown };
+          if (typeof body.redirect_to === "string" && body.redirect_to !== "") to = body.redirect_to;
+        }
+      } catch {
+        // signed out locally either way; the server's session expires on its own
+      }
       this.user = null;
       this.memberships = [];
+      window.location.assign(to);
     },
   },
 });

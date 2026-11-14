@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, ensureE2EWorkspace, cleanupMonitors } from "./helpers";
 
 // FR-028 stage 2 in the editor, against a live stack. Two things make this spec worth its

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -46,7 +47,9 @@ func (p redisProber) Probe(ctx context.Context, m domain.Monitor) Result {
 		}
 		conn = tlsConn
 	}
-	r := bufio.NewReader(conn)
+	// Every reply is read through one bound for the whole exchange (sec-hardening-2 H-8, S8): a peer
+	// that streams without a newline ends the probe at the limit, not at its deadline.
+	r := bufio.NewReader(io.LimitReader(conn, peerLineReadLimit))
 
 	if pw := m.Config["password"]; pw != "" {
 		args := []string{"AUTH", pw}

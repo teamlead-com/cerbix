@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, ensureE2EWorkspace, cleanupMonitors } from "./helpers";
 
 // FR-029 phase F against a live stack. The library's rules are unit tested and the form is tested

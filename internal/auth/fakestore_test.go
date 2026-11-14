@@ -19,6 +19,7 @@ type fakeStore struct {
 	flows       map[string]store.AuthFlow        // by state
 	localCreds  map[string]store.LocalCredential // by email
 	recovery    map[string]bool                  // userID|hash -> available
+	totpSteps   map[string]int64                 // userID -> last accepted TOTP step
 	resetTokens map[string]resetTok              // tokenHash -> token
 	passwords   map[string]string                // userID -> hash (password writes)
 	apiTokens   map[string]domain.ApiToken       // by token hash
@@ -262,6 +263,20 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// AcceptTOTPStep mirrors the store's compare-and-set: a step above the last one, once.
+func (f *fakeStore) AcceptTOTPStep(_ context.Context, userID string, step int64) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.totpSteps == nil {
+		f.totpSteps = map[string]int64{}
+	}
+	if last, ok := f.totpSteps[userID]; ok && last >= step {
+		return false, nil
+	}
+	f.totpSteps[userID] = step
+	return true, nil
 }
 
 func (f *fakeStore) ConsumeRecoveryCode(_ context.Context, userID, codeHash string) (bool, error) {

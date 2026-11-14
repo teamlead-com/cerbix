@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 
 // The single-stack Make gate requires the SSO profile and fails if the
 // configured Keycloak button is absent.

@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, firstProject } from "./helpers";
 
 // iter-0203 (func-status-pages-incidents.md §13, FR-039 / NFR-033): the live page lists at most ten

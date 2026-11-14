@@ -142,8 +142,9 @@ func TestAuthRoutesAreBehindTheForgeryCheckAndLogoutIsPostOnly(t *testing.T) {
 
 	// The same-origin POST still signs out.
 	rec = w.do(http.MethodPost, "/auth/logout", nil, withCookie(sess), withHeader("Sec-Fetch-Site", "same-origin"), withHeader("Origin", sameOrigin))
-	if rec.Code >= 400 {
-		t.Errorf("same-origin POST /auth/logout = %d", rec.Code)
+	// 200 {"redirect_to": …} since sec-hardening-2 H-9b (it was a 302): the SPA navigates itself.
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" || !strings.Contains(rec.Body.String(), `"redirect_to":"/"`) {
+		t.Errorf("same-origin POST /auth/logout = %d %q %q, want 200 {\"redirect_to\":\"/\"}", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
 	}
 	if w.sessionAlive(sess) {
 		t.Error("a same-origin POST /auth/logout left the session alive")

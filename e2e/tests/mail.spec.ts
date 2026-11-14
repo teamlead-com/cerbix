@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, firstProject } from "./helpers";
 
 // Mail flows through the Mailpit sidecar (compose profile `mail`). The Make

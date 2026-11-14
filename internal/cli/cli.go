@@ -512,7 +512,7 @@ func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 		}
 		registry.SetDatabaseUp(true)
 		logger.Info("database_connected")
-		spawn(func() { pingDatabase(ctx, st, registry, logger) })
+		spawn(func() { pingDatabase(ctx, st, dbPingInterval, registry, logger) })
 	} else {
 		logger.Info("database_disabled", "mode", "scaffold")
 	}
@@ -968,7 +968,7 @@ func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 		logger.Info("checking_pipeline_started", "role", opts.Role, "workers", workerPoolSize, "region", workerRegion)
 	}
 
-	srv := httpsrv.New(cfg.Server, registry, app)
+	srv := httpsrv.New(cfg.Server, registry, app).WithLogger(logger)
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
 
@@ -1050,7 +1050,7 @@ func runAgent(ctx context.Context, cfg *config.Config, region string, credential
 	}()
 	logger.Info("agent_role_started", "region", region, "server", cfg.Pull.ServerURL)
 
-	srv := httpsrv.New(cfg.Server, registry, nil)
+	srv := httpsrv.New(cfg.Server, registry, nil).WithLogger(logger)
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
 	registry.SetReady(true, "")
@@ -1074,10 +1074,16 @@ func runAgent(ctx context.Context, cfg *config.Config, region string, credential
 	return 0
 }
 
-// pingDatabase periodically checks connectivity and reflects it in readiness and
-// the cerbix_database_up metric until ctx is cancelled.
-func pingDatabase(ctx context.Context, st *store.Store, reg *metrics.Registry, logger *slog.Logger) {
-	t := time.NewTicker(dbPingInterval)
+// pingDatabase periodically checks connectivity and reflects it in the cerbix_database_up metric
+// — and through it in readiness — until ctx is cancelled.
+// pinger is what pingDatabase needs of the store: a narrow seam, so the loop is tested without a
+// database (review of iter-0212, P3-3).
+type pinger interface {
+	Ping(ctx context.Context) error
+}
+
+func pingDatabase(ctx context.Context, st pinger, every time.Duration, reg *metrics.Registry, logger *slog.Logger) {
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		select {
@@ -1087,14 +1093,15 @@ func pingDatabase(ctx context.Context, st *store.Store, reg *metrics.Registry, l
 			pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			err := st.Ping(pctx)
 			cancel()
+			// Readiness follows cerbix_database_up through the registry's one predicate
+			// (sec-hardening-2 H-12): this loop no longer flips the process-lifecycle flag, so a
+			// successful ping cannot erase another component's not-ready nor undo a shutdown.
 			if err != nil {
 				reg.SetDatabaseUp(false)
-				reg.SetReady(false, "database unreachable")
 				logger.Error("db_ping_failed", "error", err.Error())
 				continue
 			}
 			reg.SetDatabaseUp(true)
-			reg.SetReady(true, "")
 		}
 	}
 }

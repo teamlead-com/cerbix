@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, firstProject } from "./helpers";
 
 // Alertmanager webhook ingest: firing opens an incident correlated by the

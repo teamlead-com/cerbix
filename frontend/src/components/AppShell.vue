@@ -65,8 +65,9 @@ function openCreate(kind: "org" | "project") {
 
 async function signOut() {
   userMenuOpen.value = false;
+  // session.logout navigates (window.location.assign) to the server's redirect_to — "/" unless a
+  // post-logout URL is configured — and "/" without a session lands on the login page.
   await session.logout();
-  router.push({ name: "login" });
 }
 
 function projectSelected(inDrawer = false) {

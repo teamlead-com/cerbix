@@ -11,6 +11,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
+	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
 )
 
@@ -219,7 +220,12 @@ func (a *Authenticator) CallbackHandler(w http.ResponseWriter, r *http.Request) 
 	http.Redirect(w, r, flow.RedirectTo, http.StatusFound)
 }
 
-// LogoutHandler destroys the session and clears the cookie.
+// LogoutHandler destroys the session, clears the cookie, and answers 200 {"redirect_to": …}
+// (sec-hardening-2 H-9b). It used to answer a 302: the SPA calls it with fetch, which follows a
+// redirect to an external post_logout_url as a cross-origin request `connect-src 'self'` blocks.
+// The SPA now navigates itself, with window.location.assign — which executes `javascript:` where
+// a 302 Location never did — so the destination is checked HERE, whatever its source (the config
+// file, or a row saved before setOIDCSettings checked it): domain.PostLogoutURLAllowed or "/".
 func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(a.sessionCfg.CookieName); err == nil && c.Value != "" {
 		if err := a.store.DeleteSession(r.Context(), c.Value); err != nil {
@@ -229,9 +235,15 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	a.clearSessionCookie(w)
 	dest := "/"
 	if rt := a.rt(); rt != nil && rt.postLogoutURL != "" {
-		dest = rt.postLogoutURL
+		if domain.PostLogoutURLAllowed(rt.postLogoutURL) {
+			dest = rt.postLogoutURL
+		} else {
+			a.logger.Warn("post_logout_url_refused", "reason", "not a local path or an http(s) URL with a host")
+		}
 	}
-	http.Redirect(w, r, dest, http.StatusFound)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]string{"redirect_to": dest})
 }
 
 // sanitizeRedirect only permits local, non-protocol-relative paths.

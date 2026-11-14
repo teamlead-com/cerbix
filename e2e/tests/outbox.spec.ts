@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet } from "./helpers";
 
 test.describe("dead-letter admin surface", () => {

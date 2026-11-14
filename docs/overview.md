@@ -64,7 +64,10 @@ compatibility delta from the native parser's silent exit `0`.
 | `worker` | Prober pool: pulls jobs, executes the probe with a timeout, publishes the result. Stateless. | AMQP | no | yes |
 | `agent` | HTTP pull prober for geos without a broker: pulls its region's jobs over HTTPS, probes, posts results. DB-less, broker-less. | HTTP-pull | no | no |
 
-Every role starts an operational HTTP server with `/healthz`, `/readyz`, `/metrics`. `all` is for local
+Every role starts an operational HTTP server with `/healthz`, `/readyz`, `/metrics` — on its one port,
+or, with `server.ops_listen` set, `/readyz` and `/metrics` on that second port only (the first answers
+them 404; D-0279). `/readyz` and `cerbix_ready` share one predicate, which counts the database and the
+broker, and a 503 carries a reason code (`broker_unreachable`, …). `all` is for local
 development (`docker compose`); the broker-backed distributed roles (`api`/`scheduler`/`worker`)
 require `rabbitmq.url`; `agent` needs neither a broker nor a database.
 
@@ -74,7 +77,7 @@ Top-level `Config` sections (`internal/config`):
 
 | Section | Keys (main) | Purpose |
 |---|---|---|
-| `server` | `listen`, `healthz_path`, `readyz_path`, `metrics_path`, `trusted_proxy_count`, `trusted_proxy_cidrs` | Address/paths of the operational endpoints; reverse-proxy trust for the rate-limiter client IP (CIDRs supersede the hop count when set — D-0139/D-0143). |
+| `server` | `listen`, `ops_listen`, `healthz_path`, `readyz_path`, `metrics_path`, `trusted_proxy_count`, `trusted_proxy_cidrs` | Address/paths of the operational endpoints; `ops_listen` (optional, ≠ `listen`) moves `/readyz` and `/metrics` to their own listener (D-0279); reverse-proxy trust for the rate-limiter client IP (CIDRs supersede the hop count when set — D-0139/D-0143). |
 | `log` | `level`, `format` | `log/slog`, JSON. |
 | `database` | `dsn` | Postgres (pgx). Empty → scaffold mode without a DB. |
 | `rabbitmq` | `url`, `management_url` | AMQP for distributed roles (+ management API for worker-liveness alerts). |
@@ -135,7 +138,7 @@ flowchart LR
 |---|---|
 | `cli` | Cobra-owned command tree, structured help, application exit mapping, role wiring, and graceful shutdown; the existing config package remains separate and Viper is not used. |
 | `config` | Strict YAML, `Validate()`, single snapshot. |
-| `httpsrv` | Operational server `/healthz` `/readyz` `/metrics`. |
+| `httpsrv` | The listener(s): `/healthz` `/readyz` `/metrics` in front of the application handler, or `/readyz` `/metrics` on a second `ops_listen` server; the server's time bounds (D-0279). |
 | `api` | REST handlers (orgs/projects/monitors/incidents/sla/status-pages/settings…), SSE, secret redaction, SPA serving; global-admin surface `/api/v1/admin/*` (users, outbox dead-letter). |
 | `auth` | OIDC login (live-reconfigurable, atomic provider), local login + TOTP, sessions, JIT provisioning (human vs machine users, D-0276), the listed-machine-client bearer path, the three local-login limiters, middleware. |
 | `authz` | Roles and `Can(user, action, scope)`; tenant isolation. |
@@ -445,9 +448,11 @@ credentials in its URL userinfo on ANY surface: `https://user:pass@host` is refu
 domain validator, because Go turns it into an `Authorization` header and the password would
 then be readable by every viewer in the monitor list.
 
-**HTTP surface:** `/healthz`, `/readyz`, `/metrics` (operational); `/api/v1/*` (behind auth middleware);
-`/api/v1/public/*` (status pages, feeds, subscriptions, push, branding — no login); `/auth/*`
-(login/callback/logout/local/config); `/` — SPA (`embed.FS`).
+**HTTP surface:** `/healthz`, `/readyz`, `/metrics` (operational; the last two on `server.ops_listen`
+when it is set); `/api/v1/*` (behind auth middleware); `/api/v1/public/*` (status pages, feeds,
+subscriptions, push, branding — no login); `/auth/*` (login/callback/logout/local/config); `/` — SPA
+(`embed.FS`). Every response of the application handler carries `nosniff`, `X-Frame-Options` and a
+Content-Security-Policy — report-only in this release, enforced in the next (D-0279).
 
 ## 1.4 Stack and rationale
 
@@ -667,9 +672,13 @@ labels:
 
 - Only the **`api`** role (and `all`) serves the SPA/API. `scheduler`/`worker` have `app == nil` —
   there is no point publishing them on `/` via Traefik (they only have `/healthz` `/readyz` `/metrics`).
-- `/metrics` and `/healthz` are **on the same port**. If Traefik routes `/*` externally, `/metrics`
-  becomes public. Restrict it: a separate router with an IP allowlist/basic-auth middleware on
-  `server.metrics_path`, or scrape Prometheus over the internal network, or don't publish that path.
+- Without `server.ops_listen`, `/metrics` and `/readyz` are **on the application port**: if Traefik
+  routes `/*` externally, they become public. Set `server.ops_listen` — the application port then
+  answers them 404 and Prometheus scrapes the ops port over the internal network (D-0279); or restrict
+  them at the router with an IP allowlist. The production example's `ops_listen: ":9091"` listens on
+  every interface inside the container; the loopback binding comes from `docker-compose.prod.yml`
+  (`CERBIX_OPS_BIND`). Outside Docker, or with `network_mode: host`, nothing narrows it — write
+  `ops_listen: "127.0.0.1:9091"` instead.
 - Keep Traefik's default `passHostHeader: true`: the request-forgery check compares a browser's
   `Origin` with the `Host` cerbix receives when the browser sends no `Sec-Fetch-Site` (plain HTTP),
   and a rewritten `Host` would refuse every change, sign-in included (D-0278; runbook, "Request forgery").

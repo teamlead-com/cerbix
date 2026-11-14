@@ -80,9 +80,8 @@ type Store interface {
 	ChangePassword(ctx context.Context, userID, passwordHash, keepSessionToken string) (int64, error)
 	SetTOTPSecret(ctx context.Context, userID, secret string) error
 	GetTOTP(ctx context.Context, userID string) (secret string, enabled bool, err error)
-	EnableTOTP(ctx context.Context, userID string) error
+	EnableTOTP(ctx context.Context, userID, confirmedSecret string, recoveryHashes []string) error
 	DisableTOTP(ctx context.Context, userID string) error
-	ReplaceRecoveryCodes(ctx context.Context, userID string, hashes []string) error
 	MonitorSLI(ctx context.Context, monitorID string, since time.Time) (store.SLICounts, error)
 	ProjectSLI(ctx context.Context, projectID string, since time.Time) (store.SLICounts, error)
 	MonitorDailyAvailability(ctx context.Context, monitorID string, since time.Time) ([]store.DailyAvailability, error)

@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiSend, firstProject } from "./helpers";
 
 test.describe("escalation & on-call", () => {

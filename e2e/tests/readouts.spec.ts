@@ -1,4 +1,5 @@
-import { test, expect, type Locator, type Page } from "@playwright/test";
+import { type Locator, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, ensureE2EWorkspace } from "./helpers";
 
 // iter-0202: hover readouts that an operator could not read.

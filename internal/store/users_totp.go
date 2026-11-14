@@ -2,23 +2,47 @@ package store
 
 import (
 	"context"
+	"crypto/subtle"
+	"errors"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 )
 
-// SetTOTPSecret stores an (encrypted) pending TOTP secret and marks 2FA not yet
-// enabled — the user confirms with a code to enable it.
+// ErrTOTPAlreadyEnabled answers EnableTOTP and SetTOTPSecret when 2FA is already enabled — by an
+// earlier or a concurrent confirmation.
+var ErrTOTPAlreadyEnabled = errors.New("store: two-factor auth is already enabled")
+
+// ErrTOTPSecretChanged is EnableTOTP's answer when the stored pending secret is no longer the one
+// the code was confirmed against: a concurrent disable cleared it, or a re-enrollment replaced it.
+var ErrTOTPSecretChanged = errors.New("store: the pending two-factor secret changed")
+
+// SetTOTPSecret stores an (encrypted) pending TOTP secret while 2FA is NOT enabled — the user then
+// confirms it with a code. It never touches an enabled 2FA (`… AND NOT totp_enabled`): an
+// enrollment that read "not enabled" before a concurrent confirmation committed must not replace
+// the live secret and switch 2FA off (review of iter-0212, P1-1). A new secret forgets the last
+// accepted step (sec-hardening-2 H-7): its codes have never been used.
+// ErrNotFound when the user does not exist; ErrTOTPAlreadyEnabled when 2FA is enabled.
 func (s *Store) SetTOTPSecret(ctx context.Context, userID, secret string) error {
 	enc, err := s.cipher.Encrypt(secret)
 	if err != nil {
 		return fmt.Errorf("store: encrypt totp secret: %w", err)
 	}
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE users SET totp_secret = $2, totp_enabled = false, updated_at = now() WHERE id = $1`, userID, enc)
+		`UPDATE users SET totp_secret = $2, totp_enabled = false, totp_last_step = NULL, updated_at = now()
+		  WHERE id = $1 AND NOT totp_enabled`, userID, enc)
 	if err != nil {
 		return fmt.Errorf("store: set totp secret: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		var exists bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&exists); err != nil {
+			return fmt.Errorf("store: set totp secret: %w", err)
+		}
+		if !exists {
+			return ErrNotFound
+		}
+		return ErrTOTPAlreadyEnabled
 	}
 	return nil
 }
@@ -40,16 +64,64 @@ func (s *Store) GetTOTP(ctx context.Context, userID string) (secret string, enab
 	return plain, enabled, nil
 }
 
-// EnableTOTP marks 2FA enabled (after the user confirms a code).
-func (s *Store) EnableTOTP(ctx context.Context, userID string) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE users SET totp_enabled = true, updated_at = now() WHERE id = $1`, userID)
+// EnableTOTP confirms a pending enrollment against the secret the code was validated with. In ONE
+// transaction it locks the user's row (`SELECT … FOR UPDATE`), and enables 2FA and stores the
+// recovery codes' hashes only if 2FA is not enabled yet and the stored pending secret is still the
+// confirmed one (review of iter-0212, P1-1). The row lock serializes it with DisableTOTP and
+// SetTOTPSecret, so a concurrent disable (empty secret) or re-enrollment (another secret) between
+// the handler's read and this write makes it refuse: 2FA is never enabled with a secret the person
+// did not confirm. Of concurrent confirmations exactly one enables, and the recovery codes stored
+// are the ones that confirmation shows (sec-hardening-2 H-7). Both writes or neither: an account
+// is never TOTP-required without its recovery codes. The step is NOT recorded, so the confirming
+// code may still sign in once (S7).
+// ErrNotFound when the user does not exist; ErrTOTPAlreadyEnabled when 2FA is already on;
+// ErrTOTPSecretChanged when the pending secret is empty or not the confirmed one.
+func (s *Store) EnableTOTP(ctx context.Context, userID, confirmedSecret string, recoveryHashes []string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin enable totp: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	var enc string
+	var enabled bool
+	err = tx.QueryRow(ctx, `SELECT totp_secret, totp_enabled FROM users WHERE id = $1 FOR UPDATE`, userID).Scan(&enc, &enabled)
+	if noRows(err) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("store: enable totp: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+	if enabled {
+		return ErrTOTPAlreadyEnabled
 	}
-	return nil
+	plain, err := s.cipher.Decrypt(enc)
+	if err != nil {
+		return fmt.Errorf("store: decrypt totp secret: %w", err)
+	}
+	if plain == "" || confirmedSecret == "" || subtle.ConstantTimeCompare([]byte(plain), []byte(confirmedSecret)) != 1 {
+		return ErrTOTPSecretChanged
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET totp_enabled = true, updated_at = now() WHERE id = $1`, userID); err != nil {
+		return fmt.Errorf("store: enable totp: %w", err)
+	}
+	if err := replaceRecoveryCodes(ctx, tx, userID, recoveryHashes); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// AcceptTOTPStep records step as the last TOTP step accepted for the user's sign-in, if it is above
+// the one recorded — one compare-and-set, so of two concurrent sign-ins with one code exactly one
+// is accepted (sec-hardening-2 H-7, S7). False when the step was already spent (or an earlier one
+// was not), or the user does not exist.
+func (s *Store) AcceptTOTPStep(ctx context.Context, userID string, step int64) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE users SET totp_last_step = $2
+		  WHERE id = $1 AND (totp_last_step IS NULL OR totp_last_step < $2)`, userID, step)
+	if err != nil {
+		return false, fmt.Errorf("store: accept totp step: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // DisableTOTP clears the secret, disables 2FA, and drops the user's recovery codes.
@@ -59,7 +131,7 @@ func (s *Store) DisableTOTP(ctx context.Context, userID string) error {
 		return fmt.Errorf("store: begin disable totp: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-	if _, err := tx.Exec(ctx, `UPDATE users SET totp_secret = '', totp_enabled = false, updated_at = now() WHERE id = $1`, userID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE users SET totp_secret = '', totp_enabled = false, totp_last_step = NULL, updated_at = now() WHERE id = $1`, userID); err != nil {
 		return fmt.Errorf("store: disable totp: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM totp_recovery_codes WHERE user_id = $1`, userID); err != nil {
@@ -76,6 +148,13 @@ func (s *Store) ReplaceRecoveryCodes(ctx context.Context, userID string, hashes 
 		return fmt.Errorf("store: begin recovery codes: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	if err := replaceRecoveryCodes(ctx, tx, userID, hashes); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func replaceRecoveryCodes(ctx context.Context, tx pgx.Tx, userID string, hashes []string) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM totp_recovery_codes WHERE user_id = $1`, userID); err != nil {
 		return fmt.Errorf("store: clear recovery codes: %w", err)
 	}
@@ -84,7 +163,7 @@ func (s *Store) ReplaceRecoveryCodes(ctx context.Context, userID string, hashes 
 			return fmt.Errorf("store: insert recovery code: %w", err)
 		}
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 // ConsumeRecoveryCode marks a matching unused recovery code as used, returning

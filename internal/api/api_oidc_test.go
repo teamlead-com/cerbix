@@ -185,3 +185,28 @@ func TestOIDCSettingsSecretPreserveAndReloadError(t *testing.T) {
 		t.Fatalf("expected inactive + reload_error, got %+v", v)
 	}
 }
+
+// sec-hardening-2 H-9b: post_logout_url becomes a DOM sink (the SPA navigates to it with
+// window.location.assign), so the write refuses anything but a local path or http(s) with a host.
+func TestSetOIDCSettingsRefusesAnUnsafePostLogoutURL(t *testing.T) {
+	for _, u := range []string{"javascript:alert(1)", "/\\evil.example", "//evil.example", "data:text/html,x", "https://", "evil.example", "/a\x01b"} {
+		fs := seededStore()
+		h := newOIDCHandler(fs, &fakeOIDC{active: true})
+		body, _ := json.Marshal(map[string]any{"enabled": false, "post_logout_url": u})
+		rec := do(h, globalAdmin, http.MethodPut, "/api/v1/settings/oidc", string(body))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("post_logout_url %q saved: %d, want 400", u, rec.Code)
+		}
+		if fs.oidcSettings != nil {
+			t.Errorf("post_logout_url %q: refused settings were persisted", u)
+		}
+	}
+	for _, u := range []string{"", "/", "/bye", "https://idp.example/logout?x=1", "http://intranet.example/bye"} {
+		fs := seededStore()
+		h := newOIDCHandler(fs, &fakeOIDC{active: true})
+		body, _ := json.Marshal(map[string]any{"enabled": false, "post_logout_url": u})
+		if rec := do(h, globalAdmin, http.MethodPut, "/api/v1/settings/oidc", string(body)); rec.Code != http.StatusOK {
+			t.Errorf("post_logout_url %q refused: %d %s", u, rec.Code, rec.Body.String())
+		}
+	}
+}

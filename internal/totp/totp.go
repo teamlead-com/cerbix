@@ -46,6 +46,11 @@ func Code(secret string, t time.Time) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("totp: bad secret: %w", err)
 	}
+	// HMAC accepts an empty key, and the codes it yields are anyone's to compute: an empty secret
+	// is refused, so an account left with one accepts no code (review of iter-0212, P1-1).
+	if len(key) == 0 {
+		return "", fmt.Errorf("totp: empty secret")
+	}
 	counter := uint64(t.Unix()) / uint64(period.Seconds())
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], counter)
@@ -57,20 +62,28 @@ func Code(secret string, t time.Time) (string, error) {
 	return fmt.Sprintf("%06d", val%1_000_000), nil
 }
 
-// ValidateAt reports whether input matches the secret within ±1 step of t
-// (tolerating clock skew). Comparison is constant-time.
-func ValidateAt(secret, input string, t time.Time) bool {
+// Step is the RFC 6238 time step (30 s counter) that t falls in.
+func Step(t time.Time) int64 { return t.Unix() / int64(period.Seconds()) }
+
+// ValidateAt reports whether input matches the secret within ±1 step of t (tolerating clock
+// skew), and the step it matched. Comparison is constant-time. The step is what a caller records
+// to make a code single-use (sec-hardening-2 H-7): a code is accepted once per step, and only for
+// a step above the last one accepted.
+func ValidateAt(secret, input string, t time.Time) (step int64, ok bool) {
 	input = strings.TrimSpace(input)
 	if len(input) != 6 {
-		return false
+		return 0, false
 	}
 	for _, skew := range []time.Duration{0, -period, period} {
-		if c, err := Code(secret, t.Add(skew)); err == nil && subtle.ConstantTimeCompare([]byte(c), []byte(input)) == 1 {
-			return true
+		at := t.Add(skew)
+		if c, err := Code(secret, at); err == nil && subtle.ConstantTimeCompare([]byte(c), []byte(input)) == 1 {
+			return Step(at), true
 		}
 	}
-	return false
+	return 0, false
 }
 
-// Validate checks input against the secret at the current time.
-func Validate(secret, input string) bool { return ValidateAt(secret, input, time.Now()) }
+// Validate checks input against the secret at the current time; see ValidateAt.
+func Validate(secret, input string) (step int64, ok bool) {
+	return ValidateAt(secret, input, time.Now())
+}

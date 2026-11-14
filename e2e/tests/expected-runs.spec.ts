@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, firstProject, cleanupMonitors } from "./helpers";
 
 // FR-032 — the expected-run ledger, against a LIVE stack (§13a, §14, D-0239/D-0240).

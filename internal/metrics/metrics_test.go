@@ -141,16 +141,18 @@ func TestReadinessTransitions(t *testing.T) {
 	if reg.Ready() {
 		t.Fatal("registry should start not-ready")
 	}
+	// Before the first ready the code is "starting"; the raw reason is the log's, not LastError's
+	// (sec-hardening-2 H-12).
 	reg.SetReady(false, "db unavailable")
-	if reg.Ready() || reg.LastError() != "db unavailable" {
-		t.Fatalf("ready=%v err=%q", reg.Ready(), reg.LastError())
+	if code, detail := reg.Readiness(); reg.Ready() || reg.LastError() != NotReadyStarting || code != NotReadyStarting || detail != "db unavailable" {
+		t.Fatalf("ready=%v err=%q detail=%q", reg.Ready(), reg.LastError(), detail)
 	}
 	reg.SetReady(true, "")
 	if !reg.Ready() {
 		t.Fatal("registry should be ready")
 	}
 	reg.SetCredentialReady(false, "decrypt_auth_failed")
-	if reg.Ready() || !strings.Contains(reg.LastError(), "credential envelope") {
+	if reg.Ready() || reg.LastError() != NotReadyCredential {
 		t.Fatalf("credential failure did not degrade readiness: ready=%v err=%q", reg.Ready(), reg.LastError())
 	}
 	// A generic health transition must not erase the component failure.
@@ -285,8 +287,9 @@ func TestServiceWedgedGatesReadinessAndClearForgetsIt(t *testing.T) {
 	if reg.Ready() {
 		t.Fatal("§21: readiness reported healthy while service work is wedged")
 	}
-	if reg.LastError() != "service repair ranges parked in error" {
-		t.Fatalf("wedge reason not surfaced: %q", reg.LastError())
+	// The code is served; the reason is kept for the log (sec-hardening-2 H-12).
+	if code, detail := reg.Readiness(); reg.LastError() != NotReadyServiceWedged || code != NotReadyServiceWedged || detail != "service repair ranges parked in error" {
+		t.Fatalf("wedge not surfaced: LastError %q, Readiness (%q, %q)", reg.LastError(), code, detail)
 	}
 	var out bytes.Buffer
 	reg.WritePrometheus(&out)
@@ -481,8 +484,8 @@ func TestServiceAlertStallGatesReadiness(t *testing.T) {
 	if reg.Ready() {
 		t.Fatal("§16.6b: readiness reported healthy while the live evaluator was stalled")
 	}
-	if reg.LastError() != "service health alert evaluation lagging 300s (bound 90s)" {
-		t.Fatalf("stall reason not surfaced: %q", reg.LastError())
+	if code, detail := reg.Readiness(); reg.LastError() != NotReadyAlertStalled || code != NotReadyAlertStalled || detail != "service health alert evaluation lagging 300s (bound 90s)" {
+		t.Fatalf("stall not surfaced: LastError %q, Readiness (%q, %q)", reg.LastError(), code, detail)
 	}
 	var out bytes.Buffer
 	reg.WritePrometheus(&out)
@@ -501,8 +504,8 @@ func TestServiceAlertStallGatesReadiness(t *testing.T) {
 	if reg.Ready() {
 		t.Fatal("a still-stalled burn arm reported ready")
 	}
-	if reg.LastError() != "service burn alert evaluation lagging 600s (bound 180s)" {
-		t.Fatalf("stall reason not surfaced for the remaining arm: %q", reg.LastError())
+	if _, detail := reg.Readiness(); reg.LastError() != NotReadyAlertStalled || detail != "service burn alert evaluation lagging 600s (bound 180s)" {
+		t.Fatalf("stall not surfaced for the remaining arm: %q (%q)", reg.LastError(), detail)
 	}
 	reg.SetServiceAlertStalled("burn", false, "")
 	if !reg.Ready() {

@@ -215,7 +215,7 @@ run unfinished. That was rejected as a P0 at party [218], and the reasoning is w
   says why: *"an ordinary http monitor with a 30 s interval and a 60 s timeout is legal today and
   common, so writing this as a general rule would refuse configurations nobody meant it to."* A
   single attempt outlasting its interval is normal, before `Retries + 1` attempts
-  (`internal/prober/prober.go:122`) are even considered.
+  (`internal/prober/prober.go:123`) are even considered.
 - **The invariant set contradicted itself.** Revision 1 asserted all three of: no terminal is
   inferred from a nearby heartbeat; no row exists for a completed run; a stroke requires a fully
   `covered` span. The first forbids inference, the second forbids evidence, so the third could

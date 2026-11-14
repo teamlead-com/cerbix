@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, ensureE2EWorkspace } from "./helpers";
 
 // The browser gate for FR-021 phase 1. The Go suite proves the transactional contract; this

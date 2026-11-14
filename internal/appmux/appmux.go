@@ -1,7 +1,7 @@
 // Package appmux composes the application port's handler: the auth routes, the session/bearer
 // API, the unauthenticated public router, the HTTP-pull agent router and the embedded SPA. It is
 // the one place that decides what is mounted where, so the request-forgery and response-header
-// rules that must cover ALL of it (sec-hardening-2 H-4, H-9a) have exactly one place to stand, and
+// rules that must cover ALL of it (sec-hardening-2 H-4, H-9a, H-9b) have exactly one place to stand, and
 // a test can drive the real composition rather than a copy of it.
 package appmux
 
@@ -44,7 +44,7 @@ func New(c Config) http.Handler {
 	if c.Agent {
 		bypass = append(bypass, "/api/v1/agent/")
 	}
-	return withReferrerPolicy(forgeryGuard(mux, bypass))
+	return withResponseHeaders(forgeryGuard(mux, bypass))
 }
 
 // forgeryGuard is sec-hardening-2 H-4 fix 1: http.CrossOriginProtection in front of the WHOLE
@@ -102,22 +102,58 @@ func (*apiMarker) ServeHTTP(http.ResponseWriter, *http.Request) {}
 
 var apiRoute http.Handler = &apiMarker{}
 
-// withReferrerPolicy is sec-hardening-2 H-9a. An unlisted status page's capability is the
-// `?token=` in its URL, so the public page and every public read are served `no-referrer`: no
-// request leaving them carries a Referer. Every other response of the application handler gets
-// `strict-origin-when-cross-origin`, which never sends a path or query to another origin. The
-// header is set on every response of the application handler, refusals and 404s included — not on
-// every response of the port: the path-canonicalization redirects and /healthz, /readyz and
-// /metrics are answered by internal/httpsrv's outer multiplexer before this handler runs, and
-// carry no Referrer-Policy (none renders a page). The prefixes are compared case-insensitively:
-// the SPA's router matches routes regardless of case, so /STATUS/<slug> renders the public page too.
-func withReferrerPolicy(next http.Handler) http.Handler {
+// isPublicPage is THE predicate for "a public status page or one of its reads" — the one place it
+// is decided, for every header that differs there (Referrer-Policy, X-Frame-Options, the CSP's
+// frame-ancestors). The prefixes are compared case-insensitively: the SPA's router matches routes
+// regardless of case, so /STATUS/<slug> renders the public page too.
+func isPublicPage(path string) bool {
+	p := strings.ToLower(path)
+	return p == "/status" || strings.HasPrefix(p, "/status/") || strings.HasPrefix(p, "/api/v1/public/")
+}
+
+// The Content-Security-Policy of sec-hardening-2 H-9b, verbatim. `img-src` admits https: because
+// branding.logo_url is a documented external URL; `style-src` admits inline styles because the
+// components bind them. The two variants differ only in frame-ancestors: a public status page may
+// be framed by the instance's own pages, nothing else may be framed at all.
+const (
+	cspBase   = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; "
+	cspApp    = cspBase + "frame-ancestors 'none'"
+	cspPublic = cspBase + "frame-ancestors 'self'"
+)
+
+// cspHeader is the header the policy rides in. This release ships it REPORT-ONLY: a violation
+// is reported (the Playwright fixture fails a test on one, S9b) but nothing is blocked. The next
+// release switches this constant to "Content-Security-Policy" and enforces it.
+const cspHeader = "Content-Security-Policy-Report-Only"
+
+// withResponseHeaders sets the security headers on every response of the application handler,
+// refusals and 404s included — not on every response of the port: the path-canonicalization
+// redirects and /healthz are answered by internal/httpsrv's outer multiplexer before this handler
+// runs, and so are /readyz and /metrics when the process serves them on this port (without
+// server.ops_listen); with ops_listen set the outer multiplexer answers those two 404 here and
+// serves them on the ops port. None of them renders a page; httpsrv sets nosniff on its own.
+//
+//   - Referrer-Policy (H-9a): an unlisted status page's capability is the `?token=` in its URL, so
+//     the public page and every public read are served `no-referrer` — no request leaving them
+//     carries a Referer; everything else `strict-origin-when-cross-origin`, which never sends a
+//     path or query to another origin.
+//   - X-Content-Type-Options: nosniff (H-9b) everywhere.
+//   - X-Frame-Options (H-9b): DENY, SAMEORIGIN on the public pages; the CSP's frame-ancestors says
+//     the same for browsers that read it.
+//   - the CSP (H-9b), report-only in this release.
+func withResponseHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		policy := "strict-origin-when-cross-origin"
-		if p := strings.ToLower(r.URL.Path); p == "/status" || strings.HasPrefix(p, "/status/") || strings.HasPrefix(p, "/api/v1/public/") {
-			policy = "no-referrer"
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		if isPublicPage(r.URL.Path) {
+			h.Set("Referrer-Policy", "no-referrer")
+			h.Set("X-Frame-Options", "SAMEORIGIN")
+			h.Set(cspHeader, cspPublic)
+		} else {
+			h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			h.Set("X-Frame-Options", "DENY")
+			h.Set(cspHeader, cspApp)
 		}
-		w.Header().Set("Referrer-Policy", policy)
 		next.ServeHTTP(w, r)
 	})
 }

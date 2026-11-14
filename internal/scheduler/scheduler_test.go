@@ -1746,15 +1746,16 @@ func TestServiceAlertStallMarksSchedulerNotReadyOnly(t *testing.T) {
 	// transient and race the stats loop clearing it. Once the lagging reason is present, every
 	// subsequent health pass in this fixture preserves the stall until the assertions complete.
 	got := leadUntilMetrics(t, fs, sched, func(got string) bool {
-		return strings.Contains(got, "cerbix_ready 0") &&
-			strings.Contains(sched.LastError(), "lagging")
+		_, detail := sched.Readiness()
+		return strings.Contains(got, "cerbix_ready 0") && strings.Contains(detail, "lagging")
 	})
 
 	if sched.Ready() {
 		t.Fatal("§16.6b: a stalled evaluator left the scheduler ready")
 	}
-	if !strings.Contains(sched.LastError(), "lagging") {
-		t.Fatalf("the stall reason is not surfaced on /readyz: %q", sched.LastError())
+	// /readyz serves the code; the raw reason is the log's (sec-hardening-2 H-12).
+	if code, detail := sched.Readiness(); code != metrics.NotReadyAlertStalled || !strings.Contains(detail, "lagging") {
+		t.Fatalf("the stall is not surfaced on /readyz: (%q, %q)", code, detail)
 	}
 	if !strings.Contains(got, "cerbix_ready 0") {
 		t.Fatalf("cerbix_ready disagrees with Ready() while stalled:\n%s", got)
@@ -1808,8 +1809,8 @@ func TestAPersistentlyFailingArmMarksTheSchedulerNotReady(t *testing.T) {
 		t.Fatal("an arm failing past its lease bound left the scheduler ready; every service it " +
 			"covers has dis-armed and nothing says so")
 	}
-	if !strings.Contains(reg.LastError(), "failing") {
-		t.Fatalf("the reason does not name a failing evaluator: %q", reg.LastError())
+	if code, detail := reg.Readiness(); code != metrics.NotReadyAlertStalled || !strings.Contains(detail, "failing") {
+		t.Fatalf("the reason does not name a failing evaluator: (%q, %q)", code, detail)
 	}
 
 	// A successful pass clears it — the stall is a statement about now, not a scar.

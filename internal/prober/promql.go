@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -59,7 +60,10 @@ func (p promqlProber) Probe(ctx context.Context, m domain.Monitor) Result {
 			Result     json.RawMessage `json:"result"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	// The answer is read through the same 1 MiB bound as every other HTTP body a prober reads
+	// (sec-hardening-2 S8; review of iter-0212, P2-1): a body that never completes ends the probe
+	// at the bound, not at its deadline.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&out); err != nil {
 		return Result{Connected: false, LatencyMS: lat, Msg: "decode: " + err.Error()}
 	}
 	if out.Status != "success" {

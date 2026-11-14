@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, cleanupMonitors, firstProject } from "./helpers";
 
 type Region = { name: string; live: boolean };

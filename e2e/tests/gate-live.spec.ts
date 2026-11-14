@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, ensureE2EWorkspace } from "./helpers";
 
 // FR-024 D8a on a HEALTHY live stack (func-reliability-gate.md, discharge row 15): a policy at

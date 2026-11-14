@@ -3,14 +3,14 @@ package dispatch
 import "testing"
 
 // TestBrokerStateHook covers the cerbix_broker_up wiring at the unit level (the live-broker
-// round-trip is opt-in via CERBIX_TEST_RABBITMQ_URL). WithBrokerState reports up=true
-// immediately (the dispatcher only exists after a successful dial), then supervise() calls
+// round-trip is opt-in via CERBIX_TEST_RABBITMQ_URL). WithBrokerState reports the CURRENT state
+// immediately — up after NewAMQP's successful dial (review of iter-0212 P2-2) —, then supervise() calls
 // setBrokerState(false) on loss and redial() calls setBrokerState(true) on recovery — here we
 // drive those transitions directly and assert the callback sequence, plus nil-safety.
 func TestBrokerStateHook(t *testing.T) {
 	var got []bool
-	d := &AMQP{}
-	d.WithBrokerState(func(up bool) { got = append(got, up) }) // immediate up
+	d := &AMQP{brokerUp: true} // as NewAMQP leaves it after a successful dial
+	d.WithBrokerState(func(up bool) { got = append(got, up) }) // immediate: the current state, up
 	d.setBrokerState(false)                                    // broker_lost
 	d.setBrokerState(true)                                     // broker_reconnected
 

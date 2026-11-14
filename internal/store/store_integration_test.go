@@ -1423,13 +1423,27 @@ func TestTOTPSecretAndRecoveryCodes(t *testing.T) {
 		t.Fatalf("cred pre-enable: %+v err=%v", cred, err)
 	}
 
-	// Enable, store recovery codes.
-	if err := st.EnableTOTP(ctx, u.ID); err != nil {
+	// Enable, storing the recovery codes in the same transaction; a second enable is refused.
+	hashes := []string{store.HashToken("code-a"), store.HashToken("code-b")}
+	// A confirmation against another secret than the stored one is refused and writes nothing.
+	if err := st.EnableTOTP(ctx, u.ID, "OTHERSECRET234567", hashes); !errors.Is(err, store.ErrTOTPSecretChanged) {
+		t.Fatalf("enable with another secret = %v, want ErrTOTPSecretChanged", err)
+	}
+	if err := st.EnableTOTP(ctx, u.ID, "JBSWY3DPEHPK3PXP", hashes); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
-	hashes := []string{store.HashToken("code-a"), store.HashToken("code-b")}
-	if err := st.ReplaceRecoveryCodes(ctx, u.ID, hashes); err != nil {
-		t.Fatalf("replace recovery: %v", err)
+	if err := st.EnableTOTP(ctx, u.ID, "JBSWY3DPEHPK3PXP", []string{store.HashToken("code-z")}); !errors.Is(err, store.ErrTOTPAlreadyEnabled) {
+		t.Fatalf("second enable = %v, want ErrTOTPAlreadyEnabled", err)
+	}
+	// A new enrollment never replaces the secret of an enabled 2FA.
+	if err := st.SetTOTPSecret(ctx, u.ID, "NEWSECRET234567"); !errors.Is(err, store.ErrTOTPAlreadyEnabled) {
+		t.Fatalf("enroll over an enabled 2FA = %v, want ErrTOTPAlreadyEnabled", err)
+	}
+	if sec, en, _ := st.GetTOTP(ctx, u.ID); sec != "JBSWY3DPEHPK3PXP" || !en {
+		t.Fatalf("after a refused enroll: (%q, %v), want the live secret, enabled", sec, en)
+	}
+	if ok, _ := st.ConsumeRecoveryCode(ctx, u.ID, store.HashToken("code-z")); ok {
+		t.Fatal("a refused enable stored its recovery codes")
 	}
 	if cred, _ := st.LocalCredentialByEmail(ctx, "2fa@x"); !cred.TOTPEnabled {
 		t.Fatal("cred should be TOTPEnabled after enable")
@@ -1464,6 +1478,51 @@ func TestTOTPSecretAndRecoveryCodes(t *testing.T) {
 	}
 	if ok, _ := st.ConsumeRecoveryCode(ctx, u.ID, store.HashToken("code-c")); ok {
 		t.Fatal("recovery codes should be cleared on disable")
+	}
+}
+
+// S7 (sec-hardening-2 H-7): the sign-in's compare-and-set accepts a step once and only above the
+// last one; a new enrollment and a disable forget it.
+func TestTOTPStepIsAcceptedOnceAndForgottenOnReEnrollment(t *testing.T) {
+	st, ctx := testStore(t)
+	u, err := st.CreateLocalUser(ctx, "step@x", "Step", "hash-abc", false)
+	if err != nil {
+		t.Fatalf("create local user: %v", err)
+	}
+	accept := func(step int64) bool {
+		t.Helper()
+		ok, err := st.AcceptTOTPStep(ctx, u.ID, step)
+		if err != nil {
+			t.Fatalf("accept %d: %v", step, err)
+		}
+		return ok
+	}
+	if !accept(100) {
+		t.Fatal("first step refused")
+	}
+	if accept(100) {
+		t.Fatal("the same step accepted twice")
+	}
+	if accept(99) {
+		t.Fatal("an earlier step accepted after a later one")
+	}
+	if !accept(101) {
+		t.Fatal("the next step refused")
+	}
+	if err := st.SetTOTPSecret(ctx, u.ID, "JBSWY3DPEHPK3PXP"); err != nil {
+		t.Fatalf("set secret: %v", err)
+	}
+	if !accept(50) {
+		t.Fatal("a new enrollment did not forget the last step")
+	}
+	if err := st.DisableTOTP(ctx, u.ID); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if !accept(10) {
+		t.Fatal("disabling did not forget the last step")
+	}
+	if ok, err := st.AcceptTOTPStep(ctx, "00000000-0000-0000-0000-000000000000", 1); err != nil || ok {
+		t.Fatalf("unknown user = (%v, %v), want (false, nil)", ok, err)
 	}
 }
 

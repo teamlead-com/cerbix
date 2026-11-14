@@ -1,4 +1,4 @@
-import { test as setup, expect } from "@playwright/test";
+import { test as setup, expect } from "./fixtures";
 import { ADMIN, desktopNavAside, ensureE2EWorkspace } from "./helpers";
 
 // One real sign-in for the whole run; specs reuse the stored session.

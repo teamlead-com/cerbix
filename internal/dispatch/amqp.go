@@ -215,7 +215,8 @@ type AMQP struct {
 	pubMu  sync.Mutex
 	logger *slog.Logger
 
-	stateMu       sync.Mutex    // guards onBrokerState
+	stateMu       sync.Mutex    // guards brokerUp and onBrokerState, and serializes the hook's calls
+	brokerUp      bool          // the broker's state as the supervisor last saw it
 	onBrokerState func(up bool) // optional broker-reachability gauge hook
 
 	ctx    context.Context
@@ -303,27 +304,34 @@ func NewAMQP(url string, logger *slog.Logger) (*AMQP, error) {
 		jobsCh:        make(chan DeliveredJob, forwardBuffer),
 		resultsCh:     make(chan domain.Heartbeat, forwardBuffer),
 	}
+	// The dial above succeeded: the broker is up. Set before the supervisor can report a loss, so
+	// the state the hook is later wired with is never older than the supervisor's.
+	d.brokerUp = true
 	go d.supervise()
 	return d, nil
 }
 
-// WithBrokerState wires a callback for the cerbix_broker_up gauge, invoked with
-// false on broker loss and true on (re)connect. The dispatcher only exists after a
-// successful dial, so wiring the sink immediately reports up. Optional; nil-safe.
+// WithBrokerState wires a callback for the cerbix_broker_up gauge, invoked with false on broker
+// loss and true on (re)connect, and at once with the CURRENT state (review of iter-0212, P2-2): the
+// supervisor runs from NewAMQP on, so a loss before the wiring is what the hook must hear, not an
+// unconditional "up". Optional; nil-safe.
 func (d *AMQP) WithBrokerState(f func(up bool)) *AMQP {
 	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
 	d.onBrokerState = f
-	d.stateMu.Unlock()
-	d.setBrokerState(true)
+	if f != nil {
+		f(d.brokerUp)
+	}
 	return d
 }
 
-// setBrokerState is a nil-safe, race-free gauge update.
+// setBrokerState records the broker's state and tells the hook, under one lock: the hook's calls
+// are serialized with the wiring, so the last value it sees is the dispatcher's state.
 func (d *AMQP) setBrokerState(up bool) {
 	d.stateMu.Lock()
-	f := d.onBrokerState
-	d.stateMu.Unlock()
-	if f != nil {
+	defer d.stateMu.Unlock()
+	d.brokerUp = up
+	if f := d.onBrokerState; f != nil {
 		f(up)
 	}
 }

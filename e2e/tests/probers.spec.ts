@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, firstProject, cleanupMonitors } from "./helpers";
 
 // Polls a monitor until it reaches the wanted status (the scheduler probes on

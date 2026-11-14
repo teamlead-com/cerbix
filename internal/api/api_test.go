@@ -2822,6 +2822,9 @@ func (f *fakeStore) totpState() map[string]struct {
 	return f.totp
 }
 func (f *fakeStore) SetTOTPSecret(_ context.Context, userID, secret string) error {
+	if f.totpState()[userID].enabled {
+		return store.ErrTOTPAlreadyEnabled
+	}
 	f.totpState()[userID] = struct {
 		secret  string
 		enabled bool
@@ -2832,11 +2835,17 @@ func (f *fakeStore) GetTOTP(_ context.Context, userID string) (string, bool, err
 	s := f.totpState()[userID]
 	return s.secret, s.enabled, nil
 }
-func (f *fakeStore) EnableTOTP(_ context.Context, userID string) error {
+func (f *fakeStore) EnableTOTP(ctx context.Context, userID, confirmed string, hashes []string) error {
 	s := f.totpState()[userID]
+	if s.enabled {
+		return store.ErrTOTPAlreadyEnabled
+	}
+	if s.secret == "" || s.secret != confirmed {
+		return store.ErrTOTPSecretChanged
+	}
 	s.enabled = true
 	f.totpState()[userID] = s
-	return nil
+	return f.ReplaceRecoveryCodes(ctx, userID, hashes)
 }
 func (f *fakeStore) DisableTOTP(_ context.Context, userID string) error {
 	delete(f.totpState(), userID)

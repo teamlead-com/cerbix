@@ -33,6 +33,9 @@ func (h *Handler) putBranding(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &b) {
 		return
 	}
+	// Trimmed before it is checked, as setOIDCSettings trims post_logout_url (review of iter-0212,
+	// P2-3): a pasted stray space is saved clean rather than refused.
+	b.SupportURL = strings.TrimSpace(b.SupportURL)
 	if err := b.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -46,13 +49,17 @@ func (h *Handler) putBranding(w http.ResponseWriter, r *http.Request) {
 }
 
 // publicBranding exposes branding to unauthenticated clients (login page, public
-// status pages). No secrets live in branding; the configured flag is omitted.
+// status pages). No secrets live in branding; the configured flag is omitted. A stored
+// support_url that fails the rule — saved before the rule existed — is served as "" (S10).
 func (h *Handler) publicBranding(w http.ResponseWriter, r *http.Request) {
 	if h.settings == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"product_name": "cerbix"})
 		return
 	}
 	b := h.settings.Branding()
+	if !domain.SupportURLAllowed(b.SupportURL) {
+		b.SupportURL = ""
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"product_name": b.ProductName,
 		"accent_color": b.AccentColor,

@@ -303,7 +303,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Revoke the session and clear the cookie */
+        /**
+         * Revoke the session and clear the cookie
+         * @description Ends the session the cookie names (a request without one is answered the same way) and answers 200 with the destination the client should navigate to — it is not a redirect (sec-hardening-2 H-9b; before this release the answer was a 302). `redirect_to` is the configured post-logout URL (OIDC `post_logout_url`) when that is a local path (`/…`, not `//…`, with no backslash or control character) or an http(s) URL with a host, and `/` otherwise — the value is checked when served, whatever its source. A browser client navigates with `window.location.assign(redirect_to)`; a script that followed the 302 now reads the JSON instead. `GET /auth/logout` is 405.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -313,12 +316,17 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Redirect to the post-logout path. */
-                302: {
+                /** @description Signed out. */
+                200: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": {
+                            /** @description Where to navigate after sign-out — a local path or an http(s) URL; `/` when none is configured or the configured one is refused. */
+                            redirect_to: string;
+                        };
+                    };
                 };
                 403: components["responses"]["CrossOriginRefused"];
             };
@@ -468,7 +476,7 @@ export interface paths {
         put?: never;
         /**
          * Begin two-factor (TOTP) enrollment
-         * @description Generates a pending TOTP secret for the current local user (2FA not yet active) and returns it plus an otpauth:// URI for an authenticator app. Confirm with POST /api/v1/me/totp/enable.
+         * @description Generates a pending TOTP secret for the current local user (2FA not yet active) and returns it plus an otpauth:// URI for an authenticator app. Confirm with POST /api/v1/me/totp/enable. 400 when 2FA is already enabled — also when a confirmation committed while this request ran: an enrollment never replaces the secret of an enabled 2FA (it must be disabled first).
          */
         post: {
             parameters: {
@@ -509,7 +517,7 @@ export interface paths {
         put?: never;
         /**
          * Confirm and enable two-factor authentication
-         * @description Verifies a code against the pending secret, enables 2FA, and returns single-use recovery codes (shown once).
+         * @description Verifies a code against the pending secret, enables 2FA, and returns single-use recovery codes (shown once). Enables only the secret the code was verified against: 400 when 2FA is already enabled, when no enrollment is pending, when the code does not match, and when the pending secret changed while this request ran (a concurrent disable or re-enrollment) — nothing is enabled and no recovery code is stored. The code that enables 2FA may still sign in once; a code signs in only once.
          */
         post: {
             parameters: {
@@ -7048,7 +7056,7 @@ export interface paths {
         };
         /**
          * Save the OIDC configuration and rebuild the provider (global admin only)
-         * @description Persists the instance-wide OIDC override — which then takes precedence over the YAML oidc: block — and rebuilds the live provider. A blank/omitted client_secret preserves the stored one. If the provider can't be built (e.g. the IdP is unreachable) the settings are still saved and active is false; the background reloader keeps retrying.
+         * @description Persists the instance-wide OIDC override — which then takes precedence over the YAML oidc: block — and rebuilds the live provider. A blank/omitted client_secret preserves the stored one. If the provider can't be built (e.g. the IdP is unreachable) the settings are still saved and active is false; the background reloader keeps retrying. `post_logout_url` must be a local path (`/…`, not `//…`, no backslash or control character) or an http(s) URL with a host — anything else is 400 (sec-hardening-2 H-9b): the SPA navigates to it after sign-out.
          */
         put: {
             parameters: {
@@ -7113,7 +7121,10 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
             };
         };
-        /** Save branding (global admin only) */
+        /**
+         * Save branding (global admin only)
+         * @description 400 for an invalid accent color, product name or announcement, and for a `support_url` that is neither an http(s) URL with a host nor a `mailto:` with an address (sec-hardening-2 H-10).
+         */
         put: {
             parameters: {
                 query?: never;
@@ -9842,6 +9853,7 @@ export interface components {
             accent_color?: string;
             logo_url?: string;
             footer_text?: string;
+            /** @description An http(s) URL with a host, a mailto: with an address, or empty. Anything else is refused (400). */
             support_url?: string;
             announcement?: components["schemas"]["Announcement"];
         };
@@ -9850,6 +9862,7 @@ export interface components {
             accent_color?: string;
             logo_url?: string;
             footer_text?: string;
+            /** @description An http(s) URL with a host, a mailto: with an address, or empty — a stored value that fails the rule (saved before it existed) is served as empty. */
             support_url?: string;
             announcement?: components["schemas"]["Announcement"];
         };
@@ -9912,6 +9925,7 @@ export interface components {
             client_secret_set?: boolean;
             redirect_url?: string;
             scopes?: string[];
+            /** @description As stored. POST /auth/logout serves it only if it is a local path or an http(s) URL with a host, else /. */
             post_logout_url?: string;
             button_label?: string;
             bootstrap_admins?: string[];
@@ -9931,6 +9945,7 @@ export interface components {
             /** @description Required when enabled. */
             redirect_url?: string;
             scopes?: string[];
+            /** @description A local path (/…, not //…, no backslash or control character) or an http(s) URL with a host; anything else is 400. Empty means none. */
             post_logout_url?: string;
             button_label?: string;
             bootstrap_admins?: string[];

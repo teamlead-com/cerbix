@@ -1,10 +1,19 @@
 # cerbix production config — role=all. Secrets are injected from the environment
-# (docker compose .env): config.Load expands ${VAR} at startup, so nothing secret
-# is committed in this file. A literal '$' in a value must be escaped as '$$'.
+# (docker compose .env): config.Load expands $${NAME} references at startup, so nothing
+# secret is committed in this file. The loader expands the WHOLE file, comments included, and
+# refuses an undefined name — which is why the reference above is written with '$$', the escape
+# for a literal '$' (in a value as much as in a comment).
 #
 # Safe to commit: only placeholders live here. Real values go in docker/.env.
 server:
   listen: ":8080"
+  # /metrics and /readyz on their own port (sec-hardening-2 H-11): the application port answers
+  # them 404, /healthz stays on both. ":9091" listens on every interface INSIDE the container; it
+  # is docker-compose.prod.yml that publishes it on the host's loopback only (CERBIX_OPS_BIND). Run
+  # outside Docker, or with network_mode: host, and nothing narrows it: write "127.0.0.1:9091" here
+  # instead. Point Prometheus and readiness probes at it. Must not share listen's port. Remove the
+  # line to serve everything on one port again.
+  ops_listen: ":9091"
 
 log:
   level: "info"

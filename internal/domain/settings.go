@@ -39,6 +39,9 @@ func (b Branding) Validate() error {
 	if len(b.ProductName) > 60 {
 		return fmt.Errorf("branding: product_name too long (max 60)")
 	}
+	if !SupportURLAllowed(b.SupportURL) {
+		return fmt.Errorf("branding: support_url must be an http(s) URL with a host or a mailto: address")
+	}
 	if b.Announcement.Enabled && strings.TrimSpace(b.Announcement.Text) == "" {
 		return fmt.Errorf("branding: announcement text is required when enabled")
 	}

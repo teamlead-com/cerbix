@@ -5,16 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>cerbix</title>
-    <script>
-      // Apply the stored/OS theme before paint to avoid a flash.
-      (function () {
-        try {
-          var t = localStorage.getItem("cerbix-theme");
-          if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
-        } catch (e) {}
-      })();
-    </script>
-    <script type="module" crossorigin src="/assets/index-DzDDanu2.js"></script>
+    <!-- Pre-paint theme: a static file, because the CSP's script-src 'self' refuses inline scripts. -->
+    <script src="/theme-init.js"></script>
+    <script type="module" crossorigin src="/assets/index-BYL0Xxaq.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-CYAWsejw.css">
   </head>
   <body>

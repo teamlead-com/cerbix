@@ -97,6 +97,10 @@ services:
       # Caddy do by default) — see docs/runbook.md, "Request forgery". Override the
       # bind (e.g. 0.0.0.0:8080) via CERBIX_HTTP_BIND in .env only if intended, or add traefik labels and comment\delete ports section.
       - "${CERBIX_HTTP_BIND:-127.0.0.1:8080}:8080"
+      # The operational port (server.ops_listen in config.prod.yaml): /metrics and /readyz, which
+      # the application port answers 404. Loopback only by default; on a shared host keep it off
+      # the public interface (CERBIX_OPS_BIND, e.g. an internal address for a Prometheus there).
+      - "${CERBIX_OPS_BIND:-127.0.0.1:9091}:9091"
     volumes:
       - ./config.prod.yaml:/etc/cerbix/config.yaml:ro
     deploy:

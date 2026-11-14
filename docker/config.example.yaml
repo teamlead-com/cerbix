@@ -1,13 +1,20 @@
 # cerbix — full example configuration (every section and key, with defaults).
 # The config is strict: unknown keys or invalid values fail startup fast.
-# ${ENV_VAR} references are expanded from the process environment at load time,
-# so secrets can live in an .env / the deployment environment instead of here.
+# $${ENV_VAR} references are expanded from the process environment at load time,
+# so secrets can live in an .env / the deployment environment instead of here. The loader expands
+# the WHOLE file, comments included, and refuses an undefined name — which is why the reference
+# above is written with '$$', the escape for a literal '$' (in a value as much as in a comment).
 
 server:
   listen: ":8080"
   healthz_path: "/healthz"
   readyz_path: "/readyz"
   metrics_path: "/metrics"
+  # Optional second listener for the operational endpoints (sec-hardening-2 H-11). When set,
+  # /metrics and /readyz serve ONLY there and the application port answers them 404; /healthz
+  # serves on both. Bind it to loopback or an internal network. Must differ from listen.
+  # Empty (the default) keeps one port for everything.
+  ops_listen: ""
   # Reverse-proxy hops in front of cerbix (0 = none). The login rate limiter takes
   # the client IP this many entries from the right of X-Forwarded-For, so a client
   # can't spoof XFF into a fresh bucket. Set to your real hop count in production

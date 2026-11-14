@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, firstProject } from "./helpers";
 
 // Users administration (D-0103/D-0104) uses the deterministic Keycloak user
@@ -116,7 +116,7 @@ test.describe("users administration", () => {
       // Never sign out anyone but the fixture user.
       expect(JSON.stringify(await me.json()), "this context is the fixture user, not the shared admin").toContain("testuser@example.com");
       const out = await oidcPage.request.post("/auth/logout", { maxRedirects: 0 });
-      expect([200, 204, 302, 303], `logout status ${out.status()}`).toContain(out.status());
+      expect(out.status(), "logout answers 200 {redirect_to} (sec-hardening-2 H-9b)").toBe(200);
       expect((await oidcPage.request.get("/api/v1/me")).status(), "fixture user signed out").toBe(401);
     } finally {
       await context.close();

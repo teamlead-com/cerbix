@@ -72,7 +72,7 @@ func NewRunnerWithGuard(g Guard) *Runner {
 		domain.MonitorTLS:       tlsProber{dial: g.dialContext(&net.Dialer{}), clock: time.Now},
 		domain.MonitorGRPC:      grpcProber{dial: g.dialContext(&net.Dialer{})},
 		domain.MonitorComposite: compositeProber{r: r},
-		domain.MonitorPostgres:  pgProber{dial: g.dialContext(&net.Dialer{})},
+		domain.MonitorPostgres:  pgProber{dial: boundedDial(g.dialContext(&net.Dialer{}), dbConnReadLimit)},
 		domain.MonitorMySQL:     mysqlProber{},
 		domain.MonitorRedis:     redisProber{dial: g.dialContext(&net.Dialer{})},
 		domain.MonitorPromQL:    promqlProber{client: &http.Client{Transport: transport, CheckRedirect: runnerCheckRedirect}},
@@ -90,7 +90,8 @@ func NewRunnerWithGuard(g Guard) *Runner {
 		},
 	}
 	// MySQL's driver dialer registry is global; point it at this runner's guard.
-	dial := g.dialContext(&net.Dialer{})
+	// Every connection is read through dbConnReadLimit (review of iter-0212, P2-1).
+	dial := boundedDial(g.dialContext(&net.Dialer{}), dbConnReadLimit)
 	setMySQLGuardDial(func(ctx context.Context, addr string) (net.Conn, error) {
 		return dial(ctx, "tcp", addr)
 	})

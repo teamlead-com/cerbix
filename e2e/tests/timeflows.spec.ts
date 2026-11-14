@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import * as crypto from "crypto";
 import { ADMIN, apiGet, apiSend, firstProject, cleanupMonitors } from "./helpers";
 

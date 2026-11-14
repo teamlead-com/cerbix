@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, ensureE2EWorkspace } from "./helpers";
 
 // The browser gate for FR-025's SPA (AC-0165-7, D-0210 items 1, 3 and 5): the `Changes` card on the

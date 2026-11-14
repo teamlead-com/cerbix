@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, ensureE2EWorkspace, cleanupMonitors } from "./helpers";
 
 // FR-029 against a live stack. What can be proven here is deliberately NOT the happy path: the URL

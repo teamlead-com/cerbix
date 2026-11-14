@@ -88,6 +88,14 @@ func (h *Handler) setOIDCSettings(w http.ResponseWriter, r *http.Request) {
 	body.Issuer = strings.TrimSpace(body.Issuer)
 	body.ClientID = strings.TrimSpace(body.ClientID)
 	body.RedirectURL = strings.TrimSpace(body.RedirectURL)
+	body.PostLogoutURL = strings.TrimSpace(body.PostLogoutURL)
+	// The SPA navigates to it with window.location.assign after sign-out (sec-hardening-2 H-9b), so
+	// it is a DOM sink: a local path or http(s) with a host, nothing else. LogoutHandler checks it
+	// again when serving it, for rows saved before this check existed.
+	if !domain.PostLogoutURLAllowed(body.PostLogoutURL) {
+		writeError(w, http.StatusBadRequest, "post_logout_url must be a local path (/…, not //…, no backslash or control character) or an http(s) URL with a host")
+		return
+	}
 	if body.Enabled {
 		if body.Issuer == "" || body.ClientID == "" || body.RedirectURL == "" {
 			writeError(w, http.StatusBadRequest, "issuer, client_id and redirect_url are required when SSO is enabled")
@@ -131,7 +139,7 @@ func (h *Handler) setOIDCSettings(w http.ResponseWriter, r *http.Request) {
 		ClientSecret:    secret,
 		RedirectURL:     body.RedirectURL,
 		Scopes:          nonNilStrings(body.Scopes),
-		PostLogoutURL:   strings.TrimSpace(body.PostLogoutURL),
+		PostLogoutURL:   body.PostLogoutURL,
 		ButtonLabel:     strings.TrimSpace(body.ButtonLabel),
 		BootstrapAdmins: nonNilStrings(body.BootstrapAdmins),
 		MachineClients:  machineClients,

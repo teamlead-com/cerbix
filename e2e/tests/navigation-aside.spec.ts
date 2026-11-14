@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { desktopNavAside } from "./helpers";
 
 test.use({ storageState: { cookies: [], origins: [] } });

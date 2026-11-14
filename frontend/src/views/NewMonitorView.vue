@@ -1011,18 +1011,46 @@ async function testConnection() {
   }
 }
 
+// The fields the instance defaults prefill. The defaults arrive after the workspace and five lists
+// load — late enough for a person to have typed a value already — so a default fills a field only
+// while the person has not changed it. Every write to these fields before the defaults land is the
+// person's (loadForEdit writes them too, but an edited monitor never takes the defaults), so a
+// synchronous watcher marks the field as theirs unless the prefill itself is writing.
+const defaultedFields = ["interval_seconds", "timeout_seconds", "retries", "failure_threshold", "renotify_seconds", "auto_incident"] as const;
+type DefaultedField = (typeof defaultedFields)[number];
+const setByUser = new Set<DefaultedField>();
+let applyingDefaults = false;
+for (const key of defaultedFields) {
+  watch(
+    () => form[key],
+    () => {
+      if (!applyingDefaults) setByUser.add(key);
+    },
+    { flush: "sync" },
+  );
+}
+function prefill<K extends DefaultedField>(key: K, value: (typeof form)[K]) {
+  if (setByUser.has(key)) return;
+  applyingDefaults = true;
+  try {
+    form[key] = value;
+  } finally {
+    applyingDefaults = false;
+  }
+}
+
 // Prefill a NEW monitor from the instance defaults (Settings → Monitor
 // defaults) — the local literals above are only the pre-fetch fallback.
 async function applyInstanceDefaults() {
   const res = await api.GET("/api/v1/monitor-defaults", {});
   const d = res.data;
   if (!d) return;
-  if (d.interval_seconds) form.interval_seconds = d.interval_seconds;
-  if (d.timeout_seconds) form.timeout_seconds = d.timeout_seconds;
-  if (d.retries !== undefined) form.retries = d.retries;
-  if (d.failure_threshold) form.failure_threshold = d.failure_threshold;
-  if (d.renotify_seconds !== undefined) form.renotify_seconds = d.renotify_seconds;
-  if (d.auto_incident !== undefined) form.auto_incident = d.auto_incident;
+  if (d.interval_seconds) prefill("interval_seconds", d.interval_seconds);
+  if (d.timeout_seconds) prefill("timeout_seconds", d.timeout_seconds);
+  if (d.retries !== undefined) prefill("retries", d.retries);
+  if (d.failure_threshold) prefill("failure_threshold", d.failure_threshold);
+  if (d.renotify_seconds !== undefined) prefill("renotify_seconds", d.renotify_seconds);
+  if (d.auto_incident !== undefined) prefill("auto_incident", d.auto_incident);
 }
 
 onMounted(async () => {

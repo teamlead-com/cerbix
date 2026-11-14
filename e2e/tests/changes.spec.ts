@@ -1,4 +1,5 @@
-import { test, expect, request } from "@playwright/test";
+import { request } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { randomUUID } from "node:crypto";
 import { apiGet, apiSend, ensureE2EWorkspace } from "./helpers";
 

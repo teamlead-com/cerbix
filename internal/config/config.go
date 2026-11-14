@@ -10,7 +10,9 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,7 +92,12 @@ type PullAgent struct {
 
 // ServerConfig holds HTTP listener settings.
 type ServerConfig struct {
-	Listen      string `yaml:"listen"`
+	Listen string `yaml:"listen"`
+	// OpsListen, when set, is a second listener for the operational endpoints (sec-hardening-2
+	// H-11): /metrics and /readyz serve there and answer an explicit 404 on Listen; /healthz
+	// serves on both. Bind it to loopback or an internal network. Empty (the default) keeps one
+	// port for everything. It may not equal Listen.
+	OpsListen   string `yaml:"ops_listen"`
 	HealthzPath string `yaml:"healthz_path"`
 	ReadyzPath  string `yaml:"readyz_path"`
 	MetricsPath string `yaml:"metrics_path"`
@@ -637,6 +644,15 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Server.Listen) == "" {
 		return fmt.Errorf("server.listen must not be empty")
 	}
+	// The SPA navigates to it after sign-out (sec-hardening-2 H-9b): the config file's value obeys
+	// the rule setOIDCSettings enforces, and a broken one refuses startup rather than being served
+	// as "/" in silence (review of iter-0212, P2-4). LogoutHandler still checks what it serves.
+	if !domain.PostLogoutURLAllowed(c.OIDC.PostLogoutRedirectURL) {
+		return fmt.Errorf("oidc.post_logout_redirect_url must be a local path (/…, not //…, no backslash, whitespace or control character) or an http(s) URL with a host: %q", c.OIDC.PostLogoutRedirectURL)
+	}
+	if err := validateListeners(c.Server.Listen, c.Server.OpsListen); err != nil {
+		return err
+	}
 	for name, p := range map[string]string{
 		"server.healthz_path": c.Server.HealthzPath,
 		"server.readyz_path":  c.Server.ReadyzPath,
@@ -891,6 +907,68 @@ func (s ServerConfig) TrustedProxyNets() ([]*net.IPNet, error) {
 		nets = append(nets, n)
 	}
 	return nets, nil
+}
+
+// validateListeners checks server.listen and, when set, server.ops_listen as host:port pairs, and
+// refuses an ops listener that would collide with the application's (sec-hardening-2 H-11; review
+// of iter-0212, P2-5 and second pass P3-1). The port is a number 1..65535 written in digits, so
+// "8080" and "08080" are one port. The same port collides when either host is a wildcard ("", or an
+// IP that IsUnspecified — 0.0.0.0, ::, [0:0:0:0:0:0:0:0]) or the hosts are the same: two IPs compare
+// as unmapped addresses ([::ffff:127.0.0.1] is 127.0.0.1, [0:0:0:0:0:0:0:1] is ::1), two names
+// case-insensitively. A name and an IP never compare equal — nothing is resolved here.
+func validateListeners(listen, ops string) error {
+	l, err := parseListen("server.listen", listen)
+	if err != nil {
+		return err
+	}
+	if ops == "" {
+		return nil
+	}
+	o, err := parseListen("server.ops_listen", ops)
+	if err != nil {
+		return err
+	}
+	if l.port == o.port && (l.wildcard() || o.wildcard() || l.sameHost(o)) {
+		return fmt.Errorf("server.ops_listen (%q) must not use server.listen's port (%q): it moves /metrics and /readyz off the application port", ops, listen)
+	}
+	return nil
+}
+
+// listenAddr is a parsed listen value. ip is valid, and unmapped, when host is an IP literal.
+type listenAddr struct {
+	host string
+	ip   netip.Addr
+	port int
+}
+
+func (a listenAddr) wildcard() bool { return a.host == "" || (a.ip.IsValid() && a.ip.IsUnspecified()) }
+
+func (a listenAddr) sameHost(b listenAddr) bool {
+	if a.ip.IsValid() || b.ip.IsValid() {
+		return a.ip == b.ip
+	}
+	return strings.EqualFold(a.host, b.host)
+}
+
+func parseListen(key, v string) (listenAddr, error) {
+	if strings.TrimSpace(v) != v || v == "" {
+		return listenAddr{}, fmt.Errorf("%s must be host:port without surrounding whitespace: %q", key, v)
+	}
+	host, port, err := net.SplitHostPort(v)
+	if err != nil || port == "" {
+		return listenAddr{}, fmt.Errorf("%s must be host:port with a port: %q", key, v)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || strings.Trim(port, "0123456789") != "" || n < 1 || n > 65535 {
+		return listenAddr{}, fmt.Errorf("%s: the port must be a number from 1 to 65535: %q", key, v)
+	}
+	a := listenAddr{host: host, port: n}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		a.ip = ip.Unmap()
+	} else if strings.HasPrefix(v, "[") {
+		return listenAddr{}, fmt.Errorf("%s: the bracketed host must be an IP address: %q", key, v)
+	}
+	return a, nil
 }
 
 // HTTPReadTimeout is a conservative default used by the HTTP server.

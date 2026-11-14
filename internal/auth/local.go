@@ -19,14 +19,24 @@ import (
 var verifyPasswordFn = VerifyPassword
 
 // secondFactorOK validates a login's second factor: a current TOTP code, or a
-// single-use recovery code (consumed on match).
+// single-use recovery code (consumed on match). A TOTP code is accepted once (sec-hardening-2
+// H-7, S7): its step is recorded by one compare-and-set, so a replayed code — sequential or
+// concurrent — is refused. A code whose step is already spent is not a recovery code either (six
+// digits never hash to one), so it falls through to a refusal.
 func (a *Authenticator) secondFactorOK(ctx context.Context, cred store.LocalCredential, input string) bool {
 	input = strings.TrimSpace(input)
 	if input == "" {
 		return false
 	}
-	if totp.Validate(cred.TOTPSecret, input) {
-		return true
+	if step, ok := totp.Validate(cred.TOTPSecret, input); ok {
+		accepted, err := a.store.AcceptTOTPStep(ctx, cred.UserID, step)
+		if err != nil {
+			a.logger.Error("accept_totp_step_failed", "error", err.Error())
+			return false
+		}
+		if accepted {
+			return true
+		}
 	}
 	ok, err := a.store.ConsumeRecoveryCode(ctx, cred.UserID, store.HashToken(input))
 	if err != nil {

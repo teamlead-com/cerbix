@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -89,7 +90,9 @@ func (p websocketProber) Probe(ctx context.Context, m domain.Monitor) Result {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: err.Error()}
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	// The handshake response is read through a bound (sec-hardening-2 H-8, S8): a peer that streams
+	// a header without end ends the probe at the limit, not at its deadline.
+	resp, err := http.ReadResponse(bufio.NewReader(io.LimitReader(conn, wsHandshakeReadLimit)), nil)
 	if err != nil {
 		return Result{Connected: false, LatencyMS: elapsedMS(start), Msg: "read handshake: " + err.Error()}
 	}

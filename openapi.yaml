@@ -182,8 +182,27 @@ paths:
     post:
       tags: [auth]
       summary: Revoke the session and clear the cookie
+      description: >
+        Ends the session the cookie names (a request without one is answered the same way) and
+        answers 200 with the destination the client should navigate to — it is not a redirect
+        (sec-hardening-2 H-9b; before this release the answer was a 302). `redirect_to` is the
+        configured post-logout URL (OIDC `post_logout_url`) when that is a local path (`/…`, not
+        `//…`, with no backslash or control character) or an http(s) URL with a host, and `/`
+        otherwise — the value is checked when served, whatever its source. A browser client
+        navigates with `window.location.assign(redirect_to)`; a script that followed the 302 now
+        reads the JSON instead. `GET /auth/logout` is 405.
       responses:
-        '302': { description: Redirect to the post-logout path. }
+        '200':
+          description: Signed out.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [redirect_to]
+                properties:
+                  redirect_to:
+                    type: string
+                    description: Where to navigate after sign-out — a local path or an http(s) URL; `/` when none is configured or the configured one is refused.
         '403': { $ref: '#/components/responses/CrossOriginRefused' }
 
   /api/v1/me:
@@ -240,7 +259,9 @@ paths:
       description: >
         Generates a pending TOTP secret for the current local user (2FA not yet
         active) and returns it plus an otpauth:// URI for an authenticator app.
-        Confirm with POST /api/v1/me/totp/enable.
+        Confirm with POST /api/v1/me/totp/enable. 400 when 2FA is already enabled — also when
+        a confirmation committed while this request ran: an enrollment never replaces the
+        secret of an enabled 2FA (it must be disabled first).
       responses:
         '200':
           description: OK
@@ -256,7 +277,11 @@ paths:
       summary: Confirm and enable two-factor authentication
       description: >
         Verifies a code against the pending secret, enables 2FA, and returns
-        single-use recovery codes (shown once).
+        single-use recovery codes (shown once). Enables only the secret the code was
+        verified against: 400 when 2FA is already enabled, when no enrollment is pending, when
+        the code does not match, and when the pending secret changed while this request ran
+        (a concurrent disable or re-enrollment) — nothing is enabled and no recovery code is
+        stored. The code that enables 2FA may still sign in once; a code signs in only once.
       requestBody:
         required: true
         content:
@@ -3738,7 +3763,9 @@ paths:
         the YAML oidc: block — and rebuilds the live provider. A blank/omitted
         client_secret preserves the stored one. If the provider can't be built (e.g.
         the IdP is unreachable) the settings are still saved and active is false;
-        the background reloader keeps retrying.
+        the background reloader keeps retrying. `post_logout_url` must be a local path
+        (`/…`, not `//…`, no backslash or control character) or an http(s) URL with a host —
+        anything else is 400 (sec-hardening-2 H-9b): the SPA navigates to it after sign-out.
       requestBody:
         required: true
         content:
@@ -3764,6 +3791,10 @@ paths:
     put:
       tags: [admin]
       summary: Save branding (global admin only)
+      description: >
+        400 for an invalid accent color, product name or announcement, and for a `support_url`
+        that is neither an http(s) URL with a host nor a `mailto:` with an address
+        (sec-hardening-2 H-10).
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Branding' } } } }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Branding' } } } }
@@ -6271,7 +6302,7 @@ components:
         accent_color: { type: string, description: '6-digit hex like #3b5bdb' }
         logo_url: { type: string }
         footer_text: { type: string }
-        support_url: { type: string }
+        support_url: { type: string, description: 'An http(s) URL with a host, a mailto: with an address, or empty. Anything else is refused (400).' }
         announcement: { $ref: '#/components/schemas/Announcement' }
     PublicBranding:
       type: object
@@ -6280,7 +6311,7 @@ components:
         accent_color: { type: string }
         logo_url: { type: string }
         footer_text: { type: string }
-        support_url: { type: string }
+        support_url: { type: string, description: 'An http(s) URL with a host, a mailto: with an address, or empty — a stored value that fails the rule (saved before it existed) is served as empty.' }
         announcement: { $ref: '#/components/schemas/Announcement' }
     AuthPolicy:
       type: object
@@ -6345,7 +6376,7 @@ components:
         client_secret_set: { type: boolean }
         redirect_url: { type: string }
         scopes: { type: array, items: { type: string } }
-        post_logout_url: { type: string }
+        post_logout_url: { type: string, description: 'As stored. POST /auth/logout serves it only if it is a local path or an http(s) URL with a host, else /.' }
         button_label: { type: string }
         bootstrap_admins: { type: array, items: { type: string } }
         machine_clients: { type: array, items: { type: string }, description: 'Client ids whose client-credentials tokens the JWT bearer path accepts; empty means that path is off.' }
@@ -6360,7 +6391,7 @@ components:
         client_secret: { type: string, nullable: true, description: 'Omit or send empty to keep the stored secret.' }
         redirect_url: { type: string, description: 'Required when enabled.' }
         scopes: { type: array, items: { type: string } }
-        post_logout_url: { type: string }
+        post_logout_url: { type: string, description: 'A local path (/…, not //…, no backslash or control character) or an http(s) URL with a host; anything else is 400. Empty means none.' }
         button_label: { type: string }
         bootstrap_admins: { type: array, items: { type: string } }
         machine_clients:

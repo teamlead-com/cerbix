@@ -23,9 +23,11 @@ type Registry struct {
 	role                string
 	startTime           time.Time
 	ready               bool
-	lastError           string
+	everReady           bool   // SetReady(true) was called once: a later not-ready is shutting_down
+	readyDetail         string // the raw reason of the last SetReady(false) — log only
 	credentialTracked   bool
 	credentialReady     bool
+	credentialReason    string
 	dispatchSharedTrust bool
 	dbEnabled           bool
 	dbUp                bool
@@ -265,12 +267,31 @@ func (r *Registry) SetFileProviderReconcileStats(name string, durationSeconds fl
 	s.bundleErrors = bundleErrors
 }
 
-// SetReady marks the service ready or not-ready, recording an optional reason.
+// The closed vocabulary of a not-ready answer (sec-hardening-2 H-11, H-12). /readyz's 503 body,
+// LastError() and nothing else carry one of these; the raw reason a component recorded (a driver
+// message, an address) goes to the log only.
+const (
+	NotReadyStarting      = "starting"                 // the process has not finished starting
+	NotReadyShuttingDown  = "shutting_down"            // graceful shutdown in progress
+	NotReadyDatabase      = "database_unreachable"     // the periodic database ping failed
+	NotReadyBroker        = "broker_unreachable"       // the AMQP broker connection is lost
+	NotReadyCredential    = "credential_unavailable"   // an executor cannot open credential envelopes
+	NotReadyServiceWedged = "service_wedged"           // service-reliability work is wedged (§21)
+	NotReadyAlertStalled  = "alert_evaluation_stalled" // a service alert evaluator is stalled (§16.6b)
+)
+
+// SetReady marks the process lifecycle ready (serving) or not. A not-ready after the first ready
+// is shutting_down, before it starting; reason is logged, never served.
 func (r *Registry) SetReady(ready bool, reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.ready = ready
-	r.lastError = reason
+	if ready {
+		r.everReady = true
+		r.readyDetail = ""
+		return
+	}
+	r.readyDetail = reason
 }
 
 // SetCredentialReady tracks the executor's dispatch-key health independently from base
@@ -281,8 +302,9 @@ func (r *Registry) SetCredentialReady(ready bool, reason string) {
 	defer r.mu.Unlock()
 	r.credentialTracked = true
 	r.credentialReady = ready
+	r.credentialReason = ""
 	if !ready {
-		r.lastError = reason
+		r.credentialReason = reason
 	}
 }
 
@@ -896,40 +918,64 @@ func (r *Registry) SetBrokerUp(up bool) {
 	r.brokerUp = up
 }
 
+// readiness is THE readiness predicate (sec-hardening-2 H-12): Ready(), LastError(), Readiness()
+// and the cerbix_ready gauge all read it, so /readyz and the gauge can never give two answers to
+// one question. It returns "" when ready, else a NotReady* code and the raw reason behind it (for
+// the log). The order is the order an operator should look in: lifecycle first, then the
+// dependencies (database, broker), then the components. The caller holds r.mu.
+func (r *Registry) readiness() (code, detail string) {
+	switch {
+	case !r.ready && r.everReady:
+		return NotReadyShuttingDown, r.readyDetail
+	case !r.ready:
+		return NotReadyStarting, r.readyDetail
+	case r.dbEnabled && !r.dbUp:
+		return NotReadyDatabase, ""
+	case r.brokerTracked && !r.brokerUp:
+		return NotReadyBroker, ""
+	case r.credentialTracked && !r.credentialReady:
+		return NotReadyCredential, r.credentialReason
+	case r.serviceWedgedSet && r.serviceWedged:
+		return NotReadyServiceWedged, r.serviceWedgedReason
+	case len(r.serviceAlertStalls) > 0:
+		// Deterministic when both arms are stalled: one unchanged state, one detail.
+		return NotReadyAlertStalled, r.serviceAlertStalls[sortedKeys(r.serviceAlertStalls)[0]]
+	}
+	return "", ""
+}
+
 // Ready reports whether the service is ready to serve.
 func (r *Registry) Ready() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.ready && (!r.credentialTracked || r.credentialReady) &&
-		(!r.serviceWedgedSet || !r.serviceWedged) && len(r.serviceAlertStalls) == 0
+	code, _ := r.readiness()
+	return code == ""
 }
 
-// LastError returns the last recorded not-ready reason.
+// LastError returns the not-ready reason code ("" when ready) — one of the NotReady* constants.
 func (r *Registry) LastError() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.serviceWedgedSet && r.serviceWedged {
-		return r.serviceWedgedReason
-	}
-	if len(r.serviceAlertStalls) > 0 {
-		// Deterministic when both arms are stalled: /readyz must not alternate its reason
-		// between scrapes for one unchanged state.
-		return r.serviceAlertStalls[sortedKeys(r.serviceAlertStalls)[0]]
-	}
-	if r.credentialTracked && !r.credentialReady {
-		return "credential envelope decrypt unavailable"
-	}
-	return r.lastError
+	code, _ := r.readiness()
+	return code
+}
+
+// Readiness returns the not-ready reason code ("" when ready) and the raw reason a component
+// recorded with it. The detail is for the log; it is never served.
+func (r *Registry) Readiness() (code, detail string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.readiness()
 }
 
 // WritePrometheus emits the current metrics in Prometheus text exposition format.
 func (r *Registry) WritePrometheus(w io.Writer) {
 	r.mu.RLock()
-	// The SAME composite Ready() reports: /readyz and cerbix_ready must never disagree —
-	// a wedged scheduler failing its probe while exporting cerbix_ready 1 is two answers
-	// to one question.
-	ready := r.ready && (!r.credentialTracked || r.credentialReady) &&
-		(!r.serviceWedgedSet || !r.serviceWedged) && len(r.serviceAlertStalls) == 0
+	// The SAME predicate Ready() reads: /readyz and cerbix_ready must never disagree —
+	// a wedged scheduler or a lost broker failing the probe while exporting cerbix_ready 1 is
+	// two answers to one question.
+	notReady, _ := r.readiness()
+	ready := notReady == ""
 	dbEnabled := r.dbEnabled
 	dbUp := r.dbUp
 	checksUp := r.checksUp

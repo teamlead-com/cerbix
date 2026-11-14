@@ -104,6 +104,14 @@ func newStack(t *testing.T) *stack { t.Helper(); return newStackWith(t, true) }
 // pull transport is configured).
 func newStackWith(t *testing.T, agent bool) *stack {
 	t.Helper()
+	return newStackStore(t, agent, nil)
+}
+
+// newStackStore builds the port with the API's store wrapped by wrap (nil: the store itself) — a
+// test that must interleave a concurrent operation at an exact point of a handler wraps the store
+// and runs the operation from the hook.
+func newStackStore(t *testing.T, agent bool, wrap func(*store.Store) api.Store) *stack {
+	t.Helper()
 	if probeDSN == "" {
 		t.Skip("set CERBIX_TEST_DATABASE_DSN to run the application-port PostgreSQL tests")
 	}
@@ -132,7 +140,11 @@ func newStackWith(t *testing.T, agent bool) *stack {
 	}
 	authn.WithSettings(settingsSvc)
 	registry := metrics.New(buildinfo.Current(), "all")
-	apiHandler := api.New(st, logger, 8).WithMetrics(registry).WithEvents(events.NewBroker()).WithSettings(settingsSvc).
+	var apiStore api.Store = st
+	if wrap != nil {
+		apiStore = wrap(st)
+	}
+	apiHandler := api.New(apiStore, logger, 8).WithMetrics(registry).WithEvents(events.NewBroker()).WithSettings(settingsSvc).
 		// The gate and change bounds of the binary's defaults: without them the gate and change
 		// routes answer 501 `*_not_wired` and the enumeration would test nothing behind them.
 		WithGate(api.GateLimits{InflightProcess: 8, InflightPrincipal: 2, RatePrincipalPerMinute: 600,

@@ -1,4 +1,5 @@
-import { test, expect, BrowserContext, Page } from "@playwright/test";
+import { BrowserContext, Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { apiGet, apiSend, firstProject } from "./helpers";
 
 // S9a (sec-hardening-2 H-9a): no request leaving a public status page carries a Referer. The

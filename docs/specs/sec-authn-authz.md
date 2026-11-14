@@ -12,6 +12,10 @@ local login, API tokens and machine access. The provider is **not hardcoded** (D
   `oidc.issuer`; ID token verification (JWKS, `iss`/`aud`, signature, exp) + nonce.
 - Endpoints: `GET /auth/login` (state+nonce+PKCE in `auth_flows`, redirect to the provider),
   `GET /auth/callback` (code exchange, verify, JIT, session, cookie), `POST /auth/logout` (`GET` is 405 since D-0278).
+  Logout answers **200 `{"redirect_to": …}`**, not a 302 (sec-hardening-2 H-9b, D-0279): the SPA
+  navigates with `window.location.assign`, so the post-logout URL is a DOM sink and is checked on write
+  (`PUT /api/v1/settings/oidc`, 400) and when served — a local path (`/…`, not `//…`, no backslash or
+  control byte) or `http(s)://` with a host (`domain.PostLogoutURLAllowed`), else `/`.
 - **Discovery for the UI** (D-0045): public `GET /auth/config` → `{local, oidc,
   oidc_button_label}`; the SPA renders a provider-neutral login button labeled from
   `oidc.button_label` (default "Continue with SSO"). The local form — only if `local`.
@@ -81,6 +85,24 @@ Implementation:
   secret+codes). With 2FA enabled, after a correct password a valid TOTP **or** an
   unused recovery code is required; otherwise `401 {"totp_required":true}` (an incorrect **password**
   remains a uniform 401 without a hint). `/api/v1/me` returns `totp_enabled`.
+  **A code signs in at most once** (sec-hardening-2 H-7, D-0279; migration `00116`
+  `users.totp_last_step bigint NULL`): `totp.Validate` returns the matched step, and the sign-in
+  accepts it with one compare-and-set — `UPDATE users SET totp_last_step = $2 WHERE id = $1 AND
+  (totp_last_step IS NULL OR totp_last_step < $2)` — so a replayed or an older code is refused, also
+  under concurrency. `SetTOTPSecret` and `DisableTOTP` reset it to NULL. `…/enable` does **not** record
+  the step (the code that confirms enrollment may sign in once).
+  **Enrollment and confirmation are guarded in the store** (review of iter-0212, P1-1):
+  `SetTOTPSecret` writes the pending secret only `WHERE id = $1 AND NOT totp_enabled`, so an
+  enrollment never replaces the secret of an enabled 2FA (`ErrTOTPAlreadyEnabled`). `EnableTOTP` is
+  given the secret the code was validated against; in one transaction it locks the user's row with
+  `SELECT totp_secret, totp_enabled … FOR UPDATE`, refuses when 2FA is already enabled
+  (`ErrTOTPAlreadyEnabled`) and when the stored secret is empty or is not the confirmed one
+  (`ErrTOTPSecretChanged` — a concurrent disable or re-enrollment), and only then sets `totp_enabled`
+  and stores the recovery codes. Of concurrent confirmations exactly one enables and its codes are the
+  ones stored; a refused one writes nothing. `totp.Code` refuses an empty secret. Responses
+  (`handlers_totp.go`, `openapi.yaml`): `…/enroll` answers **400** while 2FA is enabled; `…/enable`
+  answers **400** when no enrollment is pending, when the code does not match, when 2FA is already
+  enabled and when the pending secret changed.
 - **Config** (`local`): `enabled`, `security.admin_email`, `security.admin_password`,
   `min_password_length` (default 8), `login_rate_limit_per_minute` (default 10, 0=off).
   Validation: `local ⇒ database`.

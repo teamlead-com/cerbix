@@ -1,10 +1,11 @@
 # func-recovery-threshold — a monitor leaves DOWN only after a confirmed run of successes (FR-043 / NFR-036)
 
-> **STATUS: revision 3 — DRAFT, not approved.** Revision 1 (2026-11-14) was written from an owner
+> **STATUS: revision 4 — DRAFT, not approved.** Revision 1 (2026-11-14) was written from an owner
 > discussion and an independent code check of two design questions. Revision 2 (2026-11-14) answers
 > the first external review of that draft — CHANGES REQUIRED, 1 P0 / 6 P1 / 3 P2 / 1 P3. Revision 3
 > (2026-11-14) answers the second review, made against `main` at `58b5a32` — CHANGES REQUIRED,
-> 0 P0 / 3 P1 / 4 P2 / 1 P3. Every finding of both rounds
+> 0 P0 / 3 P1 / 4 P2 / 1 P3. Revision 4 (2026-11-14) answers the third, made at `caf34f8` — CHANGES
+> REQUIRED, 0 P0 / 1 P1 / 0 P2 / 2 P3. Every finding of all three rounds
 > was checked against the code and its disposition is in §11. Three points carry an explicit owner
 > answer of 2026-11-14 and are marked **OWNER**. Everything else the author decided is marked
 > **AUTHOR'S CALL**; the six that needed the owner were confirmed on 2026-11-14 (§10).
@@ -67,7 +68,8 @@ whose run has started. Waking the second line while the first line's fix is bein
 page nobody wants. When the run breaks, the ladder carries on (the exact clock rule is D9).
 
 **D3 — the value is an integer in 1..10. OWNER.**
-Outside the range is a 400 on every write surface, not a silent clamp.
+Outside the range is refused on every write surface — a 400 in the API, a bundle validation error
+in Monitoring-as-Code — not silently clamped.
 
 ### Author's calls
 
@@ -111,14 +113,28 @@ timestamp — when the run goes 0 → 1, and cleared when the run breaks or comp
 timestamp is not used: a pull agent's clock may run up to `result.allowed_skew` behind, which could
 print a "first OK" earlier than the incident's own `started_at`.
 
-The clock is read **after the monitor's row lock is held**: `statement_timestamp()` of the statement
-that records the status, not `now()`. `now()` is the transaction's start, taken before the wait for
-the lock — a transaction that began just before the `down` verdict committed and its auto-incident
-opened would stamp a first-OK earlier than that incident's `started_at`, the very anomaly this
-decision exists to prevent. All three callers (`RecordScheduledResult`, `RecordPushResult`,
-`RecordDeadmanResult`) take the row with their own `SELECT … FOR UPDATE` before they reach
-`recordCheckStatusTx`, so its statement starts after the wait; `AddIncidentUpdateBySystem` already
-dates `resolved_at` the same way.
+The clock is read **after the monitor's row lock is held**: `statement_timestamp()` of a statement
+that starts once the row is locked — not `now()`, which is the transaction's start and is taken
+before the wait, and not the statement that acquires the lock, whose own timestamp is taken before
+the wait as well. `RecordScheduledResult`, `RecordPushResult` and `RecordDeadmanResult` already take
+the row with a `SELECT … FOR UPDATE` of their own before they reach `recordCheckStatusTx`;
+`Store.RecordCheckStatus`, the exported wrapper, does not, and gains the same locking statement.
+`AddIncidentUpdateBySystem` dates `resolved_at` this way for the same reason.
+
+What that guarantees, and what it does not:
+
+- **Guaranteed, always:** the first-OK instant is not earlier than the commit of the `down` verdict
+  that precedes the run. Both are serialized by the monitor's row lock.
+- **Guaranteed on one ingest consumer:** it is not earlier than the auto-incident's `started_at`
+  either. `Consumer.handle` finishes `Reconciler.Reconcile` — which opens the incident — before it
+  reads the next result.
+- **Not claimed across concurrent consumers.** The auto-incident is opened *after* the verdict's
+  commit, in a transaction of its own that does not hold the monitor's row, and `started_at` is that
+  transaction's `now()`. With several `api` replicas consuming a backlog, a first success can be
+  recorded in the gap, and its first-OK can precede `started_at` by the length of that gap —
+  milliseconds, or the incident-open retry backoff. Closing the gap would mean dating the incident
+  with the verdict's clock instead of its own, which changes `incidents.started_at` for every
+  monitor at every threshold and breaks I1. It is not done here.
 
 The transaction that confirms the recovery clears the column, and both consumers of the sentence run
 **after** that commit (`Reconciler.Reconcile` and the outbox worker each call `GetMonitor`). So the
@@ -287,7 +303,9 @@ Two consequences are deliberate and documented in the runbook rather than engine
   The price is stated: a `domain.Monitor{}` built in process carries 0 and is now refused — by
   `Validate`, or by the CHECK when it is inserted without one. Production has one such builder,
   `testMonitor` (next bullet). Tests have many: about 140 `st.CreateMonitor(ctx, domain.Monitor{…})`
-  fixtures in `internal/store` and the literals of `internal/domain/*_test.go`. They set
+  fixtures in `internal/store`, the literals of `internal/domain/*_test.go`, and the seeded
+  monitors of `internal/api/*_test.go` (`seededStore`, `probetargets_test.go`), which `updateMonitor`
+  reads back on a PATCH that omits the field. They set
   `RecoveryThreshold: 1`, or go through a helper that lives in a test-only file; a default applied
   in production SQL or in `Normalize` to keep them green is not an acceptable fix — it is the clamp
   this bullet forbids.
@@ -423,8 +441,10 @@ matter to this change; the migration is still run in both.
   YAML did not change. A change between 1 and any value above it is detected as drift.
 - **I16** — `POST …/monitors/test` accepts every body it accepts today and refuses
   `recovery_threshold` as an unknown field (400); `TestMonitorSpec` is unchanged.
-- **I17** — `recovery_started_at` is never earlier than the `started_at` of the auto-incident opened
-  by the `down` verdict that precedes the run.
+- **I17** — `recovery_started_at` is never earlier than the commit of the `down` verdict that
+  precedes the run, however the two transactions were started. On a single ingest consumer it is
+  also never earlier than the `started_at` of the auto-incident that verdict opened. Ordering
+  against `incidents.started_at` across concurrent consumers is not claimed (D6).
 
 ## 7. Test matrix (written before the code)
 
@@ -439,7 +459,7 @@ matter to this change; the migration is still run in both.
 | Store, update | Lowering the threshold mid-run, then the next success confirms and the sentence reads `N/M` with `N > M` (I3, I11) |
 | Store, migration | Existing rows get 1 / 0 / NULL; both storage modes |
 | Domain | Range and type rules (I10); explicit 0 refused; field classification |
-| Store, clock | A first success whose transaction began before the `down` verdict committed stamps a first-OK not earlier than the incident's `started_at` (I17) |
+| Store, clock | While another transaction holds the monitor's row, a first success is submitted through each of the four entry points and blocks; the database clock is read; the row is released. The stamped first-OK is not earlier than that reading — with `now()`, or with the timestamp of the locking statement, it is (I17). On the sequential path `RecordScheduledResult` → `Reconciler.Reconcile` → `RecordScheduledResult` the first-OK is not earlier than the incident's `started_at` |
 | Store, constraints | The CHECKs refuse 0, 11, and a value above 1 on `push` and `composite`, on insert and on update (I10) |
 | API | Create and update refuse the same inputs with a message that names the rule; update of an existing `push`/`composite` to a value above 1 refused; an update that omits the field keeps the stored value (I10). Test-connection: every body accepted today is still accepted, and `recovery_threshold` is refused as an unknown field; `TestTestConnectionBodySchemaIsWhatTheServerDecodes` stays green with `TestMonitorSpec` untouched (I16) |
 | File provider | A bundle with the field, without it, out of range, `0`, and above 1 on `push`; the hash of a bundle without the key and of one with `recovery_threshold: 1` equals the pre-change hash, and 1 ↔ 3 is drift in both directions (I15) |
@@ -448,19 +468,22 @@ matter to this change; the migration is still run in both.
 | Manual resolve | An auto-incident resolved by a person mid-run: the run breaks → no new incident; the run completes → one transition, no second resolution (D11) |
 | Scheduler | For a scripted fail/success timeline the scheduled check times are the same at threshold 1 and at threshold 3 (I5) |
 | Regression (NFR-036) | Two monitors, thresholds 1 and 3, fed the same scripted results **through the scheduler and `RecordScheduledResult`**; then `heartbeats`, the expected-run ledger, SLA, burn rate, service reliability and gate report compared field by field (I5, I6). A hand-inserted `heartbeats` fixture read at two thresholds would only prove that the read queries ignore the column |
-| Frontend unit | The field, its validation, the long-soak warning, the dependency hint; the "recovering N/M" label, including `3/2` after the threshold was lowered; a type switched to `push` or `composite` after the field was edited sends no value above 1; the multi-region set gives the children the form's value and the composite parent 1 |
+| Frontend unit | The field, its validation, the long-soak warning, the dependency hint; the "recovering N/M" label, including `3/2` after the threshold was lowered; a type switched to `push` or `composite` after the field was edited omits `recovery_threshold` from the request; the multi-region set gives the children the form's value and omits the field on the composite parent |
 | E2E | One monitor at threshold 2 against a target that fails, succeeds once, fails, then succeeds twice: one recovery notification, one incident |
 
 **Existing tests and callers this change moves.** They are named so that none is "fixed" by weakening
 a rule:
 
-- the in-process monitor literals — about 140 fixtures in `internal/store/*_test.go` and the tables
-  of `internal/domain/*_test.go` — set `RecoveryThreshold: 1` or use a test-only helper (§4.5);
+- the in-process monitor literals — about 140 fixtures in `internal/store/*_test.go`, the tables of
+  `internal/domain/*_test.go` and the seeded monitors of `internal/api/*_test.go` — set
+  `RecoveryThreshold: 1` or use a test-only helper (§4.5). The value is set on the fixture, never
+  defaulted inside a fake store's read;
 - `TestEveryDeclaredTypeCarriesEveryCommonField` (`internal/fileprovider/commonfields_test.go`)
   feeds one common block to every file-supported type, `push` included; a value above 1 in that block
   is refused for `push` under D8, so the test branches by type;
-- `Store.RecordCheckStatus`, the exported wrapper used by integration tests, keeps its signature and
-  drops the snapshot, or its callers are updated — the builder's choice, stated in the report;
+- `Store.RecordCheckStatus`, the exported wrapper used by integration tests, gains the row-locking
+  statement of D6; it keeps its signature and drops the snapshot, or its callers are updated — the
+  builder's choice, stated in the report;
 - direct callers of `Reconciler.Reconcile` and the notify fakes in `internal/outbox` change with the
   signatures that carry the snapshot.
 
@@ -574,8 +597,18 @@ SLA, burn-rate, service, gate and status-page query. Every finding was checked a
 | P2-3 — the multi-region set, a hidden value after a type switch, the label predicate under D10, the detail view | **Confirmed**, with one correction: the composite parent is created with `failure_threshold: 1`, not with the form's value. §8 and the frontend row of §7 |
 | P2-4 — D12 said `MonitorDefaults` has no `failure_threshold`; it has | **Confirmed.** The premise is corrected; the decision stands on its second argument |
 | P3-1 — `scanMonitorAs`; no database rule for D8; two documents missing from §12 | **Accepted**, all three (§5, §12) |
-| Unnumbered, from the concurrency check — `now()` is taken before the wait for the row lock, so a first-OK could predate the incident it belongs to | **Confirmed**: all three callers lock the row in an earlier statement. D6 names `statement_timestamp()`; I17 and a test added |
+| Unnumbered, from the concurrency check — `now()` is taken before the wait for the row lock, so a first-OK could predate the incident it belongs to | **Confirmed** for the clock. D6 names `statement_timestamp()` after the lock. The guarantee revision 3 derived from it was too strong — see review 3 |
 | Unnumbered — the reminder finding of §9 | The reviewer verified the delivery side; §9 updated |
+
+**External review 3 of revision 3 (2026-11-14, against `main` at `caf34f8`): CHANGES REQUIRED,
+P0 0 / P1 1 / P2 0 / P3 2.** The round confirmed every finding of review 2 closed but the clock, and
+found no production path that builds a monitor in process and is now refused.
+
+| Finding | Disposition |
+| --- | --- |
+| P1-1 — I17 promised a first-OK not earlier than `incidents.started_at`, but the auto-incident is opened after the verdict's commit, in its own transaction, without the monitor's row; and `Store.RecordCheckStatus` reads the clock in the statement that takes the lock | **Confirmed**, both parts. The reviewer's variant A is taken: D6 states what the row lock does and does not order, I17 and the clock test are rebuilt on the verdict's commit, the wrapper locks first. Variant B — dating the incident with the verdict's clock — is **not** adopted: it changes `incidents.started_at` at threshold 1 and breaks I1 |
+| P3-1 — §7 expected `recovery_threshold: 1` on the composite parent where §8 says the key is omitted | **Accepted.** §7 follows §8: omitted |
+| P3-2 — the seeded monitors of `internal/api/*_test.go` were missing from the fixture list; D3 still said "a 400 on every write surface" | **Confirmed.** §4.5, §7, D3 |
 
 ## 12. Documents the implementation updates
 

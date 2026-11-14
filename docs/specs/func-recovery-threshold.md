@@ -1,8 +1,10 @@
 # func-recovery-threshold — a monitor leaves DOWN only after a confirmed run of successes (FR-043 / NFR-036)
 
-> **STATUS: revision 2 — DRAFT, not approved.** Revision 1 (2026-11-14) was written from an owner
+> **STATUS: revision 3 — DRAFT, not approved.** Revision 1 (2026-11-14) was written from an owner
 > discussion and an independent code check of two design questions. Revision 2 (2026-11-14) answers
-> the first external review of that draft — CHANGES REQUIRED, 1 P0 / 6 P1 / 3 P2 / 1 P3; every finding
+> the first external review of that draft — CHANGES REQUIRED, 1 P0 / 6 P1 / 3 P2 / 1 P3. Revision 3
+> (2026-11-14) answers the second review, made against `main` at `58b5a32` — CHANGES REQUIRED,
+> 0 P0 / 3 P1 / 4 P2 / 1 P3. Every finding of both rounds
 > was checked against the code and its disposition is in §11. Three points carry an explicit owner
 > answer of 2026-11-14 and are marked **OWNER**. Everything else the author decided is marked
 > **AUTHOR'S CALL**; the six that needed the owner were confirmed on 2026-11-14 (§10).
@@ -104,11 +106,19 @@ last update in its own timeline.
 The first success is not lost: it is carried as information (D6).
 
 **D6 — the first success of the run is recorded and shown, never used as a system timestamp. AUTHOR'S CALL.**
-`monitors.recovery_started_at` is stamped — with the database clock of the transaction that records
-the check, the same clock as every incident timestamp — when the run goes 0 → 1, and cleared when
-the run breaks or completes. The check's own timestamp is not used: a pull agent's clock may run up
-to `result.allowed_skew` behind, which could print a "first OK" earlier than the incident's own
-`started_at`.
+`monitors.recovery_started_at` is stamped — with the database clock, the same clock as every incident
+timestamp — when the run goes 0 → 1, and cleared when the run breaks or completes. The check's own
+timestamp is not used: a pull agent's clock may run up to `result.allowed_skew` behind, which could
+print a "first OK" earlier than the incident's own `started_at`.
+
+The clock is read **after the monitor's row lock is held**: `statement_timestamp()` of the statement
+that records the status, not `now()`. `now()` is the transaction's start, taken before the wait for
+the lock — a transaction that began just before the `down` verdict committed and its auto-incident
+opened would stamp a first-OK earlier than that incident's `started_at`, the very anomaly this
+decision exists to prevent. All three callers (`RecordScheduledResult`, `RecordPushResult`,
+`RecordDeadmanResult`) take the row with their own `SELECT … FOR UPDATE` before they reach
+`recordCheckStatusTx`, so its statement starts after the wait; `AddIncidentUpdateBySystem` already
+dates `resolved_at` the same way.
 
 The transaction that confirms the recovery clears the column, and both consumers of the sentence run
 **after** that commit (`Reconciler.Reconcile` and the outbox worker each call `GetMonitor`). So the
@@ -154,9 +164,11 @@ no new incident opens until the monitor has been `up` and gone `down` again. A b
 manual resolve is the same situation and keeps the same behaviour.
 
 **D12 — no instance-wide default in this iteration. AUTHOR'S CALL, confirmed by the OWNER 2026-11-14.**
-The per-monitor field ships with the default 1. The monitor-defaults settings carry neither
-`failure_threshold` nor `confirm_interval_seconds` today, and an instance default of 2 would collide
-with D8 for every `push` and `composite` monitor created without the field.
+The per-monitor field ships with the default 1. `MonitorDefaults` (`internal/domain/settings.go`)
+does carry `failure_threshold` today — it can, because `Monitor.Normalize` silently forces that field
+to 1 for `push` and `composite` accepts any value. The new field has neither escape (D8): an
+instance default of 2 would be refused for every `push` and `composite` monitor created without the
+field. `confirm_interval_seconds` is absent from `MonitorDefaults` as well.
 
 **D13 — the "recovering N/M" label is NOT live in this iteration. AUTHOR'S CALL, confirmed by the OWNER 2026-11-14.**
 Revision 1 claimed the monitor list already consumes a live update. It does not: `MonitorsView.vue`
@@ -261,17 +273,42 @@ Two consequences are deliberate and documented in the runbook rather than engine
 ### 4.5 Editing a monitor
 
 - **One rule on every write surface** — API create, API update, Monitoring-as-Code decode: integer,
-  1..10, and exactly 1 for `push` and `composite`.
-- **Absent is not zero.** Every input shape carries the field as an optional integer (`*int` in the
-  API request bodies and in the file provider's raw monitor). Absent means 1 on create and "keep the
-  stored value" on update. An explicit `0` is refused by `Monitor.Validate`; `Monitor.Normalize` does
-  **not** clamp this field, unlike `failure_threshold`.
-- **Test-connection** runs `Monitor.Validate`, so it refuses an out-of-range value for the types it
-  can test. `push` and `composite` are refused earlier with the existing "this monitor type cannot be
-  tested"; that order is not changed.
+  1..10, and exactly 1 for `push` and `composite`. The rule lives in `Monitor.Validate` and nowhere
+  else.
+- **Absent is not zero, and the boundary has one owner.** Every input shape carries the field as an
+  optional integer (`*int` in the API request bodies and in the file provider's raw monitor). The
+  **transport decoders** — `createMonitor` and `updateMonitor` in `internal/api/handlers_monitors.go`,
+  `applyCommonMonitorFields` in `internal/fileprovider/parse.go` — resolve an absent value to 1
+  (create, decode) or to the stored value (update), and copy an explicit value, `0` included,
+  verbatim, before `Normalize` and `Validate`. **Nothing downstream clamps**: not `Monitor.Normalize`
+  (unlike `failure_threshold`), not `insertMonitorTx`, not `updateMonitorTxPrepared`. The store writes
+  the value it is given, so the CHECK of §5 backs the rule instead of being hidden by it.
+
+  The price is stated: a `domain.Monitor{}` built in process carries 0 and is now refused — by
+  `Validate`, or by the CHECK when it is inserted without one. Production has one such builder,
+  `testMonitor` (next bullet). Tests have many: about 140 `st.CreateMonitor(ctx, domain.Monitor{…})`
+  fixtures in `internal/store` and the literals of `internal/domain/*_test.go`. They set
+  `RecoveryThreshold: 1`, or go through a helper that lives in a test-only file; a default applied
+  in production SQL or in `Normalize` to keep them green is not an acceptable fix — it is the clamp
+  this bullet forbids.
+- **Test-connection is not a write surface for this field.** `POST …/monitors/test` decodes
+  `TestMonitorSpec`, the probe-only body that sec-hardening-2 made strict: a saved monitor's fields
+  (`name`, `retries`, `failure_threshold`) are unknown fields and answer 400. `recovery_threshold`
+  is one more of them — it is delivery hysteresis, not part of a probe — so `TestMonitorSpec` is
+  **not** extended and the field is refused there as unknown. `testMonitor` sets
+  `RecoveryThreshold: 1` on the monitor it builds, so that `Monitor.Validate` keeps accepting every
+  request it accepts today.
 - **Monitoring-as-Code**: `recovery_threshold` is accepted in every bundle format version that
-  accepts `failure_threshold`, joins `commonMonitorFields` and the canonical monitor form, and so
-  takes part in drift detection.
+  accepts `failure_threshold` and joins `commonMonitorFields`. In the canonical monitor form
+  (`canonicalMonitor`, `internal/fileprovider/canonical.go`) it is serialized with `omitempty` and
+  populated **only when it is above 1**. A bundle that omits the key, and one that declares
+  `recovery_threshold: 1`, therefore keep the `spec_hash` they had before the upgrade, byte for
+  byte, while any change between 1 and 2..10 moves the hash in either direction. Writing the value
+  unconditionally would put `"recovery_threshold":1` into every canonical form: the first reconcile
+  after the upgrade would plan an update for every file-managed monitor of every bundle — a revision
+  bump, `last_result_ts` cleared, in-flight results refused as stale, new service epochs — without
+  one line of YAML having changed. `composite` is not a file-supported type (`fileSupportedTypes`),
+  so the D8 rule is reachable in a bundle for `push` only.
 - **Execution semantics**: `RecoveryThreshold` is classified `SemanticDelivery`,
   `ConsecutiveSuccesses` and `RecoveryStartedAt` `SemanticRuntime` in
   `internal/domain/execsemantics.go`.
@@ -292,11 +329,25 @@ The sentence is `Recovered: N/M consecutive checks passed; first OK at <RFC 3339
 present exactly when `N > 1`. `N` and `M` differ only when the threshold was lowered during the run
 (D10): three successes at threshold 4, lowered to 2, confirmed on the fourth, reads `4/2`.
 
+The instant is formatted `firstOK.UTC().Format(time.RFC3339)` — whole seconds, `Z` suffix. The
+incident update and the notification are rendered by two different components from the same
+snapshot, so the format is fixed here rather than left to each. The sentence follows today's text
+after **one space**, on every surface.
+
 | Surface | With `N > 1` |
 | --- | --- |
 | Auto-incident resolving update | `Monitor recovered — automatically resolved. Recovered: N/M consecutive checks passed; first OK at …` |
-| Notification, every channel that renders text | today's recovery text, then the sentence |
+| Notification text (Slack, Telegram, the webhook channel's `text`, the email body) | `🟢 <Name> recovered — it is back UP. Recovered: N/M consecutive checks passed; first OK at …` |
+| Webhook channel JSON | `"event": "monitor.transition"` and `"up": true` unchanged; no key added. The sentence is in `text` only |
 | Email | the **Subject stays today's string**; the sentence is added to the body only |
+
+The notification keeps going through `notify.Dispatcher.Deliver`. `DeliverText` is not a substitute:
+it changes the webhook event to `monitor.alert`, drops `up`, and makes the email Subject equal to the
+body.
+
+Because the sentence is part of the resolving update's `body`, everything that already publishes
+incident updates carries it without formatting of its own: the project webhooks' incident event,
+status-page subscriber mail, the public incident timeline and the syndication feeds.
 
 With `N = 1` every text is byte-for-byte what it is today.
 
@@ -309,16 +360,19 @@ One migration, additive, no backfill beyond the defaults:
 - `monitors.recovery_started_at timestamptz NULL`;
 - a CHECK tying the three states together:
   `(consecutive_successes = 0 AND recovery_started_at IS NULL) OR
-  (status = 'down' AND consecutive_successes > 0 AND recovery_started_at IS NOT NULL)`.
+  (status = 'down' AND consecutive_successes > 0 AND recovery_started_at IS NOT NULL)`;
+- a CHECK for D8: `type NOT IN ('push', 'composite') OR recovery_threshold = 1`. `type` is in the
+  same row, so the rule costs nothing to enforce where it cannot be bypassed.
 
-The three columns are appended to `monitorColumns` and to `scanMonitor` in the same order, and to
-the create and update SQL (`recovery_threshold` only — the other two are server-owned). `heartbeats`
-is not touched, so the storage mode does not matter to this change; the migration is still run in
-both.
+The three columns are appended to `monitorColumns` and to the destination list in `scanMonitorAs`
+(shared by `scanMonitor`, `scanMonitorForWriter`, `scanMonitorForExecution` and
+`scanMonitorNoSecrets`) in the same order, and to the create and update SQL (`recovery_threshold`
+only — the other two are server-owned). `heartbeats` is not touched, so the storage mode does not
+matter to this change; the migration is still run in both.
 
-`openapi.yaml`: `recovery_threshold` on the monitor read model and on the create, update and
-test-connection bodies; `consecutive_successes` and `recovery_started_at` (nullable) on the read
-model, read-only. The TypeScript schema is regenerated.
+`openapi.yaml`: `recovery_threshold` on the monitor read model and on the create and update bodies;
+`consecutive_successes` and `recovery_started_at` (nullable) on the read model, read-only.
+`TestMonitorSpec` is not changed (§4.5). The TypeScript schema is regenerated.
 
 ## 6. Acceptance invariants
 
@@ -349,9 +403,11 @@ model, read-only. The TypeScript schema is regenerated.
 - **I9** — An auto-incident resolved by a confirmed recovery has `resolved_at` equal to the database
   clock of the transaction that resolves the incident, never earlier than `started_at` or than any
   of its updates.
-- **I10** — A value outside 1..10 is refused with 400 on API create, API update, test-connection and
-  Monitoring-as-Code decode; a value above 1 on a `push` or `composite` monitor is refused on create,
-  update and decode. None of them clamps, and an explicit `0` is refused, not defaulted.
+- **I10** — A value outside 1..10 is refused with 400 on API create and API update, and with a
+  bundle validation error on Monitoring-as-Code decode. A value above 1 is refused with 400 on a
+  `push` or `composite` monitor in the API, and with a validation error on `push` in a bundle
+  (`composite` is refused there as an unsupported type before any field is read). Nothing clamps,
+  and an explicit `0` is refused, not defaulted. The database refuses both rules independently.
 - **I11** — An update that lowers the threshold leaves `status`, `consecutive_successes` and
   `state_sequence` untouched and enqueues nothing.
 - **I12** — After a re-enable, a retire or a reactivate, `consecutive_successes = 0` and
@@ -360,7 +416,15 @@ model, read-only. The TypeScript schema is regenerated.
   monitor is `down` (database CHECK).
 - **I14** — The D6 sentence is rendered from the recovery snapshot of the confirming transaction:
   it is correct when read after the commit that cleared the columns, and after the threshold has
-  been edited between the recovery and the delivery.
+  been edited between the recovery and the delivery. The incident update and the notification carry
+  the same string, character for character.
+- **I15** — A bundle that omits `recovery_threshold`, or declares it as 1, has the same `spec_hash`
+  as before this change: the first reconcile after the upgrade plans no update for a monitor whose
+  YAML did not change. A change between 1 and any value above it is detected as drift.
+- **I16** — `POST …/monitors/test` accepts every body it accepts today and refuses
+  `recovery_threshold` as an unknown field (400); `TestMonitorSpec` is unchanged.
+- **I17** — `recovery_started_at` is never earlier than the `started_at` of the auto-incident opened
+  by the `down` verdict that precedes the run.
 
 ## 7. Test matrix (written before the code)
 
@@ -375,15 +439,30 @@ model, read-only. The TypeScript schema is regenerated.
 | Store, update | Lowering the threshold mid-run, then the next success confirms and the sentence reads `N/M` with `N > M` (I3, I11) |
 | Store, migration | Existing rows get 1 / 0 / NULL; both storage modes |
 | Domain | Range and type rules (I10); explicit 0 refused; field classification |
-| API | Create and update refuse the same inputs with a message that names the rule; update of an existing `push`/`composite` to a value above 1 refused; an update that omits the field keeps the stored value; test-connection refuses an out-of-range value (I10) |
-| File provider | A bundle with the field, without it, out of range, `0`, and above 1 on `push`/`composite`; the field takes part in drift |
+| Store, clock | A first success whose transaction began before the `down` verdict committed stamps a first-OK not earlier than the incident's `started_at` (I17) |
+| Store, constraints | The CHECKs refuse 0, 11, and a value above 1 on `push` and `composite`, on insert and on update (I10) |
+| API | Create and update refuse the same inputs with a message that names the rule; update of an existing `push`/`composite` to a value above 1 refused; an update that omits the field keeps the stored value (I10). Test-connection: every body accepted today is still accepted, and `recovery_threshold` is refused as an unknown field; `TestTestConnectionBodySchemaIsWhatTheServerDecodes` stays green with `TestMonitorSpec` untouched (I16) |
+| File provider | A bundle with the field, without it, out of range, `0`, and above 1 on `push`; the hash of a bundle without the key and of one with `recovery_threshold: 1` equals the pre-change hash, and 1 ↔ 3 is drift in both directions (I15) |
 | **Ingest + outbox, real database** | The full path `RecordScheduledResult` → `Reconciler.Reconcile` → outbox worker for a threshold-3 recovery: one event, one resolved incident, one notification, and the sentence with the right `N/M` and first-OK instant in both the incident update and the notification — read **after** the columns are cleared, and once more with the threshold edited before delivery (I4, I14). A unit test with a hand-built monitor cannot catch this |
 | Outbox | A legacy event without the snapshot renders today's text; a run that breaks delivers nothing (I4); email Subject unchanged, sentence in the body |
 | Manual resolve | An auto-incident resolved by a person mid-run: the run breaks → no new incident; the run completes → one transition, no second resolution (D11) |
 | Scheduler | For a scripted fail/success timeline the scheduled check times are the same at threshold 1 and at threshold 3 (I5) |
 | Regression (NFR-036) | Two monitors, thresholds 1 and 3, fed the same scripted results **through the scheduler and `RecordScheduledResult`**; then `heartbeats`, the expected-run ledger, SLA, burn rate, service reliability and gate report compared field by field (I5, I6). A hand-inserted `heartbeats` fixture read at two thresholds would only prove that the read queries ignore the column |
-| Frontend unit | The field, its validation, the long-soak warning, the dependency hint; the "recovering N/M" label |
+| Frontend unit | The field, its validation, the long-soak warning, the dependency hint; the "recovering N/M" label, including `3/2` after the threshold was lowered; a type switched to `push` or `composite` after the field was edited sends no value above 1; the multi-region set gives the children the form's value and the composite parent 1 |
 | E2E | One monitor at threshold 2 against a target that fails, succeeds once, fails, then succeeds twice: one recovery notification, one incident |
+
+**Existing tests and callers this change moves.** They are named so that none is "fixed" by weakening
+a rule:
+
+- the in-process monitor literals — about 140 fixtures in `internal/store/*_test.go` and the tables
+  of `internal/domain/*_test.go` — set `RecoveryThreshold: 1` or use a test-only helper (§4.5);
+- `TestEveryDeclaredTypeCarriesEveryCommonField` (`internal/fileprovider/commonfields_test.go`)
+  feeds one common block to every file-supported type, `push` included; a value above 1 in that block
+  is refused for `push` under D8, so the test branches by type;
+- `Store.RecordCheckStatus`, the exported wrapper used by integration tests, keeps its signature and
+  drops the snapshot, or its callers are updated — the builder's choice, stated in the report;
+- direct callers of `Reconciler.Reconcile` and the notify fakes in `internal/outbox` change with the
+  signatures that carry the snapshot.
 
 ## 8. SPA (mock required before code)
 
@@ -399,7 +478,17 @@ model, read-only. The TypeScript schema is regenerated.
   The pill stays the `down` pill; the mock decides the exact wording and placement. The detail view
   does not show "confirming N/M" today; whether it gains both labels is the mock's decision.
 - The label is computed from `consecutive_successes` and `recovery_threshold` in the monitor read
-  model and is as fresh as the last load of the view (D13).
+  model and is as fresh as the last load of the view (D13). It is shown whenever
+  `status === "down" && consecutive_successes > 0` — **not** gated on `< recovery_threshold`, as
+  `confirmingLabel` is on its own threshold: after the threshold is lowered during a run (D10) the
+  monitor is still `down` with a live run, and the label reads e.g. `3/2` until the next check.
+- **Monitor detail, Configuration list**: "Recovery threshold" next to "Failure threshold", for the
+  types that have the field.
+- **What the form sends.** For `push` and `composite` the form sends no `recovery_threshold`,
+  whatever the field held before the type was switched — a hidden 3 would be a 400 under D8. In the
+  multi-region set (`createMultiRegionSet`, `frontend/src/views/NewMonitorView.vue`) the regional
+  child monitors receive the form's value and the composite parent receives none: a value above 1 on
+  the parent is refused, which would roll back the children already created.
 
 ## 9. Non-goals
 
@@ -415,8 +504,13 @@ model, read-only. The TypeScript schema is regenerated.
 - New Prometheus metrics.
 
 Noticed while checking, **not** part of this change: `EnqueueRenotifyReminders` has no `enabled`
-condition, so a monitor disabled while `down` is still selected for reminders. Whether delivery
-drops them was not verified. It is today's behaviour and is recorded here as a separate finding.
+condition, so a monitor disabled while `down` is still selected for reminders. The second review
+read the delivery side as well: the outbox worker does not check `enabled` either, so those
+reminders are delivered. It is today's behaviour and is recorded here as a separate finding.
+
+Stated so that it is not mistaken for a breach of NFR-036: the **displayed duration** of an
+auto-incident (`resolved_at − started_at`) grows by `(recovery_threshold − 1) × interval_seconds`.
+That is D5, chosen on purpose; no measured number reads `incidents.resolved_at`.
 
 ## 10. Questions put to the owner — all six confirmed as recommended (2026-11-14)
 
@@ -465,10 +559,29 @@ Every finding was checked against the code on `main`.
 
 The reviewer's answers to the eight open questions of revision 1 are reflected in §3 and §10.
 
+**External review 2 of revision 2 (2026-11-14, against `main` at `58b5a32`): CHANGES REQUIRED,
+P0 0 / P1 3 / P2 4 / P3 1.** The round found the snapshot design sound under concurrent results,
+edits during a run, both storage modes and both transports, and confirmed NFR-036 by reading every
+SLA, burn-rate, service, gate and status-page query. Every finding was checked against the code.
+
+| Finding | Disposition |
+| --- | --- |
+| P1-1 — test-connection decodes the strict, probe-only `TestMonitorSpec`; adding the field breaks its contract test, and the unset field on the synthetic monitor would make `Validate` refuse every test request | **Confirmed.** `TestMonitorSpec` is not extended; `testMonitor` sets 1 (§4.5, §5, I10, I16, §7). Revision 2's disposition of review 1's P1-4 was wrong on this surface |
+| P1-2 — the field in the canonical monitor form would change the `spec_hash` of every file-managed monitor at upgrade | **Confirmed**: `failure_threshold` is serialized unconditionally and the same shape here would add `"recovery_threshold":1` everywhere. `omitempty`, populated only above 1 (§4.5, I15, §7) |
+| P1-3 — no clamp, a CHECK and unset in-process literals collide | **Confirmed.** The boundary has one owner, the transport decoders; nothing downstream clamps; the fixtures change, about 140 in `internal/store` by count (§4.5, §7) |
+| P2-1 — the D8 rule cannot be tested for `composite` in a bundle; a bundle error is not a 400 | **Confirmed.** I10 and §7 narrowed to `push` |
+| P2-2 — separator, timestamp precision and the channel contract were not fixed | **Accepted.** §4.6: one space, `time.RFC3339`, the webhook JSON and email Subject unchanged, `Deliver` kept; I14 widened |
+| P2-3 — the multi-region set, a hidden value after a type switch, the label predicate under D10, the detail view | **Confirmed**, with one correction: the composite parent is created with `failure_threshold: 1`, not with the form's value. §8 and the frontend row of §7 |
+| P2-4 — D12 said `MonitorDefaults` has no `failure_threshold`; it has | **Confirmed.** The premise is corrected; the decision stands on its second argument |
+| P3-1 — `scanMonitorAs`; no database rule for D8; two documents missing from §12 | **Accepted**, all three (§5, §12) |
+| Unnumbered, from the concurrency check — `now()` is taken before the wait for the row lock, so a first-OK could predate the incident it belongs to | **Confirmed**: all three callers lock the row in an earlier statement. D6 names `statement_timestamp()`; I17 and a test added |
+| Unnumbered — the reminder finding of §9 | The reviewer verified the delivery side; §9 updated |
+
 ## 12. Documents the implementation updates
 
 `openapi.yaml` and the generated TypeScript schema; `docs/overview.md`; `docs/runbook.md` (the two
 deliberate consequences of §4.4, the long-soak cost of D4, the overdue-step behaviour of D9);
-`docs/traceability.md` (FR-043, NFR-036); `docs/decisions.md` (next free `D-NNNN`);
+`docs/traceability.md` (FR-043, NFR-036); `docs/project-description.md` and `docs/status.md`, where
+FR-043 and NFR-036 are registered; `docs/decisions.md` (next free `D-NNNN`);
 `docs/iterations/iter-NNNN.md`; `CHANGELOG.md`; this document's status line and the index in
 [`README.md`](README.md).

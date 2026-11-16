@@ -1,8 +1,14 @@
 # func-phone-alerts — an alert that reaches a person: SMS and voice calls (FR-041 / NFR-034)
 
-> **STATUS: revision 4 — DRAFT, not approved.** Revision 4 (2026-11-17) answers the second external
-> review, of revision 3 (CHANGES REQUIRED, P0 0 / P1 10 / P2 6 / P3 2 — dispositions in §14). No
-> owner decision changed. What changed in substance: whether telephony is in effect for a project
+> **STATUS: revision 5 — DRAFT, not approved.** Revision 5 (2026-11-17) answers the third external
+> review, of revision 4 (CHANGES REQUIRED, P0 0 / P1 3 / P2 4 / P3 1 — dispositions in §14). No
+> decision changed; the
+> corrections are local: D32 no longer reads a payload field that is never set and closes the race
+> with a lock; a phone channel kept a route by its fallback is described the same way everywhere;
+> a collision of `incidents.ref` is left to the retries that already exist (§8).
+>
+> Revision 4 (2026-11-17) answered the second external review, of revision 3 (CHANGES REQUIRED,
+> P0 0 / P1 10 / P2 6 / P3 2). No owner decision changed. What changed in substance then: whether telephony is in effect for a project
 > is now part of what makes a phone channel a route, and telephony settings live in the database
 > only (D31, D36); the cost of D31 is restated — it can be a whole outage, not a first alert; a
 > monitor's delivery is attached to its incident when the incident opens, and a recovery no longer
@@ -407,7 +413,11 @@ So the rules are:
 **A snapshot taken before a channel stopped being a route.** A service alert carries the recipients
 resolved when it was enqueued. A phone channel in that snapshot which is no longer a route at send
 is not counted in `Resolved`, and its row says why (`not_deliverable`, `telephony_disabled` or
-`voice_unsupported_by_provider`, §4.5). If nothing else resolved, the existing condition condemns
+`voice_unsupported_by_provider`, §4.5). `Resolved` follows **rule 1 and nothing else** — never the
+row's reason: a channel that telephony being off would have disqualified, but that a live fallback
+keeps a route (FR-041c), is counted in `Resolved`, carries one of the same two reasons, and is
+`Delivered` when the fallback accepts it. Deciding `Resolved` from the reason would report such a
+recipient as missing on every alert. If nothing else resolved, the existing condition condemns
 the alert; the evaluator's next pass finds no route, withholds, and the members page for
 themselves. There is no loop: an unroutable service is not re-announced.
 
@@ -450,21 +460,37 @@ phone path may depend on winning that race:
   open auto-incident is found, the phone path waits for it up to 1 s (four tries, 250 ms apart,
   inside the delivery's time budget) and then sends **without** a link, recording `no_incident_ref`
   on the delivery row. The message is still sent; the code still works;
-- **the row finds its incident either way.** A delivery row for a monitor is reserved with
-  `incident_id` NULL when the incident is not there yet. If the wait finds the incident, the row
-  gets its id. If it does not, the transaction that opens the monitor's auto-incident sets
-  `incident_id` on that monitor's delivery rows that have none and were created since the DOWN
-  transition the incident is opened for. The two cover each other: a row committed after that
-  update is one whose wait starts after the incident exists. Without this the row would stay out
-  of the incident's Phone panel (P7), out of the voice retry (§5.4), and its ACK code would not be
-  closed with the incident (§5.2) — and would still be open when the monitor next went down;
+- **the row finds its incident either way**, and the two sides are serialised, because under READ
+  COMMITTED neither can see the other's uncommitted work. Both take the same transaction-scoped
+  lock for the monitor — an advisory lock keyed by the monitor id, not the monitor's row, which
+  every check result updates:
+  - the **reservation** of a monitor-DOWN delivery (D33) takes the lock, looks for the monitor's
+    open auto-incident, inserts the row with that `incident_id` or with NULL, and commits. The row
+    also stores `monitor_seq`, the `Seq` its event carries;
+  - the transaction that **opens** a monitor's auto-incident takes the lock, inserts the incident,
+    and sets `incident_id` on that monitor's rows that have none, are of the monitor-DOWN alert
+    kind, and whose `monitor_seq` equals the monitor's current `state_sequence`.
+
+  Whichever commits first, the other sees it. The sequence replaces a time bound: the opener is
+  not told when the transition happened, and the result's own timestamp comes from the prober's
+  clock, which may run ahead of the database's (`result.allowed_skew`). It also keeps out what
+  must not be attached — a row of an earlier outage that never got an incident, and a burn alert
+  of the same monitor, which has no incident and must not gain a voice retry (§5.4). The 1 s wait
+  above is then only about the link. Without the attachment the row would stay out of the
+  incident's Phone panel (P7), out of the voice retry, and its ACK code would not be closed with
+  the incident (§5.2) — and would still be open when the monitor next went down;
 - **a recovery is raced in the same way.** The UP event commits with the result; the reconciler
   resolves the incident afterwards, so the worker may see the incident still open. The link of a
   recovery SMS is the monitor's **open** auto-incident when there is one; otherwise its latest
-  auto-incident, if that was resolved at or after the recovery's own time (`At` of the event);
-  otherwise there is no link and the row says `no_incident_ref`. Revision 3 took "the most recently
-  resolved auto-incident", which during the race is the previous outage's. The price of the rule:
-  an auto-incident a person resolved by hand before the monitor recovered is not linked. A recovery
+  auto-incident, if that was resolved at or after the time the recovery event was enqueued;
+  otherwise there is no link, and the row says `no_incident_ref` when the monitor has
+  `auto_incident` on (without it, having no incident is the normal case and is not noted). The
+  time is `outbox_events.created_at`, which the claim already reads (`ClaimDueOutbox`) and which is
+  handed to the phone path beside the payload. It is **not** `MonitorTransition.At`: no writer of
+  that payload sets the field, it is the zero time in every stored event, and starting to set it
+  would change payload bytes for every project (P14). Revision 3 took "the most recently resolved
+  auto-incident", which during the race is the previous outage's. The price of the rule: an
+  auto-incident a person resolved by hand before the monitor recovered is not linked. A recovery
   carries no ACK code. (During an FR-043 recovery run the monitor stays `down` and no UP is
   enqueued, so the race exists only on the confirmed recovery.)
 
@@ -493,7 +519,11 @@ then updates it. Consequences:
   periodic pass, for the rows no retry will come back to (a dead-lettered event, a voice retry of
   §5.4);
 - a retry that finds a final row does nothing for that channel; one that finds
-  `provider_unreachable` calls again and updates the same row (its `attempts` grows);
+  `provider_unreachable` sets the same row back to `sending` — committed, `updated_at = now()`,
+  `attempts` grown — and calls again;
+- the 60 s are measured from `updated_at`, by the retry and by the leader's pass alike. Measured
+  from `created_at`, a row on its fourth attempt is already 70 s old and the leader would close a
+  call that is in flight. (The storm guard's hour and the quota's month read `created_at`.)
 - the unique key is `(outbox_event_id, channel_id) WHERE outbox_event_id IS NOT NULL`. It needs no
   step or repeat ordinal — every ladder step and every `repeat_last` is its own outbox row
   (`AdvanceEscalations`) — and `outbox_event_id` is **not** a foreign key: delivered outbox rows are
@@ -548,8 +578,10 @@ primary and the old key in `previous_keys`; then `cerbix reencrypt` runs
 - Once the old key is removed from the configuration, delivery rows hashed under it no longer
   count for the storm guard. That is at most one hour of history, once per rotation.
 
-**D36 — telephony settings live in the database only. AUTHOR'S CALL (second review, P1-2).** Every
-other settings block resolves database → YAML → defaults (`internal/settings`). D31's rule 1 has to
+**D36 — telephony settings live in the database only. AUTHOR'S CALL (second review, P1-2).** The
+blocks that hold credentials — mail, OIDC, the auth policy — resolve database → YAML → defaults;
+branding, alerting and monitor defaults already resolve database → defaults with no YAML
+(`internal/settings`). Telephony joins the second group. D31's rule 1 has to
 know, inside SQL, whether telephony is enabled and which provider is in force, and a predicate
 cannot read a YAML file. Passing the resolved values into every query that embeds the predicate was
 considered and refused: the predicate is a constant shared by the evaluator, the coverage verdict
@@ -568,7 +600,7 @@ disabled (D36).
 
 | Field | Meaning |
 | --- | --- |
-| `enabled` | master switch. Off: no phone channel can be created (D27), existing ones are not routes (D31) and are not phoned (`telephony_disabled`) |
+| `enabled` | master switch. Off: no phone channel can be created (D27), existing ones are not phoned (`telephony_disabled`) and are not routes unless a fallback keeps them one (D31) |
 | `provider` | `twilio` \| `generic_http` |
 | `twilio.account_sid`, `twilio.auth_token`*, `twilio.from` | `from` is an E.164 number or a Messaging Service SID |
 | `generic_http.method`, `.url`, `.headers`*, `.content_type`, `.body_template`, `.from` | method `POST` \| `PUT`; URL validated as a webhook URL is; `content_type` is `application/json` or `application/x-www-form-urlencoded` and fixes the placeholder encoding (§4.4); headers may carry credentials, so the whole map is secret |
@@ -589,8 +621,9 @@ link and the delivery row says so (`no_public_url`).
 Saving the settings is refused while `security.encryption_key` is unset (D29). Switching `provider`
 to `generic_http` while `voice` channels exist is allowed and warned about: they stay, stop being
 routes (D31) and are not phoned (`voice_unsupported_by_provider`). Switching `enabled` off is
-warned about in the same way, naming the services whose only route is a phone channel: they become
-unroutable and their members page for themselves.
+warned about in the same way. Both warnings name the services that the change leaves with **no
+route** — computed with rule 1, so from FR-041c a phone channel with a live fallback is not among
+the reasons: those services become unroutable and their members page for themselves.
 
 A **"Send test SMS"** action sends a fixed text to the calling admin's own **verified** number only.
 
@@ -686,7 +719,9 @@ SMS text, rendered by `notify` from the `PhoneAlert` (D16):
 
 Voice: TTS reads the same facts in words ("cerbix alert. payments A P I in prod is down.")
 twice, then (FR-041b, when active) "Press 1 to acknowledge. Press 2 to snooze for 30 minutes."
-Names are XML-escaped inside `<Say>`; a name containing markup is spoken, never interpreted.
+The second sentence is spoken only when the alert's subject has a ladder at send time (§5.3):
+offering a snooze that will be refused breaks P9. Names are XML-escaped inside `<Say>`; a name
+containing markup is spoken, never interpreted.
 
 **`generic_http`.** The destination is taken from the verified number and from nowhere else.
 Placeholders are substituted as **values** in the body's content type: JSON string escaping for
@@ -723,9 +758,11 @@ The table is the whole set (P6); nothing outside it is a `reason`.
 linked channel, a recipient in a service alert's snapshot, a target of an enqueued escalation step.
 A channel that the route predicates left out (D31 rule 1) was never handed the alert and has no row
 for it; its trace is the channel's own `deliverable` field with its reason (§4.3) and the warnings
-of §9. The three reasons `not_deliverable`, `telephony_disabled` and
-`voice_unsupported_by_provider` therefore appear on a monitor's linked channel, and on a snapshot
-recipient or step target that stopped being a route after it was chosen.
+of §9. So the three reasons `not_deliverable`, `telephony_disabled` and
+`voice_unsupported_by_provider` appear: on a monitor's linked channel; on a snapshot recipient or
+step target that stopped being a route after it was chosen; and, for the last two, from FR-041c on
+a channel that **is** a route because a live fallback keeps it one (D31 rule 1) — chosen, counted
+in `Resolved`, and delivered through the fallback (§6.3).
 
 **How a provider's answer is classified**, for both providers:
 
@@ -827,9 +864,13 @@ its legitimate callbacks during exactly the burst they belong to.
 | `/voice/gather` | `<Response><Say>…</Say></Response>` — "Acknowledged.", "Snoozed for 30 minutes.", or why not |
 | `/status` | an empty `<Response/>` |
 
-`/status` writes `callback_status` (and `duration_s`, and the error code when there is one) on the
-row `d` names; it never changes `reason` (§4.5). A status for a row that is already final in the
-same status is a no-op — providers repeat callbacks.
+`/status` writes `callback_status` (and the error code when there is one) on the row `d` names; it
+never changes `reason` (§4.5). Calls are placed **without** subscribing to intermediate status
+events, so the provider reports only the terminal status of a call; a status that is not terminal
+is stored and changes nothing else. `duration_s` is written once: the handler's
+`UPDATE … WHERE id = $1 AND duration_s IS NULL` and the quota adjustment of §6.1 are one
+transaction, and the adjustment is made only when that update changed the row. Providers repeat
+callbacks, and two copies arriving together must not adjust twice.
 
 A reply SMS is therefore the provider's response to its own request — no second outbound call, no
 second delivery row. Replies are counted (§6.1) and bounded by their own rules (§5.2), not by the
@@ -849,7 +890,9 @@ storm guard.
   (`ack_open`), closed by the acknowledge and resolve paths — for the rows of that incident and,
   for a monitor's auto-incident, also for that monitor's rows that never got an `incident_id`
   (D32 attaches them; this is the second lock on the same door) — and by the scheduler's purge
-  pass: a
+  pass. The resolve paths are two: an incident update that resolves (`addIncidentUpdate`), and the
+  service incident's own close (`resolveServiceIncidentTx`, `internal/store/serviceincidents.go`),
+  which does not go through the first. A
   partial index cannot call `now()` or look at another table, so revision 2's
   `UNIQUE … WHERE the code is open` was not DDL.
 - `ACK 482193` acknowledges. `ACK` alone works when exactly one code is open for the sender's
@@ -895,9 +938,11 @@ verified number, the acknowledge permission at reply time (P11), the principal d
 (`SnoozeIncidentByPrincipal`), an audit row `incident.snooze` with the target
 `incident <id> · snoozed <m>m · via=sms|voice` (the minutes actually granted), a `phone_actions`
 row. Only an open, unacknowledged incident **that has a ladder** can be snoozed; otherwise the
-reply says why not and nothing is written — no column, no audit row, no `phone_actions` row. An
-incident has a ladder when its monitor has an escalation policy, or, for a service incident, when
-it froze one at open.
+reply says why not and nothing is written — no column, no audit row, no `phone_actions` row. "Has
+a ladder" is what `AdvanceEscalations` itself requires (`internal/store/escalation.go`): for a
+monitor's incident, the monitor has an escalation policy; for a service's incident, the snapshot
+frozen at open exists **and** the service still has a policy attached and still owns paging — an
+operator who detached the policy stopped the ladder, and there is nothing left to snooze.
 
 **The model.** Four columns on the incident, all written under the incident's row lock:
 
@@ -998,9 +1043,11 @@ the operator opts in). At 100 % phone delivery for that scope stops with reason 
   delivery's `created_at` (UTC), not of the callback, and is **unconditional** — the minutes were
   spoken, so it is not refused for exceeding the limit; `used` never goes below zero. Without
   callbacks (no `public_base_url`) a call counts one minute — the settings say so beside the quota.
-- **What else counts.** Verification codes, the instance's test SMS and inbound replies count
-  against the **instance** SMS quota; channel-number verification and a project override's test
-  SMS (§6.5) against the project's. None of them is
+- **What else counts.** Verification codes of users and the instance's test SMS count against the
+  **instance** SMS quota; channel-number verification and a project override's test SMS (§6.5)
+  against the project's. A reply to an inbound SMS counts against the scope of the route key the
+  request arrived on (§5.1): the instance's, or the project's when the project has its own
+  provider account. None of them is
   subject to the storm guard — they have their own limits (§4.2, §5.2).
 - **Warning.** At 80 %, once per month per scope: project admins for a project quota, global
   admins for the instance quota.
@@ -1105,7 +1152,8 @@ Marked with the part that needs it.
   `notification_channels_type_chk` is widened to add `sms`, `voice` (the 00013 pattern: drop and
   re-add the constraint; the Down refuses while phone channels exist rather than deleting them).
 - (a) `phone_deliveries (id, project_id, channel_id, outbox_event_id NULL, incident_id NULL,
-  monitor_id NULL, service_id NULL, user_id NULL, number_hash, number_masked, kind sms|voice,
+  monitor_id NULL, monitor_seq bigint NULL, service_id NULL, user_id NULL, number_hash,
+  number_masked, kind sms|voice,
   alert_kind, reason, notes, provider_status NULL, provider_code NULL, provider_ref NULL, segments,
   attempts, created_at, updated_at)`, and (b) `ack_code NULL`, `ack_open boolean NOT NULL DEFAULT
   false`, `callback_status NULL`, `duration_s NULL`, `retry_at NULL`, `retry_claimed_at NULL`, `retry_of uuid NULL UNIQUE`,
@@ -1117,12 +1165,14 @@ Marked with the part that needs it.
 - (a) `incidents.ref text NOT NULL UNIQUE DEFAULT <a database function>` (D21, D27): eight Crockford
   base32 characters, generated in the database so that an `INSERT` that does not name the column —
   every insert of an older binary — still succeeds. Backfilled by the migration. The function draws
-  candidates until one is not in the table, so a collision is not left to the unique constraint;
-  two inserts that draw the same value at the same moment can still meet there, and
-  `createIncident` (`internal/store/incidents.go`), which today maps only its two open-incident
-  constraints, retries the insert once on a unique violation of the `ref` constraint. An older
-  binary has no such retry and would answer 500 in that case — two concurrent draws of one value
-  out of 2^40, accepted.
+  candidates until one is not in the table, so a collision is not left to the unique constraint.
+  Two inserts that draw the same value at the same moment can still meet there, and **no retry is
+  added for that**. Revision 4 asked `createIncident` to retry; it cannot without a savepoint — a
+  unique violation aborts the transaction it is in — and incidents are also inserted by
+  `OpenServiceIncidentTx` (`internal/store/serviceincidents.go`), inside the evaluator's batch
+  transaction. Every writer already has a retry above it: the reconciler tries again after 250 ms,
+  the evaluator on its next pass, a person or an Alertmanager on the next request. For two
+  concurrent draws of one value out of 2^40 that is enough, in the new binary and in an older one.
 - (b) `incidents.escalation_snoozed_at timestamptz NULL`, `escalation_snoozed_until timestamptz
   NULL`, `escalation_paused_total interval NOT NULL DEFAULT '0'`, `escalation_paused_at_step
   interval NOT NULL DEFAULT '0'` (§5.3). With all four at their defaults `pause` is zero and both
@@ -1269,29 +1319,29 @@ that accepts outbound messages and calls and can send **signed** inbound request
 
 | Part | Layer | Cases | Invariants |
 | --- | --- | --- | --- |
-| a | Domain — message | septet counting incl. the two-septet characters; one and several segments in both encodings; truncation order; link omitted; transliteration never empties a name; normalisation of control characters and line breaks; XML escaping in `<Say>` | P9 |
+| a | Domain — message | septet counting incl. the two-septet characters; one and several segments in both encodings; a character outside the BMP; truncation order; link omitted; transliteration never empties a name; normalisation of control characters and line breaks; XML escaping in `<Say>`; no `ACK` text in part (a) | P9 |
 | a | Domain — `generic_http` | JSON and form encoding of each placeholder; the injected-recipient name stays one value; a template with a placeholder outside a value is refused | P1 |
 | a | Store — routes | each way a phone channel is not a route (unverified, recipient gone or not eligible, telephony off, voice under `generic_http`) × `routablePredicate` (both halves), `resolveServiceRecipientsTx`, step resolution; a service whose only channel becomes a route announces; a step with a **disabled Slack** channel is enqueued exactly as before | P20, P14 |
 | a | Store — number at send | a `user` channel after its user replaced the number, verified the new one, deleted it: the next delivery goes to the new number, or the channel is no route — with no channel edit | P4 |
-| a | Outbox — coverage | service alert × {delivered, each rule-3 reason, not a route at send}: credited / neither / condemned; the neither case evaluated five more times enqueues nothing; a snapshot of one text and one phone recipient raises no `service_alert_recipient_missing` | P18 |
-| a | Outbox — reasons | every row of §4.5 produced by its cause; each answer class of the classification table for both providers; no reason outside the set; none of them reported as `sent` | P6 |
+| a | Outbox — coverage | service alert × {delivered, each rule-3 reason of part (a), not a route at send}: credited / neither / condemned; the neither case evaluated five more times enqueues nothing; a snapshot of one text and one phone recipient raises no `service_alert_recipient_missing` | P18 |
+| a | Outbox — reasons | every row of §4.5 that belongs to part (a) produced by its cause; each answer class of the classification table for both providers; no reason outside the set; none of them reported as `sent` | P6 |
 | a | Trace | each not-`sent` outcome of part (a): the row, the metric count, the line in the incident's Phone panel | P7 |
 | a | Outbox — D18 | every topic and every predicate of the table, against an `sms` and a `voice` channel | P15 |
-| a | Outbox — retries | an event retried five times with one phone and one text channel: one accepted provider call; a `sending` row met at 10 s and at 30 s is not called and fails the event, and at 70 s closes as `outcome_unknown`; the leader's pass closes an orphaned one; `provider_unreachable` is called again on the same row; the time budget of D33 with three phone channels | P16 |
-| a | Outbox — monitor race | DOWN delivered before the reconciler opens the incident, and after: same send, link present only in the second, `no_incident_ref` in the first, and the first row attached to the incident when it opens; recovery delivered before and after the reconciler resolves: the same incident linked; a recovery with only an older resolved incident: no link | P21 |
+| a | Outbox — retries | an event retried five times with one phone and one text channel: one accepted provider call; a `sending` row met at 10 s and at 30 s is not called and fails the event, and at 70 s closes as `outcome_unknown`; the leader's pass closes an orphaned one and leaves alone a row on its fourth attempt whose call is in flight; `provider_unreachable` is called again on the same row; the time budget of D33 with three phone channels | P16 |
+| a | Outbox — monitor race | DOWN delivered before the reconciler opens the incident, and after: same send, link present only in the second, `no_incident_ref` in the first; reservation and incident opening run concurrently on PostgreSQL in both orders: the row always ends with the incident's id; a row of an earlier outage and a burn-alert row of the same monitor are not attached; recovery delivered before and after the reconciler resolves: the same incident linked; a recovery with only an older resolved incident: no link, and no note when `auto_incident` is off; the stored event's payload bytes unchanged | P21, P14 |
 | a | Suppression | the P2 table, both channel types | P2 |
 | a | Storm guard | N concurrent deliveries to one number at the limit, on PostgreSQL under `-race`: exactly the allowed number of provider calls; per-incident and per-number limits; the monitor-as-subject case | P13 |
 | a | API | D28's matrix, create and update; `number` channel created disabled and unenablable before verification; number change clears it; nothing but a verification code is sent to an unverified number; the recipients endpoint for an editor and an admin; by-ref 404 before 403; no response carries a number; the audit rows of a phone channel's writes and none for a Slack channel's; deleting a user disables their channels with the reason | P1, P3, P22 |
 | a | Settings | secrets kept on a blank write; refusal without the at-rest key; no YAML seed; `cerbix reencrypt` covers the new ciphertexts and recomputes hashes; between the key change and the reencrypt a number is still matched and still unique | P22 |
-| a | Store — `ref` | the default never returns a value in use; a forced collision is retried by `createIncident`; an insert that does not name the column succeeds | — |
+| a | Store — `ref` | the default never returns a value in use; an insert that does not name the column succeeds, through `createIncident` and through `OpenServiceIncidentTx` | — |
 | a | Regression | a project without phone channels through an outage with a ladder: the P14 comparison, captured before the change and compared after | P14 |
 | b | Inbound | Twilio's published signature vectors; unknown key, inactive configuration and bad signature all 403 with no row touched; the URL built from `public_base_url` behind a rewritten `Host`; form parsing and the size limit; TwiML content type of every answer | P10 |
-| b | ACK | the code against the delivery's subject with the incident opened before and after the send; several open codes; a changed number; a revoked permission; ten wrong codes; already acknowledged (names who); already resolved; the audit target's `via=`; an unacknowledged incident that recovers closes its code, the row sent before the incident existed included, so the monitor's next outage has one open code; `cerbix reencrypt` closes open codes | P11, P21 |
-| b | Snooze | 0/+5/+10 snoozed 30 at +3; replaced at +23; the incident unselectable when the snooze ends; the 4 h cap, shortened and refused; `repeat_last` with `renotify_seconds` longer than the snooze, and its **second** repeat one `renotify_seconds` after the first; a step with no target leaves `escalation_paused_at_step` alone; `SNOOZE 45` and `SNOOZE` with one open code and with two; an incident without a ladder writes nothing; pageability re-checked at fire time | P12, P17 |
-| b | Status | a callback never changes `reason`; a repeated callback is a no-op; `duration_s = 0` returns the reserved minute (c) | P6 |
+| b | ACK | the code against the delivery's subject with the incident opened before and after the send; several open codes; a changed number; a revoked permission; ten wrong codes; already acknowledged (names who); already resolved; the audit target's `via=`; an unacknowledged incident that recovers closes its code, the row sent before the incident existed included, so the monitor's next outage has one open code; a service incident closed by `resolveServiceIncidentTx` closes its codes; `cerbix reencrypt` closes open codes; the `ACK` text and the keypress prompt present only with an active inbound path and a user-bound delivery, and "Press 2" only with a ladder | P9, P11, P21 |
+| b | Snooze | 0/+5/+10 snoozed 30 at +3; replaced at +23; the incident unselectable when the snooze ends; the 4 h cap, shortened and refused; `repeat_last` with `renotify_seconds` longer than the snooze, and its **second** repeat one `renotify_seconds` after the first; a step with no target leaves `escalation_paused_at_step` alone; `SNOOZE 45` and `SNOOZE` with one open code and with two; an incident without a ladder writes nothing, a service whose policy was detached included; pageability re-checked at fire time | P12, P17 |
+| b | Status | a callback never changes `reason`; a repeated callback is a no-op; (c) `duration_s = 0` returns the reserved minute, and two copies of one callback arriving together adjust the quota once | P6 |
 | b | Voice retry | two leaders claiming one row; a leader change during the call; a resolved-unacknowledged incident; a delivery without an incident; the child row keeps the parent's reference | P8 |
 | b | Timeline | after an ACK, a snooze and a not-phoned delivery: no new `incident_updates` row; the public page JSON, each feed and a captured webhook contain none of it | P19 |
-| c | Quotas | N concurrent deliveries against one remaining unit; a rejected delivery returns its reservation; the one-minute rule with and without a callback; a call across a month boundary is adjusted in the month it was placed; an adjustment past the limit is applied; what the non-alert messages count against | P13 |
+| c | Quotas | N concurrent deliveries against one remaining unit; a rejected delivery returns its reservation; the one-minute rule with and without a callback; a call across a month boundary is adjusted in the month it was placed; an adjustment past the limit is applied; what the non-alert messages count against, a reply on a project's route key included | P13 |
 | c | Fallback | each not-phoned reason, `voice_unsupported_by_provider` included × {delivered, failed then retried, unavailable}; the retry redoes only the fallback; a phone channel with a live fallback stays a route with telephony off | P7, P20 |
 | c | Quiet hours | each rule of D17 and D23, D24; the same decision with the monitor's incident opened before and after the send; an incident without `impact_basis`; a window across midnight; both daylight-saving changes; `start = end` refused; `number` mode unaffected | P21 |
 | c | Override | effective provider for the barrier, the voice rule and the inbound route when the instance block is off | P5, P22 |
@@ -1320,13 +1370,10 @@ that accepts outbound messages and calls and can send **signed** inbound request
 None for the owner: the four questions of revision 2 were decided on 2026-11-16 (D13, D17, D23,
 D25).
 
-The second review pass agreed with every author's call, eight of them on condition of a correction
-that revision 4 makes. For the confirming pass, what is new in revision 4 and nobody has reviewed:
-D36 (telephony settings in the database only); telephony in effect as part of D31's rule 1, with a
-live fallback keeping the channel a route; the recovery-link rule of D32 and its stated price;
-audit for phone channels only (§9); the answer classification of §4.5 and
-`generic_http.response_code_field` (D34); refusing, rather than recording, a snooze of an incident
-without a ladder (§5.3).
+The second and third review passes agreed with every author's call, D36 and the three departures
+of revision 4 included. For the confirming pass, what is new in revision 5: the per-monitor lock
+and `monitor_seq` in D32; `outbox_events.created_at` as the recovery's time; no retry for a `ref`
+collision (§8) — a different answer from the savepoint the third pass proposed.
 
 ## 14. Review history
 
@@ -1401,3 +1448,20 @@ Every code claim was checked by the author against `72411cb` before it was accep
 | P2-6 — bare `SNOOZE` and a snooze without a ladder; surrogate pairs; `impact_basis IS NULL`; the order inside `DeleteUser` | **Accepted**, and a snooze without a ladder now writes nothing. §5.3, §4.4, §6.4, §4.3 |
 | P3-1 — "three columns" for four | **Fixed.** §5.3 |
 | P3-2 — "three SPA surfaces" for five | **Fixed.** §2 |
+
+**External review 3 of revision 4 (2026-11-17, against `main` at `651ee92`): CHANGES REQUIRED,
+P0 0 / P1 3 / P2 4 / P3 1.** Of the 18 second-pass findings 15 were closed and 3 closed in part,
+each remainder being one of the findings below. The reviewer agreed in full with D36, with the
+recovery-link rule and its price, and with auditing phone channels only. Every code claim was
+checked by the author against `651ee92`.
+
+| Finding | Disposition |
+| --- | --- |
+| P1-1 — `MonitorTransition.At` is never set; the attachment on DOWN races under READ COMMITTED, has no usable time bound and would attach a burn-alert row | **Confirmed** (no writer of the payload sets `At`). The recovery's time is `outbox_events.created_at`; `no_incident_ref` only with `auto_incident` on. Reservation and opening are serialised — by an advisory lock per monitor rather than the proposed lock on the monitor's row, which every check result updates. Rows are matched by alert kind and by `monitor_seq`, not by time. D32, §8 |
+| P1-2 — a channel kept a route by its fallback contradicts §4.5, the snapshot paragraph of D31 and the warnings of §4.1 | **Accepted.** `Resolved` follows rule 1, never the reason; the three places agree |
+| P1-3 — the `ref` retry misses `OpenServiceIncidentTx` and cannot work inside an aborted transaction | **Confirmed**, and resolved differently: the retry is removed, not wrapped in savepoints. Every writer already has a retry above it. §8 |
+| P2-1 — the 60 s of a `sending` row must run from `updated_at` | **Accepted.** D33 |
+| P2-2 — intermediate status events; two copies of one callback adjust the quota twice | **Accepted.** §5.1 |
+| P2-3 — "has a ladder" for a service; "Press 2" offered without one | **Confirmed** (`AdvanceEscalations` also requires the policy still attached and `owns_paging`). §5.3, §4.4 |
+| P2-4 — which quota an inbound reply counts against under a project override | **Accepted.** The scope of the route key. §6.1 |
+| P3-1 — part marks in §11; D36's claim about other settings blocks | **Fixed.** |

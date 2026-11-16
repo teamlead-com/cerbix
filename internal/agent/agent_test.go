@@ -51,7 +51,9 @@ func TestCredentialHealthDegradesAndRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	monitor := domain.Monitor{ID: "m1", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
+	monitor := domain.Monitor{ID: "m1", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3,
+		// A body-bound job states every defaulted setting (sec-hardening-3 S19).
+		Config: map[string]string{"sslmode": "require", "query": "SELECT 1"}}
 	badEnvelope, _ := otherRing.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV2, Region: "pull1", JobID: "job-bad", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
 	goodEnvelope, _ := workerRing.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV2, Region: "pull1", JobID: "job-good", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
 	// TWO mismatched envelopes before the good one: readiness degrades on a PERSISTENT key
@@ -108,7 +110,9 @@ func TestFutureCredentialEnvelopeIsProbeErrorWithoutReadinessDowngrade(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	monitor := domain.Monitor{ID: "m-future", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
+	monitor := domain.Monitor{ID: "m-future", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3,
+		// A body-bound job states every defaulted setting (sec-hardening-3 S19).
+		Config: map[string]string{"sslmode": "require", "query": "SELECT 1"}}
 	envelope, err := ring.Seal(dispatch.SealContext{EnvelopeVersion: dispatch.EnvelopeV2, Region: "pull1", JobID: "job-future", MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor}, map[string][]byte{"password": []byte("secret")})
 	if err != nil {
 		t.Fatal(err)
@@ -430,7 +434,9 @@ func TestClaimResponseDesyncIsRefusedNotGuessed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	monitor := domain.Monitor{ID: "m-desync", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
+	monitor := domain.Monitor{ID: "m-desync", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3,
+		// A body-bound job states every defaulted setting (sec-hardening-3 S19).
+		Config: map[string]string{"sslmode": "require", "query": "SELECT 1"}}
 	// Envelope v2, because the ONE case here that reaches the gate — "field absent entirely
 	// (older core)" — falls back to the generation of the endpoint this agent polls, `/v3/jobs`,
 	// and generation 3 carries envelope v2 exactly. The fixture sealed v1, which no core would
@@ -603,7 +609,9 @@ func TestTestClaimStampPresenceContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	monitor := domain.Monitor{ID: "m-null", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3}
+	monitor := domain.Monitor{ID: "m-null", Type: domain.MonitorPostgres, Region: "pull1", ExecutionRevision: 3,
+		// A body-bound job states every defaulted setting (sec-hardening-3 S19).
+		Config: map[string]string{"sslmode": "require", "query": "SELECT 1"}}
 	envelope, err := ring.Seal(dispatch.SealContext{
 		EnvelopeVersion: dispatch.EnvelopeV2, Region: "pull1", JobID: "job-null",
 		MonitorID: monitor.ID, Revision: monitor.ExecutionRevision, Body: monitor,

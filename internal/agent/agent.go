@@ -89,12 +89,17 @@ func New(serverURL, token, region string, runner Runner, logger *slog.Logger) *A
 		host = "agent"
 	}
 	return &Agent{
-		serverURL:      serverURL,
-		token:          token,
-		region:         region,
-		agentID:        host + "/" + region,
-		runner:         runner,
-		http:           &http.Client{Timeout: 30 * time.Second},
+		serverURL: serverURL,
+		token:     token,
+		region:    region,
+		agentID:   host + "/" + region,
+		runner:    runner,
+		// No redirect is followed (sec-hardening-3 T-2, S17): every request carries the agent token,
+		// and net/http keeps Authorization on a redirect to the same host name on another port or
+		// scheme. A 3xx from core is an error the agent logs; --server must be the URL core answers on.
+		http: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}},
 		logger:         logger,
 		pollEvery:      defaultPollEvery,
 		heartbeatEvery: defaultHeartbeatEvery,
@@ -216,6 +221,9 @@ func (a *Agent) claimTest(ctx context.Context) (id string, job json.RawMessage, 
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
+		// "No test pending" is a 200 with `test: null`, so any other status is a failure worth a line:
+		// a 3xx from core (redirects are not followed, sec-hardening-3 S17) used to vanish here.
+		a.logger.Warn("agent_test_claim_failed", "status", resp.StatusCode)
 		return "", nil, 0, false
 	}
 	var out struct {
@@ -839,6 +847,11 @@ func (a *Agent) heartbeat(ctx context.Context) {
 		return
 	}
 	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		// A heartbeat core did not accept is a missed heartbeat, and a 3xx is one too now that no
+		// redirect is followed (sec-hardening-3 S17): say so, with the status.
+		a.logger.Warn("agent_heartbeat_failed", "status", resp.StatusCode)
+	}
 }
 
 func (a *Agent) auth(req *http.Request) { req.Header.Set("Authorization", "Bearer "+a.token) }

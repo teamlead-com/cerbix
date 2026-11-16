@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
+	"github.com/teamlead-com/cerbix/internal/notify"
+	"github.com/teamlead-com/cerbix/internal/prober"
 )
 
 // Store is the persistence surface the dispatcher needs.
@@ -46,7 +48,9 @@ type Dispatcher struct {
 // New builds a dispatcher. A nil client gets a sane default with a short timeout.
 func New(store Store, client *http.Client) *Dispatcher {
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		// The fallback refuses redirects exactly as the guard's client does (sec-hardening-3 S17),
+		// so a caller that passes nil never gets a laxer client than production.
+		client = &http.Client{Timeout: 10 * time.Second, CheckRedirect: prober.RefuseRedirects}
 	}
 	return &Dispatcher{store: store, client: client, timeout: 10 * time.Second}
 }
@@ -77,14 +81,14 @@ func (d *Dispatcher) post(ctx context.Context, h domain.Webhook, eventType strin
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, h.URL, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return notify.ErrInvalidURL // never the parse error: it quotes the URL (sec-hardening-3 T-4)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(EventHeader, eventType)
 	req.Header.Set(SignatureHeader, Sign(h.Secret, body))
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("post: %w", err)
+		return notify.DeliveryFailure(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {

@@ -169,7 +169,7 @@ envelope (no ref row).
 
 | type | required | optional (default) | notes |
 |------|----------|--------------------|-------|
-| `postgres` | `username`, `database`, `password_ref`\* | `sslmode` (**`require`** for ref-based; allowlist `disable\|require\|verify-ca\|verify-full`), `query` (`SELECT 1`, ≤ 1 KiB) | `require` = **encrypted, server identity NOT verified** — stated plainly; `verify-ca`/`verify-full` available for verified TLS. Runtime's historical default `prefer` is intentionally not carried over for ref-based monitors; existing UI monitors unmigrated. `disable` = explicit opt-in (§4.8). |
+| `postgres` | `username`, `database`, `password_ref`\* | `sslmode` (**`require`** for ref-based; allowlist `disable\|require\|verify-ca\|verify-full`), `query` (`SELECT 1`, ≤ 1 KiB) | `require` = **encrypted, server identity NOT verified** — stated plainly (**correction 2026-11-14:** not true in v0.1.0-beta.1 through v0.3.9, where the prober applied no `sslmode` at all and connected in plaintext; [sec-hardening-3](sec-hardening-3.md) T-1a; fixed in iter-0213, D-0280); `verify-ca`/`verify-full` available for verified TLS. Runtime's historical default `prefer` is intentionally not carried over for ref-based monitors; existing UI monitors unmigrated. `disable` = explicit opt-in (§4.8). |
 | `mysql` | `username`, `database`, `password_ref`\* | `tls` (**`true`** for ref-based; verified against system roots + hostname per Go TLS defaults), `tls_skip_verify` (explicit opt-in, never silent), `query` (`SELECT 1`, ≤ 1 KiB) | `tls: false` = explicit opt-in. |
 | `redis` | `password_ref`\* | `username` (ACL), `tls` (**`true`**, verified), `tls_skip_verify` (explicit) | today's prober AUTHs over plain TCP; v1 adds TLS. |
 | `promql` | `query` (≤ 1024 B, never blank); with `auth_mode: basic` also `username`, `password_ref`\* | `auth_mode` (**`none`** — resolved when the key is absent, never materialized) | D-0215. Basic auth only: no bearer, no mTLS, and no TLS keys — the target is a full URL, so its scheme decides and the prober offers no skip-verify. The discriminator is `auth_mode` and not `auth`, because a settings key named `auth` is refused as credential-bearing by the MaC guard. |
@@ -447,7 +447,12 @@ distinct by construction. On top of that:
   part.
 - **Absent and explicitly-set-to-default encode identically** — normalization runs before
   sealing, and a job may legitimately carry either form; this is the rule most likely to be
-  broken by a well-meaning encoder.
+  broken by a well-meaning encoder. **Its limit (sec-hardening-3 T-1c, S19, D-0280):** on envelope
+  v2 the digest stays as stated, but a credentialed type's body must CARRY every `writeDefault`
+  field. The executor refuses an absent one (`unsupported_version`), because the prober reads the
+  absence as the legacy value (`sslmode` → `prefer`, `tls` → off), not as the default the digest
+  bound. Core states the legacy value in the body before sealing, so a pre-default row executes
+  exactly as before.
 - `body_digest` and `field_set_digest` enter the outer AAD as **raw 32-byte SHA-256 output**,
   not hex and not base64 — one encoding, chosen here, so the two sides cannot each be
   self-consistent and mutually incompatible.
@@ -626,7 +631,8 @@ from healthy ones (feeds the region credential-capability alert).
 
 The final hop to the monitored target follows: **encrypted by default for ref-based
 monitors, with server-identity verification stated per option** — postgres `require` =
-encrypted-not-verified (verified = `verify-ca`/`verify-full`); mysql/redis `tls: true` =
+encrypted-not-verified (verified = `verify-ca`/`verify-full`; **correction 2026-11-14:** the postgres
+prober honoured none of the three in v0.1.0-beta.1 through v0.3.9 and connected in plaintext — [sec-hardening-3](sec-hardening-3.md) T-1a; fixed in iter-0213, D-0280); mysql/redis `tls: true` =
 verified per Go TLS defaults (system roots + hostname), `tls_skip_verify` is an explicit
 visible opt-in (never silent); rabbitmq management https. Unencrypted transport is an
 explicit opt-in in the monitor definition (reviewable, audited). Existing non-ref monitors

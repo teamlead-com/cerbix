@@ -367,7 +367,10 @@ type MailConfig struct {
 	PublicBaseURL string `yaml:"public_base_url"`
 }
 
-// Enabled reports whether outbound email is configured.
+// Enabled reports whether outbound email is configured. An empty smtp_host turns mail off; once
+// smtp_host is set, from is required and must be a single bare address — Validate refuses the
+// configuration otherwise (sec-hardening-3 §8 item 6), so a missing from no longer turns mail off
+// silently.
 func (m MailConfig) Enabled() bool { return m.SMTPHost != "" && m.From != "" }
 
 // EncryptionKeyBytes decodes and validates the primary key, or returns nil when
@@ -768,6 +771,18 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateSecrets(); err != nil {
 		return err
+	}
+	// sec-hardening-3 §8 item 6: with smtp_host set, from is required and must pass the address rule
+	// every mail is sent under (domain.ValidMailAddress). It is checked as written, because it is sent
+	// as written. The value is never quoted. Like the two checks below, this runs before any database
+	// exists for the process, so it also refuses a seed that Settings → Mail has since superseded.
+	if c.Mail.SMTPHost != "" {
+		if c.Mail.From == "" {
+			return fmt.Errorf("mail.from is required when mail.smtp_host is set (leave mail.smtp_host empty to turn mail off)")
+		}
+		if !domain.ValidMailAddress(c.Mail.From) {
+			return fmt.Errorf("mail.from must be a single bare address, e.g. alerts@example.com (no display name)")
+		}
 	}
 	if c.Mail.Enabled() {
 		if c.Mail.SMTPPort <= 0 {

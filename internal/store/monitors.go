@@ -763,9 +763,16 @@ func (s *Store) RecordPushResult(ctx context.Context, monitorID string, up bool,
 // claims ownership cannot slip past a stale handler-level check (spec §8/§9.2). Type and
 // push_token are immutable. ErrNotFound if the monitor is gone. Caller validates via domain.
 // updateMonitor: the unexported writer behind UpdateMonitorByPrincipal — see createMonitor.
-func (s *Store) updateMonitor(ctx context.Context, m domain.Monitor, audit monitorAuditHook) (domain.Monitor, error) {
+//
+// configSubmitted says whether the caller's request carried a `config` at all (sec-hardening-3 T-1d,
+// S20). When it did not, the stored config is not this write's business: it is neither re-prepared
+// nor rewritten, and monitor_secret_refs are left as they are. Re-preparing it used to write
+// `sslmode: require` into a beta row that had none and refuse a row holding `prefer`, both on a
+// request that only toggled `enabled`. The caller says so explicitly rather than the store comparing
+// configs, because the safe reader the handler starts from never has the write-only password.
+func (s *Store) updateMonitor(ctx context.Context, m domain.Monitor, audit monitorAuditHook, configSubmitted bool) (domain.Monitor, error) {
 	preserveInline := false
-	if domain.CredentialedType(m.Type) {
+	if configSubmitted && domain.CredentialedType(m.Type) {
 		prepared, preserve, err := prepareCredentialUpdate(m.Type, m.Config)
 		if err != nil {
 			return domain.Monitor{}, err
@@ -784,7 +791,7 @@ func (s *Store) updateMonitor(ctx context.Context, m domain.Monitor, audit monit
 	// ref the normalized `monitor_secret_refs` table no longer has, which is the divergence
 	// §4.3 exists to prevent. Reading the old config takes no row lock, so the fixed order
 	// (secret rows, then the monitor row) is unaffected.
-	if preserveInline {
+	if configSubmitted && preserveInline {
 		storedRef, storedInline, rerr := s.storedCredentialTx(ctx, tx, m)
 		if rerr != nil {
 			return domain.Monitor{}, rerr
@@ -799,10 +806,15 @@ func (s *Store) updateMonitor(ctx context.Context, m domain.Monitor, audit monit
 			return domain.Monitor{}, fmt.Errorf("store: credential settings require an existing credential to preserve")
 		}
 	}
-	// Fixed §4.3 order: referenced secret rows first, monitor row second.
-	bindings, err := s.monitorSecretBindings(ctx, tx, m.ProjectID, m)
-	if err != nil {
-		return domain.Monitor{}, err
+	// Fixed §4.3 order: referenced secret rows first, monitor row second. Without a submitted config
+	// the references are not resolved at all: they stay exactly as stored.
+	var bindings map[string]string
+	if configSubmitted {
+		var err error
+		bindings, err = s.monitorSecretBindings(ctx, tx, m.ProjectID, m)
+		if err != nil {
+			return domain.Monitor{}, err
+		}
 	}
 	var exists int
 	var prevEnabled bool
@@ -810,6 +822,11 @@ func (s *Store) updateMonitor(ctx context.Context, m domain.Monitor, audit monit
 		return domain.Monitor{}, ErrNotFound
 	} else if err != nil {
 		return domain.Monitor{}, fmt.Errorf("store: lock monitor: %w", err)
+	}
+	if !configSubmitted && !s.secretsEnabled {
+		if err := refuseIfLockedRowReferencesTx(ctx, tx, m); err != nil {
+			return domain.Monitor{}, err
+		}
 	}
 	if err := assertNotFileManagedTx(ctx, tx, m.ID); err != nil {
 		return domain.Monitor{}, err
@@ -827,7 +844,12 @@ func (s *Store) updateMonitor(ctx context.Context, m domain.Monitor, audit monit
 			return domain.Monitor{}, fmt.Errorf("%w: %q is stored, %q was submitted", ErrMonitorSlugImmutable, stored, m.Slug)
 		}
 	}
-	updated, err := updateMonitorTxPreparedWithRefs(ctx, tx, s, m, preserveInline, bindings)
+	var updated domain.Monitor
+	if configSubmitted {
+		updated, err = updateMonitorTxPreparedWithRefs(ctx, tx, s, m, preserveInline, bindings)
+	} else {
+		updated, err = updateMonitorTxKeepingConfig(ctx, tx, s, m)
+	}
 	if err != nil {
 		return domain.Monitor{}, err
 	}
@@ -898,7 +920,65 @@ func updateMonitorTxPreparedWithRefs(
 	return updated, nil
 }
 
+// refuseIfLockedRowReferencesTx keeps the inventory's feature switch over an update that carries no
+// `config` (code review of sec-hardening-3, P1-1 and its second pass, P2-1). With `secrets.enabled:
+// false` such an update of a monitor that references the inventory is refused, the pause included, as it
+// was when every update resolved its references; otherwise the monitor could be enabled and re-targeted,
+// and under an enforced dispatch envelope its secret would be sealed for the new target.
+//
+// The decision is made on the LOCKED row and nothing else: a row in monitor_secret_refs, or a reference
+// in the stored config. The caller's m.Config is not consulted, because it was read before this
+// transaction and the write keeps the stored config (COALESCE), so what is checked must be what is kept.
+// It takes no lock on project_secrets, so the §4.3 order is unchanged; a refusal rolls the transaction
+// back.
+func refuseIfLockedRowReferencesTx(ctx context.Context, tx pgx.Tx, m domain.Monitor) error {
+	var typ string
+	var rawConfig []byte
+	var hasRefs bool
+	if err := tx.QueryRow(ctx,
+		`SELECT m.type, m.config,
+		        EXISTS (SELECT 1 FROM monitor_secret_refs r WHERE r.monitor_id = m.id AND r.project_id = m.project_id)
+		   FROM monitors m WHERE m.id = $1 AND m.project_id = $2`, m.ID, m.ProjectID).Scan(&typ, &rawConfig, &hasRefs); err != nil {
+		return fmt.Errorf("store: read the locked monitor's references: %w", err)
+	}
+	if hasRefs {
+		return ErrSecretsFeatureDisabled
+	}
+	stored := map[string]string{}
+	if err := json.Unmarshal(rawConfig, &stored); err != nil {
+		return fmt.Errorf("store: decode the locked monitor's config: %w", err)
+	}
+	if len(monitorRefSettings(domain.Monitor{Type: domain.MonitorType(typ), Config: stored})) > 0 {
+		return ErrSecretsFeatureDisabled
+	}
+	return nil
+}
+
+// updateMonitorTxKeepingConfig is the write of an update that carried no `config` (S20): every other
+// field as updateMonitorTxPrepared writes it, the config column untouched, the references untouched,
+// and the epoch bump every update gets.
+func updateMonitorTxKeepingConfig(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor) (domain.Monitor, error) {
+	updated, err := updateMonitorTxRow(ctx, tx, s, m, nil)
+	if err != nil {
+		return domain.Monitor{}, err
+	}
+	if err := s.BumpEpochsForMonitor(ctx, tx, updated.ProjectID, updated.ID); err != nil {
+		return domain.Monitor{}, err
+	}
+	return updated, nil
+}
+
 func updateMonitorTxPrepared(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor, preserveInline bool) (domain.Monitor, error) {
+	config, err := s.marshalConfigForUpdateTx(ctx, tx, m, preserveInline)
+	if err != nil {
+		return domain.Monitor{}, err
+	}
+	return updateMonitorTxRow(ctx, tx, s, m, config)
+}
+
+// updateMonitorTxRow writes the row. A nil config keeps the stored column as it is (COALESCE), which
+// is how an update without a submitted config leaves it byte for byte unchanged.
+func updateMonitorTxRow(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monitor, config []byte) (domain.Monitor, error) {
 	conditions := m.Conditions
 	if conditions == nil {
 		conditions = []string{}
@@ -911,14 +991,10 @@ func updateMonitorTxPrepared(ctx context.Context, tx pgx.Tx, s *Store, m domain.
 	if region == "" {
 		region = domain.DefaultRegion
 	}
-	config, err := s.marshalConfigForUpdateTx(ctx, tx, m, preserveInline)
-	if err != nil {
-		return domain.Monitor{}, err
-	}
 	row := tx.QueryRow(ctx,
 		`UPDATE monitors
 		    SET name = $2, target = $3, interval_seconds = $4, timeout_seconds = $5,
-		        retries = $6, conditions = $7, enabled = $8, method = $9, grace_seconds = $10, config = $11, auto_incident = $12, failure_threshold = $13, renotify_seconds = $14, tags = $15, region = $16, escalation_policy_id = $17, confirm_interval_seconds = $18, description = $19, updated_at = now(),
+		        retries = $6, conditions = $7, enabled = $8, method = $9, grace_seconds = $10, config = COALESCE($11::jsonb, config), auto_incident = $12, failure_threshold = $13, renotify_seconds = $14, tags = $15, region = $16, escalation_policy_id = $17, confirm_interval_seconds = $18, description = $19, updated_at = now(),
 		        -- Config generation + freshness watermark, shared verbatim with the rotation
 		        -- fence (see revisionFenceSetSQL): bump on ANY UpdateMonitor, because a missed
 		        -- bump reopens the stale-config vulnerability while an extra one costs a single

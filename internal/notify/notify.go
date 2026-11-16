@@ -16,6 +16,7 @@ import (
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/mailer"
+	"github.com/teamlead-com/cerbix/internal/prober"
 )
 
 // telegramAPI is the Telegram Bot API base; a var so tests can point it at a stub.
@@ -45,7 +46,9 @@ type Dispatcher struct {
 // New builds a dispatcher. A nil client gets a default with a short timeout.
 func New(store Store, client *http.Client) *Dispatcher {
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		// The fallback refuses redirects exactly as the guard's client does (sec-hardening-3 S17),
+		// so a caller that passes nil never gets a laxer client than production.
+		client = &http.Client{Timeout: 10 * time.Second, CheckRedirect: prober.RefuseRedirects}
 	}
 	return &Dispatcher{store: store, client: client, timeout: 10 * time.Second}
 }
@@ -209,7 +212,9 @@ func (d *Dispatcher) sendMail(ctx context.Context, ch domain.NotificationChannel
 	if port == "" {
 		port = "587"
 	}
-	from := ch.Config["from"]
+	// Trimmed, as the `to` elements always were and as the write surface judged it, so write and send
+	// give one answer for the same value (sec-hardening-3 §4.2).
+	from := strings.TrimSpace(ch.Config["from"])
 	var to []string
 	for _, addr := range strings.Split(ch.Config["to"], ",") {
 		if a := strings.TrimSpace(addr); a != "" {
@@ -223,9 +228,14 @@ func (d *Dispatcher) sendMail(ctx context.Context, ch domain.NotificationChannel
 	if user := ch.Config["smtp_username"]; user != "" {
 		auth = smtp.PlainAuth("", user, ch.Config["smtp_password"], host)
 	}
-	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n",
-		from, strings.Join(to, ", "), text, text)
-	if err := sendMailFunc(ctx, host+":"+port, auth, from, to, []byte(msg)); err != nil {
+	// One builder for every mail (sec-hardening-3 T-3, S18): the subject is the alert's first line,
+	// encoded; the body is the whole alert text; a refused address ends the delivery before any
+	// SMTP session, naming the field and its position.
+	msg, err := mailer.BuildMessage(from, to, text, text)
+	if err != nil {
+		return err
+	}
+	if err := sendMailFunc(ctx, host+":"+port, auth, from, to, msg); err != nil {
 		return fmt.Errorf("smtp: %w", err)
 	}
 	return nil
@@ -236,12 +246,12 @@ func (d *Dispatcher) post(ctx context.Context, _ domain.NotificationChannel, tar
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return ErrInvalidURL // never the parse error: it quotes the URL (sec-hardening-3 T-4)
 	}
 	req.Header.Set("Content-Type", contentType)
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("post: %w", err)
+		return DeliveryFailure(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {

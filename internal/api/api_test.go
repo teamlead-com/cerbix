@@ -618,7 +618,7 @@ func (f *fakeStore) GetMonitorByPushToken(_ context.Context, token string) (doma
 	}
 	return domain.Monitor{}, time.Time{}, store.ErrNotFound
 }
-func (f *fakeStore) UpdateMonitorByPrincipal(_ context.Context, m domain.Monitor, actor store.AuditActor) (domain.Monitor, error) {
+func (f *fakeStore) UpdateMonitorByPrincipal(_ context.Context, m domain.Monitor, actor store.AuditActor, _ bool) (domain.Monitor, error) {
 	f.auditActors = append(f.auditActors, string(store.MonitorAuditUpdate)+"|"+actor.Label)
 	if _, ok := f.monitors[m.ID]; !ok {
 		return domain.Monitor{}, store.ErrNotFound

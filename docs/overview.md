@@ -94,7 +94,7 @@ Top-level `Config` sections (`internal/config`):
 | `change` | `record_rate_process_per_minute`, `record_rate_principal_per_minute`, `record_inflight_process`, `read_inflight_process`, `max_past`, `max_future`, `correlation_window`, `correlation_note_max`, `retention_days`, `retention_groups_per_batch` | Change-intelligence bounds (FR-025, spec `func-change-intelligence` §5a): process-local concurrency and rate caps on the record route and permits on its reads, the `occurred_at` clock window, the incident-correlation window and note size, and retention of change groups by age. Every key refused outside its range at boot, naming the key. |
 | `ledger` | `carrier_enabled`, `expected_run_retention_days`, `expected_run_gap_windows_max` | Expected-run ledger carrier selection plus the retention horizon and per-monitor gap-materialization safety bound (FR-032, `func-expected-run-ledger`). |
 | `security` | `encryption_key`, `previous_keys`, `admin_email`, `admin_password` | AES-256-GCM keyring for at-rest secrets + rotation; global-admin bootstrap on an empty system. |
-| `mail` | `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `from`, `public_base_url` | Bootstrap SMTP (overridable from the UI). |
+| `mail` | `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `from`, `public_base_url` | Bootstrap SMTP (overridable from the UI). An empty `smtp_host` turns mail off; once it is set, `from` must be a single bare address or the process does not start (D-0280). |
 | `pull` | `regions`, `token`, `agents`, `server_url` | HTTP-pull transport: broker-less regions (server side) and agent credentials (agent side). |
 | `providers` | `file.<name>.{directory, debounce, resync_interval, orphan_grace_period, scope, limits}` | Monitoring-as-Code file providers (FR-017, spec `func-monitoring-as-code`). Static definition; contents hot-reconciled by `api`/`all`. Scope `instance\|organization\|project` (no implicit scope). |
 
@@ -147,14 +147,14 @@ flowchart LR
 | `dispatch` | `Dispatcher` interface + `inproc`/`amqp` implementations. |
 | `scheduler` | Leader (advisory lock), min-heap `next_run`, job publishing; rollup, retention, renotify, burn-eval, SLA reports; the gate ledger's partition maintenance under its own session lock (FR-024); the daily purge of change groups by whole identity (FR-025). **The tick RESERVES before it publishes** (FR-032 phase F): the expected-run window and its minted job identity are committed BEFORE the job reaches a transport, and a third statement records what the transport did. A job is never published for a window the ledger has not already recorded, so an instant is either recorded or the schedule never passed it — the ordering that makes a fabricated "no run happened here" unreachable. A reserve that fails publishes nothing and moves nothing. |
 | `worker` | Goroutine pool, probe execution with `context.WithTimeout`. |
-| `prober` | `Prober` registry by monitor type + conditions engine; SSRF guard. |
+| `prober` | `Prober` registry by monitor type + conditions engine; SSRF guard. The PostgreSQL probe applies `sslmode` itself and builds its connection from the monitor alone, never from the `PG*` environment (D-0280). |
 | `ingest` | The CHECK-RESULT consumer — heartbeats, status flip (atomic), auto-incidents, transitions into the outbox. The package name is historical: cerbix ingests its OWN probe results and no external telemetry, which is why the product is not an observability backend. |
 | `sla` | SLI/SLO/error-budget/burn-rate for a MONITOR (pure computations). |
 | `reliability` | Reliability of a **service** (FR-021): a piecewise reducer over breakpoints producing duration-weighted facts on two conserved axes. Pure — no I/O, no clock. |
 | `incidents`↔`api`/`store` | Incidents, timeline updates, postmortems, external-key correlation (Alertmanager). |
 | `statuspage`/`feed`/`subscribe` | Public status pages, RSS/Atom/JSON feeds, subscribers. A component renders from ONE of three sources under a discriminator (`monitor` / `service` / `manual`, FR-021 §15.0) with the replaced binding kept dormant for revert; the page summary reports worst-of-MEASURED plus an unmeasured count, and measurement ABSENT is the public status `no_data` — never `operational`. |
-| `notify` | Delivery of transitions/alerts to channels (webhook/Slack/Telegram/email). |
-| `webhook` | Outbound incident webhooks (signed). |
+| `notify` | Delivery of transitions/alerts to channels (webhook/Slack/Telegram/email). Follows no redirect, names a failure without its URL, and builds every mail through `mailer.BuildMessage` (D-0280). |
+| `webhook` | Outbound incident webhooks (signed). Follows no redirect; a failure never quotes the URL (D-0280). |
 | `outbox` | Transactional outbox: durable event delivery with retry/backoff/dead-letter, `SKIP LOCKED`. |
 | `settings` | Instance settings (branding/auth-policy/alerting/monitor-defaults/mail) — atomic snapshot, resolver DB→config→defaults. |
 | `secret` | AES-256-GCM keyring (encrypt/decrypt, rotation). |

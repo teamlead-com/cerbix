@@ -227,6 +227,14 @@ func CredentialProbeErrorReason(err error) string {
 	if errors.Is(err, errNoDispatchKey) {
 		return domain.ProbeErrorNoDispatchKey
 	}
+	if errors.Is(err, ErrBodyOmitsDefaultedSetting) {
+		// The same honest member, for the same reason: the delivery did not honour the contract of
+		// its carrier. Mapping it here, rather than letting it fall to decrypt_auth_failed, is what
+		// keeps a job an old core sealed during a rolling upgrade from costing the executor its
+		// credential readiness — two of those in a row would leave the region with no credentialed
+		// work and no success to clear the streak until a restart (sec-hardening-3 §2.6 item 5).
+		return domain.ProbeErrorUnsupportedVersion
+	}
 	if errors.Is(err, ErrLedgerIdentityMissing) {
 		// `unsupported_version` is the honest member of the existing vocabulary: the executor
 		// received a carrier generation whose contract the delivery did not honour. No new
@@ -314,6 +322,12 @@ var errNoDispatchKey = errors.New("dispatch: no dispatch key")
 // one to reach the mapping would have made the taxonomy lie about what happened. A protocol
 // violation on a carrier the CORE selected is a wiring fault an operator must be able to read.
 var ErrLedgerIdentityMissing = errors.New("dispatch: generation-4 job is missing its identity")
+
+// ErrBodyOmitsDefaultedSetting refuses a body-bound job whose body lacks a defaulted setting of its
+// schema (sec-hardening-3 T-1c, S19). It is a sentinel for the same reason ErrLedgerIdentityMissing
+// is: it maps to unsupported_version, never to an authentication failure, so it does not cost the
+// executor its credential readiness.
+var ErrBodyOmitsDefaultedSetting = errors.New("dispatch: a body-bound job omits the defaulted setting")
 
 // Materialized is the result of the executor gate: the monitor to probe, the cleanup that
 // wipes any injected credential, and whether a credential was actually materialized —
@@ -547,6 +561,24 @@ func ValidateAndMaterialize(ring *CredentialKeyring, delivered DeliveredJob) (Ma
 	// document that says WHERE it may be sent, so a relocated binding would open cleanly.
 	if len(canaryBindings) > 0 && envelope.V < EnvelopeV2 {
 		return Materialized{}, errors.New("dispatch: a canary secret binding requires a body-bound envelope")
+	}
+	// 2b. A body-bound job states every defaulted setting (sec-hardening-3 T-1c, S19). Envelope v2
+	// digests an absent key as its canonical default, while the prober reads the absence as the
+	// legacy value (an absent postgres sslmode is `prefer`, an absent tls is no TLS): deleting the key
+	// in transit kept the envelope valid and downgraded the probe to plaintext with the credential.
+	// Core states every such key before sealing, so a body without one was not written by core.
+	// Envelope v1 and the legacy wire do not bind the body at all, so they keep today's reading.
+	// Only a type with a credential schema has defaulted fields; a scenario or canary binding has none.
+	if envelope.V >= EnvelopeV2 && domain.CredentialedType(job.Monitor.Type) {
+		keys, err := domain.DefaultedExecutionKeys(job.Monitor.Type, job.Monitor.Config)
+		if err != nil {
+			return Materialized{}, fmt.Errorf("dispatch: unresolved credential schema: %w", err)
+		}
+		for _, key := range keys {
+			if _, present := job.Monitor.Config[key]; !present {
+				return Materialized{}, fmt.Errorf("%w %q", ErrBodyOmitsDefaultedSetting, key)
+			}
+		}
 	}
 	if ring == nil {
 		return Materialized{}, errNoDispatchKey

@@ -57,7 +57,7 @@ type Store interface {
 	ListRegions(ctx context.Context) ([]string, error)
 	// FR-026 §10 (D-0233): the three monitor writers take the principal. There is no unaudited form.
 	CreateMonitorByPrincipal(ctx context.Context, m domain.Monitor, actor store.AuditActor) (domain.Monitor, error)
-	UpdateMonitorByPrincipal(ctx context.Context, m domain.Monitor, actor store.AuditActor) (domain.Monitor, error)
+	UpdateMonitorByPrincipal(ctx context.Context, m domain.Monitor, actor store.AuditActor, configSubmitted bool) (domain.Monitor, error)
 	GetMonitor(ctx context.Context, id string) (domain.Monitor, error)
 	GetMonitorByPushToken(ctx context.Context, token string) (domain.Monitor, time.Time, error)
 	DeleteMonitorByPrincipal(ctx context.Context, id string, actor store.AuditActor) error

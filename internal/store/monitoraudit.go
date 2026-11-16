@@ -41,7 +41,10 @@ func (s *Store) CreateMonitorByPrincipal(ctx context.Context, m domain.Monitor, 
 }
 
 // UpdateMonitorByPrincipal is the only exported update door.
-func (s *Store) UpdateMonitorByPrincipal(ctx context.Context, m domain.Monitor, actor AuditActor) (domain.Monitor, error) {
+//
+// configSubmitted is whether the request carried a `config`; without one the stored config and its
+// references are left exactly as they are (sec-hardening-3 S20).
+func (s *Store) UpdateMonitorByPrincipal(ctx context.Context, m domain.Monitor, actor AuditActor, configSubmitted bool) (domain.Monitor, error) {
 	if err := actor.valid(); err != nil {
 		return domain.Monitor{}, err
 	}
@@ -49,7 +52,7 @@ func (s *Store) UpdateMonitorByPrincipal(ctx context.Context, m domain.Monitor, 
 	// facts, not what the caller claimed.
 	return s.updateMonitor(ctx, m, func(ctx context.Context, tx pgx.Tx, updated domain.Monitor, prevEnabled bool) error {
 		return insertProjectAudit(ctx, tx, updated.ProjectID, actor, string(MonitorAuditUpdate), MonitorUpdateTarget(actor, updated, prevEnabled))
-	})
+	}, configSubmitted)
 }
 
 // DeleteMonitorByPrincipal is the only exported delete door. It takes an ID and nothing else: the

@@ -234,6 +234,15 @@ func (s *Store) materializeRow(
 		m.Config = stored
 		job.Monitor = m
 	}
+	// sec-hardening-3 T-1c (S19): a row written before a setting's default existed (the v0.1.0 betas)
+	// lacks the key. The executor refuses that absence on a body-bound job, because the digest reads it
+	// as the canonical default while the prober reads it as the legacy value. Core states the legacy
+	// value in the job BODY here — before any seal, on every carrier — so the row executes exactly as
+	// it always has and both sides digest the same stated value. The stored row is not changed.
+	if domain.CredentialedType(m.Type) {
+		m.Config = domain.StateLegacyDefaults(m.Type, m.Config)
+		job.Monitor = m
+	}
 	var scenarioRefKeys []string
 	if m.Type == domain.MonitorSynthetic {
 		scenarioRefKeys = domain.ScenarioSecretRefKeys(stored)

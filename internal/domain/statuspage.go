@@ -296,8 +296,9 @@ type Subscriber struct {
 
 // Validate checks a subscriber has a plausible email and a page.
 func (s Subscriber) Validate() error {
-	e := strings.TrimSpace(s.Email)
-	if !strings.Contains(e, "@") || strings.HasPrefix(e, "@") || strings.HasSuffix(e, "@") {
+	// The address rule of every mail cerbix sends (sec-hardening-3 S18): an address the builder would
+	// refuse is refused here, with 400, instead of failing every mail later.
+	if !ValidMailAddress(strings.TrimSpace(s.Email)) {
 		return fmt.Errorf("subscriber: invalid email")
 	}
 	if s.StatusPageID == "" {

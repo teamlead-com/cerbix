@@ -48,12 +48,25 @@ test.describe("probers against the stack itself", () => {
 
   test("test-connection probes postgres/tcp instantly; unknown region → 502", async ({ page }) => {
     const { projectID } = await firstProject(page);
+    // The dev Postgres runs with ssl = off, so plaintext must be asked for explicitly
+    // (sec-hardening-3 S15). This test used to omit sslmode and pass only because the probe never
+    // asked for TLS: the omitted value is normalized to `require`.
     const pg = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors/test`, {
       type: "postgres", target: "postgres:5432", region: "core", timeout_seconds: 5, interval_seconds: 30,
-      config: { username: "cerbix", password: "cerbix", database: "cerbix" },
+      config: { username: "cerbix", password: "cerbix", database: "cerbix", sslmode: "disable" },
     });
     expect(pg.ok(), await pg.text()).toBeTruthy();
     expect((await pg.json()).up).toBeTruthy();
+
+    // No sslmode → `require`: against a server without TLS the probe is down and says why.
+    const pgRequire = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors/test`, {
+      type: "postgres", target: "postgres:5432", region: "core", timeout_seconds: 5, interval_seconds: 30,
+      config: { username: "cerbix", password: "cerbix", database: "cerbix" },
+    });
+    expect(pgRequire.ok(), await pgRequire.text()).toBeTruthy();
+    const required = await pgRequire.json();
+    expect(required.up).toBeFalsy();
+    expect(required.msg).toContain("does not offer TLS");
 
     const tcp = await apiSend(page, "post", `/api/v1/projects/${projectID}/monitors/test`, {
       type: "tcp", target: "rabbitmq:5672", region: "core", timeout_seconds: 5, interval_seconds: 30,

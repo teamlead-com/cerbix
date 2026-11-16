@@ -24,7 +24,7 @@ func (s *Store) CreateMonitor(ctx context.Context, m domain.Monitor) (domain.Mon
 }
 
 func (s *Store) UpdateMonitor(ctx context.Context, m domain.Monitor) (domain.Monitor, error) {
-	return s.updateMonitor(ctx, m, nil)
+	return s.updateMonitor(ctx, m, nil, true)
 }
 
 func (s *Store) DeleteMonitor(ctx context.Context, id string) error {

@@ -127,6 +127,12 @@ type credField struct {
 	def          string
 	writeDefault bool // normalization materializes def into the map
 	defIfBlank   bool // a present-but-blank value is also replaced by def
+	// legacy is, for a writeDefault field, the value the EXECUTOR applies to an ABSENT key — what a
+	// row written before the default existed has always executed as (sec-hardening-3 T-1c). It can
+	// differ from def: an absent `sslmode` digests as `require` but the postgres prober reads it as
+	// `prefer`. Core states it in the job body before sealing (StateLegacyDefaults), so a body-bound
+	// job never carries an absence whose two readings disagree. Every writeDefault field has one.
+	legacy string
 }
 
 // credVariant is one resolved shape of a type's schema (rabbitmq has two; every other
@@ -159,7 +165,7 @@ type credSchema struct {
 // is never silent (§4.8).
 func tlsFields() []credField {
 	return []credField{
-		{key: "tls", binding: bindingExecution, boolean: true, def: "true", writeDefault: true},
+		{key: "tls", binding: bindingExecution, boolean: true, def: "true", writeDefault: true, legacy: "false"},
 		// Absent means "do not skip verification", so its canonical value is "false". It is
 		// NOT materialized into the stored config: writing it would change the canonical
 		// hash of every existing monitor for no behavioural gain. Declaring it here is what
@@ -194,9 +200,9 @@ var credentialSchemas = map[MonitorType]credSchema{
 		fields: []credField{
 			{key: "username", binding: bindingExecution, required: true, maxLen: maxCredFieldLen},
 			{key: "database", binding: bindingExecution, required: true, maxLen: maxCredFieldLen},
-			{key: "sslmode", binding: bindingExecution, enum: sslModes, def: "require", writeDefault: true,
+			{key: "sslmode", binding: bindingExecution, enum: sslModes, def: "require", writeDefault: true, legacy: "prefer",
 				enumMsg: "settings: sslmode must be one of disable|require|verify-ca|verify-full"},
-			{key: "query", binding: bindingExecution, maxLen: maxQueryLen, def: "SELECT 1", writeDefault: true, defIfBlank: true},
+			{key: "query", binding: bindingExecution, maxLen: maxQueryLen, def: "SELECT 1", writeDefault: true, defIfBlank: true, legacy: "SELECT 1"},
 			{key: "password", binding: bindingSecretValue},
 			{key: "password_ref", binding: bindingSecretRef},
 		},
@@ -208,7 +214,7 @@ var credentialSchemas = map[MonitorType]credSchema{
 			{key: "username", binding: bindingExecution, required: true, maxLen: maxCredFieldLen},
 			{key: "database", binding: bindingExecution, required: true, maxLen: maxCredFieldLen},
 		}, append(tlsFields(),
-			credField{key: "query", binding: bindingExecution, maxLen: maxQueryLen, def: "SELECT 1", writeDefault: true, defIfBlank: true},
+			credField{key: "query", binding: bindingExecution, maxLen: maxQueryLen, def: "SELECT 1", writeDefault: true, defIfBlank: true, legacy: "SELECT 1"},
 			credField{key: "password", binding: bindingSecretValue},
 			credField{key: "password_ref", binding: bindingSecretRef},
 		)...),
@@ -285,7 +291,7 @@ var credentialSchemas = map[MonitorType]credSchema{
 				fields: append([]credField{
 					{key: "mode", binding: bindingExecution, required: true},
 					{key: "username", binding: bindingExecution, required: true, maxLen: maxCredFieldLen},
-					{key: "path", binding: bindingExecution, maxLen: maxPathLen, def: "/api/overview", writeDefault: true, defIfBlank: true},
+					{key: "path", binding: bindingExecution, maxLen: maxPathLen, def: "/api/overview", writeDefault: true, defIfBlank: true, legacy: "/api/overview"},
 				}, append(tlsFields(),
 					credField{key: "password", binding: bindingSecretValue},
 					credField{key: "password_ref", binding: bindingSecretRef},
@@ -716,4 +722,48 @@ func credentialSlot(settings map[string]string, surface CredentialSurface) error
 		return fmt.Errorf("settings: password_ref must be a secret name matching %s", secretRefRe.String())
 	}
 	return nil
+}
+
+// DefaultedExecutionKeys returns the writeDefault fields of the effective schema: the keys a
+// body-bound job must carry (sec-hardening-3 T-1c, S19). An absent one digests as its canonical
+// default while the executor reads the absence as its legacy value, so deleting it in transit would
+// keep a valid envelope and change what runs. The answer comes from the registry, so a new defaulted
+// field is covered by construction.
+func DefaultedExecutionKeys(typ MonitorType, settings map[string]string) ([]string, error) {
+	variant, err := resolveVariant(typ, settings)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, f := range variant.fields {
+		if f.writeDefault {
+			out = append(out, f.key)
+		}
+	}
+	return out, nil
+}
+
+// StateLegacyDefaults returns a copy of settings with every ABSENT writeDefault field of the effective
+// schema set to its legacy value — what the executor has always applied to that absence. Core calls it
+// on the job body before sealing, so a pre-default row executes exactly as before and the executor can
+// refuse an absence on a body-bound job (S19). A present key, even a blank one, is left alone; an
+// unresolvable type or variant is returned unchanged, because validation is what rejects it.
+func StateLegacyDefaults(typ MonitorType, settings map[string]string) map[string]string {
+	out := make(map[string]string, len(settings)+2)
+	for k, v := range settings {
+		out[k] = v
+	}
+	variant, err := resolveVariant(typ, settings)
+	if err != nil {
+		return out
+	}
+	for _, f := range variant.fields {
+		if !f.writeDefault {
+			continue
+		}
+		if _, present := out[f.key]; !present {
+			out[f.key] = f.legacy
+		}
+	}
+	return out
 }

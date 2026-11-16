@@ -1232,11 +1232,165 @@ credential at the monitored target.
 | Test Connection answers `no worker queue for region "R" (AMQP 312 NO_ROUTE)` **immediately** | The API published on a carrier NOBODY in that region has bound. The commonest cause is not a dead region but a fleet that disagrees with itself: the API enforces credential envelopes (`secrets.dispatch_envelope: "enforced"`) and the region's executor does not, so the executor started only the v1 test consumer while the API published on v2/v3. Compare `secrets.dispatch_envelope` across the API/scheduler config and every executor config for that region, then `rabbitmqctl list_queues name consumers` and look for `checks.tests.v2.R` / `checks.tests.v3.R` with a consumer. An executor that enforces MUST also hold that region's `security.dispatch` key — and MUST NOT hold `security.encryption_key`, which `ValidateSecretsForRole` refuses. |
 | Test Connection answers `probe_error: <reason>` **immediately** | The queue exists, a consumer took the delivery and REFUSED it, and it told you so. The reason comes from the bounded executor vocabulary — `decrypt_auth_failed` covers every structural rejection (a wrong or missing envelope, a mismatched carrier, a forbidden field set) and `unsupported_version` an envelope generation this executor does not implement at all. It is deliberately non-oracular: it never says which way a forgery was wrong. **The poison body is also on `checks.dead`**, tagged with the carrier that dropped it, and that is where the detail is. When a body IS dead-lettered, read it through the management API and look at its `x-cerbix-source` header (`tests.v1`/`tests.v2`/`tests.v3`, `jobs.v2`…) and its `credential_envelope`. A generation >= 2 carrier admits only a delivery that carries the envelope THAT carrier defines; anything else is dead-lettered for exactly this inspection. Do not read the delivery's own `protocol_version` as the carrier — the queue is the carrier (§4.7, D-0160). |
 | Test Connection answers `no worker responded in region "R"` **after the full timeout** | Read it as what it says: NOBODY ANSWERED. Since 2026-09-06 a refusal is ANSWERED — see the row above — so a full timeout no longer means the delivery was refused. It means the consumer took the message and produced nothing: an executor that died mid-probe, a probe that outran the RPC deadline, or a reply that could not be published. Check the executor's log and `rabbitmqctl list_queues name consumers` for that region's carrier queues; `checks.dead` will be EMPTY for this case, because nothing was dead-lettered. |
-| PostgreSQL `sslmode=require` | Transport is encrypted but server identity is not verified. Use `verify-ca`/`verify-full` for identity verification. MySQL/Redis ref monitors default to verified TLS; disabling TLS or `tls_skip_verify` is an explicit audited posture. |
+| PostgreSQL `sslmode=require` | Intended: transport encrypted, server identity not verified; `verify-ca`/`verify-full` verify it. **Not true in v0.1.0-beta.1 through v0.3.9** (sec-hardening-3 T-1a, found 2026-11-14): the probe connected in plaintext under every `sslmode`, and `verify-*` verified nothing. **Fixed in iter-0213 (D-0280);** see "PostgreSQL monitor TLS" below. On a version older than the one that carries the fix (v0.4.0), treat every postgres monitor's credential as sent over plaintext. MySQL/Redis ref monitors default to verified TLS; disabling TLS or `tls_skip_verify` is an explicit audited posture. |
 
 Prometheus rules are in `docker/alerts/secret-inventory.rules.yml`. The live smoke
 `e2e/secret-inventory-smoke.sh` covers inventory → MaC ref → wrong-key pull-agent degradation
 → correctly keyed recovery/JIT decrypt → real PostgreSQL UP → rotation fence and guards.
+
+## PostgreSQL monitor TLS, delivery redirects and alert mail (sec-hardening-3, D-0280)
+
+### PostgreSQL monitor TLS
+
+Since iter-0213 the PostgreSQL probe does what `sslmode` says. Before, every mode connected in plaintext.
+
+| `sslmode` | Behaviour |
+| --- | --- |
+| `disable` | plaintext |
+| `require` | TLS, server not verified; DOWN with `the server does not offer TLS, and sslmode is "require": …` against a server without TLS |
+| `verify-ca` | TLS, chain verified against the system roots, name not checked |
+| `verify-full` | TLS, chain and target name or IP verified; DOWN with `TLS certificate not accepted (sslmode "verify-full"): …` otherwise |
+| `prefer`, absent (rows from the v0.1.0 betas) | TLS when the server offers it, plaintext otherwise — to the same host and port only; no protection against an active interceptor |
+| anything else | DOWN with `bad config: unsupported sslmode`; set one of the four |
+
+A private CA has no setting yet: use `require` against such a server.
+
+**Query 1 — every postgres monitor and its `sslmode`**, to run before upgrading:
+
+```sql
+SELECT m.id, m.project_id, m.name, m.target, m.region, m.enabled,
+       COALESCE(m.config->>'sslmode', '(absent)') AS sslmode,
+       (mm.monitor_id IS NOT NULL) AS file_managed
+  FROM monitors m
+  LEFT JOIN managed_monitors mm ON mm.monitor_id = m.id
+ WHERE m.type = 'postgres'
+   AND m.retired_at IS NULL
+ ORDER BY m.project_id, m.name;
+```
+
+How to act on the result:
+- Check TLS from the monitor's `region`.
+- Fix a `file_managed` monitor in its file; the API refuses to edit it.
+- Disabled monitors are listed because they go DOWN when re-enabled.
+
+**Do not set `PG*` variables for the cerbix process.**
+- **What the probe ignores.** It takes nothing from `PGHOST`, `PGSSLROOTCERT`, `~/.pgpass` and the like.
+- **The exception: `PGSERVICE`.** pgx reads the service file before anything else. A missing file or service
+  then makes every postgres probe end with `bad config: the PG* environment of the prober breaks the
+  PostgreSQL client`.
+- **Why nothing is lost.** cerbix's own database connection takes its DSN from the configuration.
+
+**Rolling upgrade.** A new executor refuses a body-bound job that omits a defaulted setting (`sslmode`,
+`tls`, `query`, `path`); only a new core states those for the v0.1.0-beta rows that lack them.
+- **Order.**
+  1. Upgrade the core roles (`api`, `scheduler`, `all`).
+  2. Wait `pause_seconds` from query 4.
+  3. Upgrade `worker` and `agent`.
+- **Query 4 — the pause.** A job lives in the AMQP queue or in `pull_jobs` for at most its monitor's
+  interval:
+
+  ```sql
+  SELECT COALESCE(max(m.interval_seconds), 0) AS pause_seconds
+    FROM monitors m
+   WHERE m.enabled AND m.retired_at IS NULL
+     AND (   (m.type = 'postgres' AND NOT (m.config ? 'sslmode' AND m.config ? 'query'))
+          OR (m.type = 'mysql'    AND NOT (m.config ? 'tls' AND m.config ? 'query'))
+          OR (m.type = 'redis'    AND NOT m.config ? 'tls')
+          OR (m.type = 'rabbitmq' AND m.config->>'mode' = 'management'
+                                  AND NOT (m.config ? 'tls' AND m.config ? 'path')));
+  ```
+
+- **Signal if the order is broken.** Those monitors show `probe_error` `unsupported_version`, and the
+  executor logs it with the same reason: `credential_job_rejected` from a worker,
+  `agent_credential_job_rejected` from a pull agent. Both stop on their own when the old jobs expire.
+- **Readiness.** The refusal never marks the executor credential-unready. If a region does show
+  `credential_ready=false` and the scheduler logs `credential_materialization_rejected` with
+  `no_capable_executor`, something else is failing to open envelopes, such as a wrong dispatch key. Fix
+  that, then restart the region's executors: readiness is set from the keyring at startup.
+
+### Delivery redirects and failure text
+
+**Redirects.** Alert delivery (webhook, Slack, Telegram channels and org webhooks) and the pull agent follow
+no redirect.
+- **What fails.** A URL that answers 3xx fails with `non-2xx status 30x`; it is retried and dead-lettered.
+- **The fix.** Set the URL to its `Location`. An agent's `--server` must be the URL core answers on.
+- **Duplicates.** While one channel of a monitor fails, every other channel of that monitor receives the
+  alert again on each retry, up to 10 attempts. The same holds for the webhooks and the status-page
+  subscribers of one incident event. Fix the URL or disable the failing channel.
+
+**Failure text.** Where to read it:
+- a dead-letter's `last_error` in Admin → Outbox (`GET /api/v1/admin/outbox/dead`);
+- the `outbox_delivery_retry` and `outbox_dead` log lines.
+
+It never contains the URL. A failure before any response reads `channel <id>: post failed: <reason>` (or
+`webhook <id>: …`):
+
+| Reason | Meaning |
+| --- | --- |
+| `destination refused by the delivery egress policy` | the address is private or metadata and `notification_egress` refuses it |
+| `certificate not accepted` | the receiver's certificate is not trusted or not valid for its name |
+| `the server does not speak TLS` | an `https://` URL answered in plain HTTP |
+| `TLS handshake failed` | a TLS alert, or bytes that are neither TLS nor HTTP |
+| `timeout`, `DNS lookup failed`, `connection refused`, `connection failed` | as named |
+| `invalid URL` (no `post failed:`) | the stored URL cannot be parsed |
+
+**Query 3 — blank stored text that quoted a URL.** Run it once after the upgrade:
+
+```sql
+UPDATE outbox_events
+   SET last_error = 'delivery failed (text removed on upgrade: it quoted the delivery URL)'
+ WHERE status IN ('pending', 'pending_fenced', 'dead')
+   AND last_error ~* '"\s*https?://';
+```
+
+Log lines written before the upgrade may hold channel URLs and Telegram bot tokens. Rotate those whose logs
+left your control.
+
+### Alert mail: subjects and addresses
+
+**Subject.** Every mail has the same five headers. Its subject is the first non-blank line of the text, at
+most 200 characters, RFC 2047-encoded; the full text, an SLA report's every line included, is in the body.
+
+**Addresses.** Every address must be single, unnamed, printable ASCII and at most 254 octets
+(`alerts@example.com`); an email channel's `to` must name at least one:
+- **At write.** The subscribe form, the email channel (`from`, each `to` element) and Settings → Mail answer
+  400 otherwise.
+- **At send.** Such an address ends the send before any connection, naming the field and its position.
+- **At startup.** `mail.smtp_host` with an empty or refused `mail.from` stops the process, even when
+  Settings → Mail has superseded the YAML block. Correct or clear `mail.from` there.
+
+**Query 2 — stored addresses the rule refuses.** It is an approximation; the application's check is
+authoritative:
+
+```sql
+SELECT 'subscriber' AS kind, s.id::text, s.status_page_id::text AS owner, s.email AS address
+  FROM subscribers s
+ WHERE s.email !~ '^[A-Za-z0-9!#$%&''*+/=?^_`{|}~.-]+@([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])$'
+    OR octet_length(s.email) > 254
+UNION ALL
+SELECT 'channel ' || a.field, c.id::text, c.project_id::text, a.address
+  FROM notification_channels c
+  CROSS JOIN LATERAL (
+        SELECT 'from' AS field, btrim(c.config->>'from') AS address
+        UNION ALL
+        SELECT 'to', btrim(t) FROM regexp_split_to_table(c.config->>'to', ',') AS t
+       ) a
+ WHERE c.type = 'email' AND a.address <> ''
+   AND (a.address !~ '^[A-Za-z0-9!#$%&''*+/=?^_`{|}~.-]+@([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])$'
+        OR octet_length(a.address) > 254)
+UNION ALL
+SELECT 'instance mail from', 'instance_settings', '', btrim(i.mail->>'from')
+  FROM instance_settings i
+ WHERE COALESCE(btrim(i.mail->>'from'), '') <> ''
+   AND (btrim(i.mail->>'from') !~ '^[A-Za-z0-9!#$%&''*+/=?^_`{|}~.-]+@([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])$'
+        OR octet_length(btrim(i.mail->>'from')) > 254);
+```
+
+Fix each row where it lives:
+- **Subscriber:** delete it (`DELETE /api/v1/status-pages/{pageID}/subscribers/{subscriberID}`); its incident
+  mail is skipped with a `subscriber_email_failed` log line until then, and the others still receive theirs.
+- **Email channel:** edit the channel.
+- **Instance sender:** Settings → Mail.
 
 ## Service reliability operations (FR-021)
 

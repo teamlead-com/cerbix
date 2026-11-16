@@ -218,6 +218,11 @@ func (m MailSettings) Validate() error {
 	if strings.TrimSpace(m.SMTPHost) == "" || strings.TrimSpace(m.From) == "" {
 		return fmt.Errorf("mail: smtp_host and from are required when enabled")
 	}
+	// The address rule of every mail cerbix sends (sec-hardening-3 S18). The handler stores `from`
+	// trimmed, and the mailer sends what is stored.
+	if !ValidMailAddress(strings.TrimSpace(m.From)) {
+		return fmt.Errorf("mail: from must be a single bare address (e.g. status@example.com)")
+	}
 	if m.SMTPPort < 0 || m.SMTPPort > 65535 {
 		return fmt.Errorf("mail: smtp_port out of range")
 	}

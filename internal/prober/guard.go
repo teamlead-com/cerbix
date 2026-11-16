@@ -44,6 +44,13 @@ func (e *blockedIPError) Error() string {
 	return fmt.Sprintf("blocked target IP %s (%s)", e.ip, e.reason)
 }
 
+// IsEgressRefusal reports whether err, anywhere in its chain, is the guard refusing an address its
+// policy forbids. A deliverer uses it to name the failure without quoting the URL (sec-hardening-3 T-4).
+func IsEgressRefusal(err error) bool {
+	var blocked *blockedIPError
+	return errors.As(err, &blocked)
+}
+
 // metadataIPs are cloud instance-metadata endpoints that must be gated by
 // allow_metadata_ips regardless of which range they fall in. 169.254.169.254 is
 // also covered by the link-local check, but AWS's IPv6 IMDS (fd00:ec2::254) sits
@@ -159,8 +166,11 @@ func (g Guard) dialContext(base *net.Dialer) func(context.Context, string, strin
 // redirect targets, since each hop re-dials through the same guarded dialer — is
 // resolved, policy-checked, and pinned to the checked IP, so redirect-to-internal
 // and DNS-rebinding can't reach loopback/link-local/metadata/(disallowed) private
-// hosts. Proxy is disabled (a proxy would bypass the IP guard). Redirect chains are
-// capped. The DIALER mechanism is shared with probe targets, but the POLICY is the
+// hosts. Proxy is disabled (a proxy would bypass the IP guard). It follows NO redirect
+// (sec-hardening-3 T-2, S17): a 3xx is answered as the response it is, and the deliverer
+// reports `non-2xx status 30x`. Following one sent the body and its HMAC signature to the
+// Location host on 307/308, the delivery URL (token included) in Referer on every hop, and
+// turned 301/302/303 into a bodiless GET that counted as delivered. The DIALER mechanism is shared with probe targets, but the POLICY is the
 // caller's: alert delivery constructs this from the deny-private notification_egress
 // policy, while probes use the allow-private prober policy — the two must not be
 // conflated (see cli.notificationEgressGuard and D-0141).
@@ -171,14 +181,13 @@ func (g Guard) HTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: tr,
-		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			return nil
-		},
+		CheckRedirect: RefuseRedirects,
 	}
 }
+
+// RefuseRedirects is the redirect policy of every client that carries a delivery or an agent
+// credential (sec-hardening-3 S17): none is followed, and the 3xx response is returned as is.
+func RefuseRedirects(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // EgressDialContext exposes the guarded dialer (resolve → policy check → pinned
 // dial) for non-HTTP egress such as SMTP, which has no redirect/Transport hook.

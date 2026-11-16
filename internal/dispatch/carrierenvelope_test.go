@@ -101,7 +101,8 @@ func TestADowngradedEnvelopeNeverReachesTheRunner(t *testing.T) {
 	monitor := domain.Monitor{
 		ID: "00000000-0000-4000-8000-0000000009a1", Region: "core", Type: "postgres",
 		Target: "postgres:5432", ExecutionRevision: 3,
-		Config: map[string]string{"username": "u", "database": "d"},
+		// A body-bound job states every defaulted setting (sec-hardening-3 S19).
+		Config: map[string]string{"username": "u", "database": "d", "sslmode": "require", "query": "SELECT 1"},
 	}
 	seal := func(v int) *dispatch.CredentialEnvelope {
 		env, sealErr := ring.Seal(dispatch.SealContext{

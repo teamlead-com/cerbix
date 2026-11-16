@@ -1102,7 +1102,8 @@ API**: `Monitor.Redacted()` blanks them in every monitor response (get/list/crea
 empty submitted secret **preserves the stored one** (the client never receives it, so can't resend it). The
 **`postgres`** prober connects via **pgx** with a **guarded `DialFunc`** (SSRF policy applies to the DB dial)
 and runs a query (default `SELECT 1`); config keys: database, username, password, sslmode (default `prefer`),
-query. `NewMonitorView` gets a Connection section with a write-only password field. **Consequence:** DB
+query. **Correction (2026-11-14, [sec-hardening-3](specs/sec-hardening-3.md) T-1a):** the prober never applied
+`sslmode`, `prefer` included — from v0.1.0-beta.1 through v0.3.9 every postgres probe connected in plaintext. Fixed in iter-0213 (D-0280). `NewMonitorView` gets a Connection section with a write-only password field. **Consequence:** DB
 monitoring ships with credentials encrypted at rest and never leaked to clients; the same pattern unblocks
 Redis/MySQL/RabbitMQ/PromQL. Covered by `domain` `TestPostgresTypeAndRedaction`, `store`
 `TestMonitorConfigPasswordEncrypted` (column has `enc:v1:`, non-secret plaintext, round-trip), api
@@ -2894,7 +2895,10 @@ Immediate revocation = rotate the credential at the target; hard recall is a non
 (5) **Target transport is honest egress:** ref-based monitors default to encrypted transport
 (postgres `sslmode: require` — stated as encrypted-NOT-verified; mysql/redis `tls: true`
 verified per Go defaults; rabbitmq management https); insecure/skip-verify is an explicit,
-visible opt-in in the monitor definition. (6) **Tenant invariant at the store surface:** every
+visible opt-in in the monitor definition. **Correction (2026-11-14, [sec-hardening-3](specs/sec-hardening-3.md)
+T-1a):** the postgres half did not hold. From v0.1.0-beta.1 through v0.3.9 — this decision shipped in v0.1.5-beta.1 —
+the prober sent no `SSLRequest` under any `sslmode`: `require` was plaintext and `verify-ca`/`verify-full`
+verified nothing. The fix is specified in sec-hardening-3 and shipped in iter-0213 (D-0280). (6) **Tenant invariant at the store surface:** every
 secret query takes and predicates `project_id`; the materializer resolves via
 `monitors JOIN monitor_secret_refs JOIN project_secrets` with equality on all project ids;
 referential integrity is a normalized ref table whose secret FK is
@@ -9483,3 +9487,71 @@ owner).**
   compare unmapped with any unspecified address as a wildcard, names compare case-insensitively, and a name never
   equals an IP because nothing is resolved at validation. P3-2: `sec-authn-authz.md` describes the 2FA
   enrollment guards as the code has them.
+
+## D-0280 — the PostgreSQL probe asks for TLS as sslmode says, a body-bound job states its defaults, a partial update leaves the config alone, delivery follows no redirect and quotes no URL, one builder for every mail (sec-hardening-3, 2026-11-15)
+
+**Context.** [`sec-hardening-3.md`](specs/sec-hardening-3.md), revision 7, approved 2026-11-15. The package
+holds these findings:
+- **T-1a, P1.** The PostgreSQL probe parsed `"sslmode=" + value` against libpq's default host, a unix
+  socket, so it kept no TLS configuration. Every mode connected in plaintext, in every released version
+  (D-0062 and D-0155 item (5) carry the dated correction).
+- **T-1b, P2.** That value and the `PG*` environment fed the connection string.
+- **T-1c, P1.** Envelope v2 digested an absent `sslmode`/`tls` as its default while the prober read it as
+  `prefer`/no TLS, so deleting the key in transit kept a valid envelope.
+- **T-1d, P2.** A PATCH without `config` re-prepared and rewrote the stored config.
+- **T-5, P2, correctness.** That same PATCH refused every synthetic monitor.
+- **T-2, P2.** Alert delivery and the pull agent followed redirects with the library's policy.
+- **T-4, P2.** A failed delivery quoted its secret URL into `last_error`, the log and the dead-letter API.
+- **T-3, P2.** Mail subjects were concatenated into headers.
+
+**Decision.**
+1. **The probe builds its connection from the monitor alone.**
+   - **Closed list.** `sslmode` is one of `disable|require|verify-ca|verify-full|prefer`, checked before any
+     parse or dial. An absent key executes as `prefer` (§8 decision 3); anything else is
+     `bad config: unsupported sslmode`.
+   - **TLS.** The probe builds it with pgx's SNI rules. `prefer` is `require` plus one plaintext fallback
+     to the same host and port: opportunistic, no protection against an active interceptor.
+   - **Constant parse and reset.** `ParseConfig` sees only a constant string, and `resetPgConfig` sets every
+     exported field of `pgconn.Config` and `pgx.ConnConfig`. A reflection test fails on a pgx upgrade that
+     adds one.
+   - **`PGSERVICE`.** It can only make the probe fail.
+   - **Messages.** They name the cause: `the server does not offer TLS, and sslmode is "<mode>": …`, and
+     `TLS certificate not accepted (sslmode "<mode>"): …`.
+2. **A body-bound job states every defaulted setting.**
+   - **Registry.** It records, per `writeDefault` field, the executor's legacy reading of an absent key.
+   - **Core.** It writes that value into the job body before sealing.
+   - **Gate.** It refuses envelope v2 without it, with a sentinel mapped to `unsupported_version`. The
+     refusal never costs readiness, because two `decrypt_auth_failed` in a row would have left a region
+     without credentialed work until a restart.
+   - **Upgrade order.** Core roles first, then a pause of at most one interval (runbook query 4), then the
+     executors.
+3. **A PATCH without `config` leaves `config` and `monitor_secret_refs` byte-identical.**
+   `UpdateMonitorByPrincipal(…, configSubmitted)` carries the handler's knowledge, because the safe reader
+   cannot compare a write-only password. `Monitor.Validate` still runs, now on the monitor as a writer
+   reads it. With `secrets.enabled: false`, such an update of a monitor that references the inventory is
+   refused 404 `feature_disabled`, the pause included, as before (code review, P1-1).
+4. **Delivery follows no redirect** (option A, owner 2026-11-14). The rule covers the guard's client, the
+   nil fallbacks and the pull agent's client. A 3xx is `non-2xx status 30x`, retried and dead-lettered.
+   Every agent call reports a status it did not expect: `agent_heartbeat_failed` and
+   `agent_test_claim_failed` carry it (code review, P2-1).
+5. **A failed delivery names a reason from a closed set and never its URL.** The reasons: egress refusal
+   (`prober.IsEgressRefusal`), certificate, scheme mismatch, TLS alert, timeout, DNS, connection refused,
+   connection failed. Text already stored is blanked by runbook query 3. No migration.
+6. **One mail builder.**
+   - **Subject.** The first non-blank line, at most 200 runes, Q-encoded and folded.
+   - **Headers.** Five, fixed.
+   - **Addresses.** `domain.ValidMailAddress` applies the rule (single, unnamed, printable ASCII, at most
+     254 octets) at send, at write (400) and at startup (`mail.from` when `smtp_host` is set, §8 item 6).
+     `To` is folded between addresses. An email channel's `to` must name at least one recipient (code
+     review, P2-2 and P3-1).
+   - **Whitespace.** The channel `from` is trimmed at send, as its `to` elements are.
+
+**Consequences.**
+- **Postgres monitors.** Those configured `require` or `verify-*` (every one saved since v0.1.5-beta.1
+  without an explicit choice) go DOWN against a server without TLS. The CHANGELOG's first entry and runbook
+  query 1 say how to find and fix them.
+- **Redirecting URLs.** A channel, webhook or agent URL that answers 3xx fails until it is set to its
+  `Location`.
+- **Startup.** A YAML `mail.from` with a display name, or `smtp_host` without `from`, stops startup.
+- **Unchanged.** The digest of an unchanged monitor, the carrier generations, the SPA and the database
+  schema.

@@ -95,6 +95,8 @@ func TestEveryTestCarrierAnswersOnItsOwnQueue(t *testing.T) {
 			m := domain.Monitor{
 				ID: tc.monitorID, Region: region, Type: "postgres", Target: "postgres:5432",
 				ExecutionRevision: 7, TimeoutSeconds: 2,
+				// A body-bound job states every defaulted setting (sec-hardening-3 S19).
+				Config: map[string]string{"sslmode": "require", "query": "SELECT 1"},
 			}
 			job := dispatch.CheckJob{Monitor: m, ProtocolVersion: tc.generation}
 			if tc.envelopeVersion != 0 {
@@ -165,6 +167,8 @@ func TestAMismatchedEnvelopeIsDeadLetteredOnBothAMQPPaths(t *testing.T) {
 	m := domain.Monitor{
 		ID: "00000000-0000-4000-8000-0000000001b1", Region: region, Type: "postgres",
 		Target: "postgres:5432", ExecutionRevision: 9, TimeoutSeconds: 1,
+		// A body-bound job states every defaulted setting (sec-hardening-3 S19).
+		Config: map[string]string{"sslmode": "require", "query": "SELECT 1"},
 	}
 	// Envelope v1 — legitimately sealed, and the WRONG generation for a v3 carrier.
 	downgraded, err := keyring.Seal(dispatch.SealContext{

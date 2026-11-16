@@ -574,6 +574,21 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// sec-hardening-3 T-5: Monitor.Validate below runs on the monitor this handler read. Read through
+	// the safe reader it lacked the writer-only scenario, so every partial update of a synthetic
+	// monitor — the SPA's Pause/Resume among them — answered 400 "config.scenario is required". The
+	// principal has just been found able to WRITE this monitor, so it reads what a writer reads; the
+	// write-only password stays out either way.
+	writable, err := h.store.GetMonitorForWriter(r.Context(), mon.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		h.serverError(w, "get_monitor_for_writer", err)
+		return
+	}
+	mon = writable
 	var body struct {
 		Name               *string            `json:"name"`
 		Description        *string            `json:"description"` // FR-030: omitted = unchanged, "" = cleared
@@ -703,7 +718,9 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	p, _ := h.principal(r) // monitorAccess above already required one
-	updated, err := h.store.UpdateMonitorByPrincipal(r.Context(), mon, auditActor(p))
+	// A PATCH without `config` leaves the stored config and its references exactly as they are
+	// (sec-hardening-3 T-1d, S20): the settings were not this request's business.
+	updated, err := h.store.UpdateMonitorByPrincipal(r.Context(), mon, auditActor(p), body.Config != nil)
 	if err != nil {
 		if errors.Is(err, store.ErrSecretsFeatureDisabled) {
 			writeError(w, http.StatusNotFound, "feature_disabled")

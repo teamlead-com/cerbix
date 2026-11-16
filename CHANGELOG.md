@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [v0.4.0] - Unreleased
 
+### ⚠️ Read before upgrading
+
+- **PostgreSQL monitors now use TLS as configured.**
+  - **What changed.** Until this release the PostgreSQL probe connected in plaintext whatever `sslmode` said, and `verify-ca`/`verify-full` verified nothing. It now does what the setting says.
+  - **What goes DOWN.**
+    - **`require`, `verify-ca`, `verify-full` against a server without TLS.** This includes every postgres monitor saved since v0.1.5-beta.1 without an explicit choice, which was stored as `require`. The monitor's message reads `the server does not offer TLS, and sslmode is "require": set sslmode to "disable" if plaintext is intended`.
+    - **`verify-ca` and `verify-full` against a certificate the system roots do not trust**, such as a private CA. Under `verify-full`, also a certificate not valid for the monitor's target name or IP. There is no custom-CA setting yet; use `require` (encrypted, not verified) meanwhile.
+    - **Any other value**, which only a v0.1.0 beta or a direct database write could store: DOWN with `bad config: unsupported sslmode`.
+  - **What does not change.** `prefer` or no value (monitors from the v0.1.0 betas) keeps working: TLS when the server offers it, plaintext otherwise.
+  - **Before upgrading,** run the runbook's query 1 ("PostgreSQL monitor TLS"). It lists every postgres monitor with its target, region, `sslmode`, enabled flag and whether a monitoring-as-code file owns it.
+    - Check TLS from each monitor's region.
+    - Fix a file-managed monitor in its file.
+    - Retired monitors are not listed. Disabled ones are, because they go DOWN when re-enabled.
+  - **Rolling upgrades.** Upgrade the core roles (`api`, `scheduler`, `all`) first. Wait at least the pause the runbook's query 4 gives (at most one day; 0 when no monitor lacks the keys), then upgrade `worker` and `agent`.
+    - **Why.** A new executor refuses a job that omits `sslmode` or `tls` on a body-bound carrier, and only a new core states those keys for old monitors.
+    - **If you skip the pause,** those monitors show `probe_error` `unsupported_version` until their old jobs expire. Nothing else is affected.
+- **Alert delivery and pull agents follow no redirect.**
+  - **Channels and webhooks.** A webhook, Slack or Telegram channel, or an org webhook, whose URL answers a redirect now fails with `non-2xx status 30x`; it is retried and dead-lettered. Set the URL to the redirect's `Location`. To check a URL beforehand: `curl -sS -o /dev/null -w '%{http_code}' -X POST <url>`.
+  - **Duplicates while one channel fails.** While one channel of a monitor fails, the others receive the same alert again on each retry (up to 10 attempts). That is how any failing channel behaves today: fix the URL or disable the channel.
+  - **Pull agents.** A pull agent whose `--server` URL redirects (for example `http://` behind a proxy that upgrades to `https://`) stops polling until the URL is the one core answers on. Its log says so with the status: `agent_heartbeat_failed`, `agent_test_claim_failed`.
+- **Alert mail: one-line encoded subjects, and mail addresses are checked.**
+  - **Subjects.** The subject of every mail is its first line, at most 200 characters, encoded; the full text is in the body.
+  - **Startup.** An instance whose YAML has `mail.smtp_host` with an empty `mail.from`, or a `mail.from` such as `Cerbix <alerts@example.com>`, will not start after the upgrade. The error names `mail.from`.
+    - Today the first case silently runs with mail off, and the second fails every send at the server.
+    - **Fix:** set `mail.from` to a bare address (`alerts@example.com`), or remove the `mail` block if mail is configured in Settings → Mail.
+    - This applies even where Settings → Mail is saved and the YAML block is no longer used.
+  - **Addresses.** They must be single bare ASCII addresses of at most 254 characters, and an email channel must name at least one recipient. The subscribe form, the email channel form and Settings → Mail answer 400 to any other. Addresses already stored are not changed.
+  - **Before upgrading,** run the runbook's query 2. It lists subscribers, email-channel `from`/`to` elements and the Settings → Mail `from` that will be refused. Fix them where they live:
+    - **Subscriber:** delete it from the status page's subscriber list (`DELETE /api/v1/status-pages/{pageID}/subscribers/{subscriberID}`); the person subscribes again with a valid address.
+    - **Email channel:** edit the channel.
+    - **Instance sender:** Settings → Mail.
+- **Delivery failures no longer quote channel URLs.**
+  - **What remains from before the upgrade.** Log lines and outbox `last_error` text written before the upgrade may hold channel URLs and Telegram bot tokens. Run the runbook's query 3 once after the upgrade to blank the stored text.
+  - **Rotate** any token whose logs left your control.
+
 ### 🔒 Security
 
 - **A bearer JWT no longer signs in as a person.** An OIDC token that another application obtained for a user was accepted on the API's bearer path as that user, with their memberships. The JWT bearer path now accepts only client-credentials tokens of the clients you list under the new **Machine clients** OIDC setting (Settings → Authentication, or `oidc.machine_clients` in the YAML). Tokens carrying a user-session marker (`nonce`, `sid`, or an Okta `cid` other than `sub`) are refused, and a token never authenticates a person's account. Users now have a kind, `human` or `machine`, shown as a badge in the member lists. A machine cannot be a global admin. If a person signs in to an identity a machine token created, that identity becomes theirs and everything granted to the machine is removed and audited (D-0276).
@@ -27,8 +62,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **Probes no longer read without limit from the target.** The SSH, Redis and WebSocket probes read at most 4 KiB (16 KiB for the WebSocket handshake), the PromQL probe 1 MiB of the answer, and the PostgreSQL and MySQL probes 1 MiB per connection, and then report the target as down; an SSH banner counts only as a complete line, instead of buffering whatever a server sends until the timeout. The HTTP server now drops a client that takes longer than 5 seconds to send its headers and closes keep-alive connections after 60 seconds idle; live updates and pull agents are not affected.
 - **`/metrics` and `/readyz` can leave the public port.** The new `server.ops_listen` setting serves them on a second address; the application port then answers them 404, and `/healthz` stays on both. The production example and compose file use it, on the host's loopback (`CERBIX_OPS_BIND`, port 9091). `/readyz` now answers with a reason code instead of internal error text, and counts the message broker: an `api`, `scheduler` or `worker` that has lost RabbitMQ answers 503 `broker_unreachable`, and `cerbix_ready` agrees with `/readyz` in every state.
 
+- **PostgreSQL monitors encrypt and verify as `sslmode` says, and nothing outside the monitor reaches the connection.** The probe now asks for TLS under `require`, `verify-ca`, `verify-full` and `prefer`, verifies the certificate under `verify-*`, and builds its connection from the monitor alone: no `PG*` environment variable, `~/.pgpass`, service file or client certificate of the prober's user changes where, how or as whom it connects, and an `sslmode` outside the list is refused before any connection (D-0280).
+- **A credentialed job can no longer be downgraded in transit.** Removing `sslmode` or `tls` from a sealed postgres, mysql, redis or RabbitMQ-management job kept its envelope valid and made the probe send the credential in plaintext. Such a job is now refused, as `unsupported_version`, without affecting the executor's readiness.
+- **Delivery never follows a redirect**, so a receiving endpoint can no longer forward an incident with its signature to another host, collect the channel URL from `Referer`, or have a 301/302/303 counted as delivered. The pull agent's token no longer reaches a redirect to another port or scheme on the same host.
+- **A failed delivery names a reason, never its URL.** Telegram bot tokens, Slack webhook paths and tokened webhook URLs no longer appear in the outbox's `last_error`, the log or the dead-letter list.
+- **A name or title can no longer add headers to mail.** A monitor, service or project name, an incident title (including an Alertmanager `summary`) or a status-page title with a line break could add headers to, or replace the body of, mail sent from your instance's sender. Every mail now has a fixed header set and a one-line, encoded subject.
 ### 🩹 Fixed
 
+- **Synthetic monitors can be paused and resumed again.** Pause/Resume, and any edit that did not resend the scenario, answered `synthetic: config.scenario is required`.
+- **Pausing or renaming a monitor no longer rewrites its stored settings.** A partial edit used to re-validate and rewrite the stored config: a PostgreSQL monitor from the v0.1.0 betas was silently switched to `sslmode: require`, or the edit failed with an internal error when it held `prefer`. With the secret inventory switched off, a monitor that uses an inventory secret still cannot be edited at all, as before.
+- **SLA report and other multi-line alert mail has a one-line subject.** The whole report used to be the subject.
 - **The production example config starts again.** `docker/config.prod.yaml` mentioned `${VAR}` in a comment, and because the config loader expands variables everywhere in the file, comments included, startup failed with `undefined environment variable(s): VAR`. The comment is now escaped. `docker/config.example.yaml` had the same comment (`${ENV_VAR}`), so `cerbix serve --config docker/config.example.yaml` failed the same way; it is fixed too.
 - **The new-monitor form no longer resets a timeout or interval you typed.** The instance's monitor defaults arrive a moment after the form opens; when they arrived after you had typed, they replaced your values. They now fill only the fields you have not changed.
 

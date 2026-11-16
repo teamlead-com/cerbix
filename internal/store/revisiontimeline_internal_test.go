@@ -155,9 +155,10 @@ func TestEveryRevisionFenceWritesItsTimelineRow(t *testing.T) {
 // ledger's assumptions survive it.
 func TestTheRevisionFenceSitesAreTheFourWeKnowAbout(t *testing.T) {
 	// Enumerated from the tree, not from memory: this guard caught its author guessing all four
-	// names wrong on its first run. `updateMonitorTxPrepared` is the prepared variant, which is
-	// where the fence actually lives.
-	want := []string{"ReactivateMonitor", "RetireMonitor", "fenceSecretMonitors", "updateMonitorTxPrepared"}
+	// names wrong on its first run. `updateMonitorTxRow` is where the fence lives: the row write that
+	// both updateMonitorTxPrepared and updateMonitorTxKeepingConfig (an update without a submitted
+	// config, sec-hardening-3 S20) go through — still four sites, and still one writing its timeline row.
+	want := []string{"ReactivateMonitor", "RetireMonitor", "fenceSecretMonitors", "updateMonitorTxRow"}
 	got := fenceSites(parseStorePackage(t))
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("revision-fence sites changed:\n  got  %v\n  want %v\n"+
@@ -365,8 +366,9 @@ func TestASecretRotationRecordsAGenerationForEveryAffectedMonitor(t *testing.T) 
 		t.Fatalf("cipher: %v", err)
 	}
 	st.WithCipher(cipher)
-	// FR-020's persistence-boundary gate: `secrets.enabled: false` means nothing else changes,
-	// so the inventory refuses even to be read. The rotation fence lives behind it.
+	// FR-020's persistence-boundary gate: with `secrets.enabled: false` the inventory refuses to be
+	// written and a monitor's references to be resolved (reading it for dispatch is unchanged, because
+	// "nothing else changes"). The rotation fence lives behind it.
 	st.WithSecretsEnabled(true)
 	proj := seedTimelineProject(t, st, ctx)
 	actor := SecretActor{ActorUserID: ""}

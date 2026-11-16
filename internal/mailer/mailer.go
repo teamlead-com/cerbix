@@ -246,12 +246,11 @@ func (m *Mailer) SendContext(ctx context.Context, to, subject, body string) erro
 	if s.Username != "" {
 		auth = smtp.PlainAuth("", s.Username, s.Password, s.Host)
 	}
-	msg := "From: " + s.From + "\r\n" +
-		"To: " + to + "\r\n" +
-		"Subject: " + subject + "\r\n" +
-		"MIME-Version: 1.0\r\n" +
-		"Content-Type: text/plain; charset=UTF-8\r\n" +
-		"\r\n" + body + "\r\n"
-	return sendMailFunc(ctx, fmt.Sprintf("%s:%d", s.Host, port), auth, s.From,
-		[]string{to}, []byte(msg))
+	// One builder for every mail (sec-hardening-3 T-3, S18): it refuses an address it cannot send
+	// before any connection, and writes a one-line, encoded Subject that no title can extend.
+	msg, err := BuildMessage(s.From, []string{to}, subject, body)
+	if err != nil {
+		return err
+	}
+	return sendMailFunc(ctx, fmt.Sprintf("%s:%d", s.Host, port), auth, s.From, []string{to}, msg)
 }

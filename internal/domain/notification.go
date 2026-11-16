@@ -126,6 +126,27 @@ func (c NotificationChannel) Validate() error {
 		if strings.TrimSpace(c.Config["to"]) == "" || strings.TrimSpace(c.Config["smtp_host"]) == "" || strings.TrimSpace(c.Config["from"]) == "" {
 			return fmt.Errorf("notification channel: email requires config.to, config.smtp_host and config.from")
 		}
+		// The address rule of every mail cerbix sends (sec-hardening-3 S18), on the values exactly as
+		// the channel sender sends them: trimmed. The error names the field and position, never the value.
+		if !ValidMailAddress(strings.TrimSpace(c.Config["from"])) {
+			return fmt.Errorf("notification channel: email config.from must be a single bare address (e.g. alerts@example.com)")
+		}
+		position := 0
+		for _, element := range strings.Split(c.Config["to"], ",") {
+			element = strings.TrimSpace(element)
+			if element == "" {
+				continue
+			}
+			position++
+			if !ValidMailAddress(element) {
+				return fmt.Errorf("notification channel: email config.to address %d must be a single bare address (e.g. ops@example.com)", position)
+			}
+		}
+		// A `to` of nothing but commas and spaces names no recipient: refused like an empty one, rather
+		// than accepted to fail every send with "no recipients" (code review of sec-hardening-3, P3-1).
+		if position == 0 {
+			return fmt.Errorf("notification channel: email requires config.to, config.smtp_host and config.from")
+		}
 	}
 	return nil
 }

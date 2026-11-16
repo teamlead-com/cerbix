@@ -201,8 +201,10 @@ secrets:
 
 # Outbound email for status-page subscribers (confirmation + incident emails) and
 # self-service password reset for local accounts (the reset link uses
-# public_base_url + /reset). Optional: leave smtp_host/from empty to disable both.
-# When enabled, public_base_url is required (it builds confirm/unsubscribe/reset links).
+# public_base_url + /reset). Optional: an empty smtp_host turns mail off. Once smtp_host is
+# set, from is required and must be a bare address (alerts@example.com, no display name), or
+# cerbix refuses to start; public_base_url is then required too (it builds confirm/unsubscribe/
+# reset links). Settings → Mail overrides this block after its first save.
 mail:
   smtp_host: ""           # e.g. smtp.example.com — an INTERNAL host (mail.internal, 10.x)
                           # needs notification_egress.allow_private_ips: true (see above)

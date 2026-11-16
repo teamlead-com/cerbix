@@ -66,7 +66,7 @@ func TestAMonitorWriteLeavesOneAuditRowInItsTransaction(t *testing.T) {
 	// Pause it: the update names the flip, taken from the row it locked, not from the caller's claim.
 	paused := created
 	paused.Enabled = false
-	if _, err := st.UpdateMonitorByPrincipal(ctx, paused, tokenActor); err != nil {
+	if _, err := st.UpdateMonitorByPrincipal(ctx, paused, tokenActor, true); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	rows = monitorAuditRows(t, st, ctx, orgID)
@@ -79,7 +79,7 @@ func TestAMonitorWriteLeavesOneAuditRowInItsTransaction(t *testing.T) {
 	// An update that does not touch `enabled` names no flip.
 	renamed := paused
 	renamed.Name = "audited-http-renamed"
-	if _, err := st.UpdateMonitorByPrincipal(ctx, renamed, tokenActor); err != nil {
+	if _, err := st.UpdateMonitorByPrincipal(ctx, renamed, tokenActor, true); err != nil {
 		t.Fatalf("update 2: %v", err)
 	}
 	rows = monitorAuditRows(t, st, ctx, orgID)
@@ -145,7 +145,7 @@ func TestAMonitorAuditTargetNamesTheDocumentAndNotItsContents(t *testing.T) {
 		t.Fatalf("the acknowledged cleanup is not in the trail: %q", rows[1].Target)
 	}
 	// The clause follows the DOCUMENT: an update that keeps it keeps the clause.
-	if _, err := st.UpdateMonitorByPrincipal(ctx, createdCanary, tokenActor); err != nil {
+	if _, err := st.UpdateMonitorByPrincipal(ctx, createdCanary, tokenActor, true); err != nil {
 		t.Fatalf("update canary: %v", err)
 	}
 	rows = monitorAuditRows(t, st, ctx, orgID)
@@ -178,7 +178,7 @@ func TestAZeroValuedActorRefusesAMonitorWriteBeforeAnyStatement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.UpdateMonitorByPrincipal(ctx, seeded, AuditActor{}); err == nil {
+	if _, err := st.UpdateMonitorByPrincipal(ctx, seeded, AuditActor{}, true); err == nil {
 		t.Fatal("update accepted a zero-valued actor")
 	}
 	if err := st.DeleteMonitorByPrincipal(ctx, seeded.ID, AuditActor{}); err == nil {
@@ -307,7 +307,7 @@ func TestTheUpdateAuditNamesTheStoredSlug(t *testing.T) {
 	edit := created
 	edit.Slug = "" // the caller does not repeat the slug
 	edit.Name = "renamed"
-	if _, err := st.UpdateMonitorByPrincipal(ctx, edit, tokenActor); err != nil {
+	if _, err := st.UpdateMonitorByPrincipal(ctx, edit, tokenActor, true); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	rows := monitorAuditRows(t, st, ctx, orgID)

@@ -252,7 +252,7 @@ door with no monitor or service anchor, enqueues only `incident_event` (webhooks
 mail), and the escalation queries select `source = 'auto'` (`internal/store/escalation.go`). FR-041
 does not change that.
 
-### Author's calls (open at review)
+### Author's calls (approved with revision 5)
 
 **D12 — a user's phone reaches an on-call schedule through a USER-BOUND CHANNEL. AUTHOR'S CALL.**
 `OnCallSchedule.Participants` are **channel ids**, and overrides name a `channel_id`

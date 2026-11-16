@@ -488,3 +488,11 @@ DOWN → delivery row → inbound ACK → incident acknowledged.
 - D17: should an escalation step for a NON-critical incident break quiet hours? (Proposed: yes — the
   ladder is opt-in per service/monitor, so a ladder is already an owner's statement that it should.)
 - §4.4: transliteration vs. accepting UCS-2 for names in non-Latin scripts.
+- D17 / §6.4 against FR-042's default mapping (raised by the first external review of
+  [`func-incident-impact.md`](func-incident-impact.md), 2026-11-16; not decided there): FR-042 D6
+  (OWNER) opens an incident for service state `unknown` with impact `none`. A service that set
+  `page_on_unknown` — "tell me when you cannot see it" — therefore does not ring during quiet hours
+  unless it has an escalation policy, and grading `unknown` `critical` to get the call would publish
+  "Critical impact" for a loss of visibility. Options: say that the night call for `unknown` is
+  obtained through an escalation policy; or let quiet hours treat a paged `unknown` as breaking
+  through regardless of impact. FR-042's default is not open.

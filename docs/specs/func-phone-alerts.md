@@ -1,6 +1,7 @@
 # func-phone-alerts — an alert that reaches a person: SMS and voice calls (FR-041 / NFR-034)
 
-> **STATUS: revision 5 — DRAFT, not approved.** Revision 5 (2026-11-17) answers the third external
+> **STATUS: revision 5 — DRAFT, awaiting the owner's approval.** The confirming review pass
+> (2026-11-17, at `23184bf`) is APPROVED with no findings (§14). Revision 5 (2026-11-17) answers the third external
 > review, of revision 4 (CHANGES REQUIRED, P0 0 / P1 3 / P2 4 / P3 1 — dispositions in §14). No
 > decision changed; the
 > corrections are local: D32 no longer reads a payload field that is never set and closes the race
@@ -467,7 +468,8 @@ phone path may depend on winning that race:
   - the **reservation** of a monitor-DOWN delivery (D33) takes the lock, looks for the monitor's
     open auto-incident, inserts the row with that `incident_id` or with NULL, and commits. The row
     also stores `monitor_seq`, the `Seq` its event carries;
-  - the transaction that **opens** a monitor's auto-incident takes the lock, inserts the incident,
+  - the transaction that **opens** a monitor's auto-incident — and only that one: not a manual
+    incident, not an Alertmanager one, not a service's — takes the lock, inserts the incident,
     and sets `incident_id` on that monitor's rows that have none, are of the monitor-DOWN alert
     kind, and whose `monitor_seq` equals the monitor's current `state_sequence`.
 
@@ -1465,3 +1467,14 @@ checked by the author against `651ee92`.
 | P2-3 — "has a ladder" for a service; "Press 2" offered without one | **Confirmed** (`AdvanceEscalations` also requires the policy still attached and `owns_paging`). §5.3, §4.4 |
 | P2-4 — which quota an inbound reply counts against under a project override | **Accepted.** The scope of the route key. §6.1 |
 | P3-1 — part marks in §11; D36's claim about other settings blocks | **Fixed.** |
+
+**Confirming review pass of revision 5 (2026-11-17, against `main` at `23184bf`): APPROVED,
+P0 0 / P1 0 / P2 0 / P3 0.** All eight findings of the third pass closed. The two places where
+revision 5 departed from the third pass's proposals were checked against the code and agreed with:
+the advisory lock with `monitor_seq` (no deadlock with the check-result transaction, which takes
+only the monitor's row; `state_sequence` moves only on a transition that ends the outage, and a
+row left without an incident by such a transition gets no voice retry and has its code closed by
+the monitor-wide rule of §5.2), and no retry for a `ref` collision (the two inserts into
+`incidents` have four callers, each with a retry above it; a failed evaluator batch rolls back
+whole and is recomputed on the next pass). One note for the builder, now in D32: the lock and the
+attachment belong to a monitor's auto-incident only.

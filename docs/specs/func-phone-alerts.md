@@ -1,6 +1,8 @@
 # func-phone-alerts — an alert that reaches a person: SMS and voice calls (FR-041 / NFR-034)
 
-> **STATUS: revision 5 — DRAFT, awaiting the owner's approval.** The confirming review pass
+> **STATUS: revision 5 — APPROVED by the owner on 2026-11-17; not implemented.** The approval
+> covers the author's calls as well (D12, D14–D16, D18–D21, D31–D36, the snooze model). Implementation
+> follows FR-042 and starts with the mock of FR-041a. The confirming review pass
 > (2026-11-17, at `23184bf`) is APPROVED with no findings (§14). Revision 5 (2026-11-17) answers the third external
 > review, of revision 4 (CHANGES REQUIRED, P0 0 / P1 3 / P2 4 / P3 1 — dispositions in §14). No
 > decision changed; the
@@ -33,8 +35,7 @@
 > and five code contradictions, folded into revision 2 as D15–D21, §4.5, §5.1, §5.3, §7 and
 > P15–P18. Written 2026-11-13 from the owner's answers to twelve design questions (recorded in §3
 > as OWNER decisions). Decisions the author took without an owner answer are marked **AUTHOR'S
-> CALL** and are open to change at review. Nothing here is implementable until the owner approves a
-> revision, and the SPA surfaces in §9 need an approved mock before any frontend code (CLAUDE.md,
+> CALL**; they were open to change at review and are approved with this revision. The SPA surfaces in §9 need an approved mock before any frontend code (CLAUDE.md,
 > spec-before-code).
 >
 > Invariants are numbered **within this document** (P1, P2, …), so they never collide with FR-021's

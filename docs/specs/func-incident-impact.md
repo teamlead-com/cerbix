@@ -1,6 +1,7 @@
 # func-incident-impact — an incident's impact is declared by its Service, derived by the machine, and only rises (FR-042 / NFR-035)
 
-> **STATUS: revision 4 — DRAFT, not approved.** Revision 4 (2026-11-16) answers the second external
+> **STATUS: revision 4 — DRAFT, reviewed (APPROVED by the confirming pass, 2026-11-16), awaiting the
+> owner's approval.** Revision 4 (2026-11-16) answers the second external
 > review (CHANGES REQUIRED, P0 0 / P1 3 / P2 2 / P3 2, all in text revision 3 added — §11): the rise
 > step looks before it locks and its concurrency is described as `REPEATABLE READ` actually behaves
 > (§4.3); the system door takes only monitor auto-incidents and validation is reconciled with an
@@ -358,7 +359,7 @@ is two rises. A re-evaluation of the same state stops at step 0 and writes nothi
 
 **Concurrency, as the evaluator's isolation level makes it.** The evaluator runs one
 `REPEATABLE READ` transaction per slice of up to 50 services (`beginAlertSnapshot`,
-`serviceAlertSliceLimit`, `internal/store/servicealerteval.go`). In that level a `FOR UPDATE` that
+`ServiceAlertSliceCap`, `internal/store/servicealerteval.go`). In that level a `FOR UPDATE` that
 waited for another transaction's committed change to the row does **not** read the new version: it
 fails with SQLSTATE 40001. The leader does not retry it — `session.EvaluateServiceAlerts` returns
 the error, the scheduler logs `service_alert_eval_failed`, counts an arm error and evaluates again
@@ -434,7 +435,7 @@ field:
 - **The write** — one transaction: `SELECT … FROM projects WHERE id = $1 FOR UPDATE` for the slug
   and the stored value, then, only when the value differs, `UPDATE projects SET
   default_incident_impact = $2, updated_at = now()` — `projects` has no `updated_at` trigger, the
-  statement sets it, as the SLA-target write does (`internal/store/sla.go`). `domain.Project` and
+  statement sets it, as `SetProjectSLAReport` does (`internal/store/sla.go`). `domain.Project` and
   the store's project column list gain the field, which is what puts it in every response above.
 - **No-op** — an empty object, or the value already stored: 200 with the project, no write, no
   `updated_at` change, no audit row.
@@ -537,7 +538,7 @@ doing so: §4.5 requires every non-rise mail to stay byte-identical, and a feed 
 `internal/api/statuspagecache.go`) and computes worst impact in `overallStatusPresentation`; a rise
 needs nothing more there. The feeds (`internal/api/handlers_feed.go`) print `status · impact` from
 the incident row and take their `<updated>` from `updated_at`, so a rise shows up because §4.3
-step 4 moves it.
+step 3 moves it.
 
 **Webhooks.** `incident.updated` with the additive `impact_raised`; the `incident` object carries
 the new impact and, by D15, no basis.
@@ -614,7 +615,7 @@ tables — and are covered in both modes by the ordinary suite (`make race-both`
 | Domain | mapping validation; resolution of omitted keys per door (§4.1); equality of `NULL` and explicit defaults; the basis shapes | I1, I14 |
 | Store — open | per state × mapping; basis shape for each of the four creating paths, and the refusal of a create with no basis source; the opening note names the state; the project default read in the creating transaction against a concurrent project PATCH; the system door refuses a supplied impact, a missing monitor anchor and another source; an empty impact is refused on a manual and on an Alertmanager incident | I1, I5, I14 |
 | Store — rise | degraded→down; down→degraded (no fall); unknown→down; **two rises in one incident** (unknown→degraded→down: two notes, two events); repeated same state (neither); degraded→down while the onset is WITHHELD by the arming check; NULL basis; a basis whose source is not `service_mapping`; no open incident | I2, I6 |
-| Store — rise, clock and lock | (a) the step called directly in a `READ COMMITTED` transaction behind a manual writer that **commits** a status change (the shape of `TestAServiceIncidentResolvesAfterTheWaitItActuallyDid`): `updated_at`, note `created_at` and the outbox row are after the wait and equal, and the note's status is the one the writer left; (b) the same interleave through `evaluateServiceAlertsOn` (`REPEATABLE READ`): the pass fails with 40001 and writes nothing, the next pass raises and its note carries the writer's status; (c) an evaluation with nothing to raise, while another transaction holds the incident row locked, completes without waiting | I12 |
+| Store — rise, clock and lock | (a) the step called directly in a `READ COMMITTED` transaction behind a manual writer that **commits** a status change (the shape of `TestAServiceIncidentResolvesAfterTheWaitItActuallyDid`): `updated_at`, note `created_at` and the outbox row are after the wait and equal, and the note's status is the one the writer left; (b) the same interleave through `evaluateServiceAlertsOn` (`REPEATABLE READ`): the pass fails with 40001 and writes nothing, the next pass raises and its note carries the writer's status; (c) on the incident (b) has just raised, the next evaluation of the same state, while another transaction holds the incident row locked, completes without waiting and leaves the raised impact — run on a raised incident so that it cannot pass before the code exists | I12 |
 | Store — frozen mapping | mapping edited while an incident is open, then a worse state: the rise uses the frozen mapping | I4 |
 | Store — I10 | count revisions, epochs and `alert_config_generation` around a mapping write | I10 |
 | Store — never raised | one service goes from degraded to down with three incidents open in its project — its own auto-incident, a manual one and an Alertmanager one: the service incident rises, the other two keep impact and timeline. The rise in the same test is what makes it fail before the code exists | I7 |
@@ -722,3 +723,13 @@ that §8 is enough for a mock. Every finding was checked against the code on `ma
 | R3-P2-2 — the basis read is not project-scoped at the store; the two null states are not encoded; the CHECK is open | **Accepted.** §4.6 (signature and the three encodings), §5 (closed CHECK) |
 | R3-P3-1 — I13's "no surface" covers mail and feeds, which print the raw word and must | **Fixed.** I13 says SPA; §4.6 says why mail and feeds stay |
 | R3-P3-2 — the never-raised test is green before the code exists | **Fixed.** §7: a service incident rises in the same test |
+
+**Confirming pass on revision 4 (2026-11-16, at `7e64556`): APPROVED, P0 0 / P1 0 / P2 0 / P3 4.**
+All seven findings of the second pass closed. It checked that the unlocked read of §4.3 step 0
+cannot miss a rise for good — only until the next tick — and that the three production callers of
+the two creating doors are the only ones. The four editorial remarks are applied in place, without
+a new revision number: the slice constant's name (`ServiceAlertSliceCap`), the function that sets
+`projects.updated_at` (`SetProjectSLAReport`, not the SLA-target write), a step number in §4.6 left
+over from the renumbering, and case (c) of the clock test, which now runs on a raised incident.
+One practical note from the pass, for the builder: `CreateIncidentByPrincipal` keeps passing
+`ServiceID` through — a manual incident anchored to a service is a fixture that moves there.

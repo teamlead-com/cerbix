@@ -44,7 +44,7 @@ func TestChannelMailCannotAddAHeader(t *testing.T) {
 	s := captureChannelMail(t)
 	name := "x\r\nBcc: victim@evil.example\r\nContent-Type: text/html\r\n\r\n<p>forged</p>"
 	d := New(&fakeStore{channels: []domain.NotificationChannel{emailChannel("cerbix@example.com", "ops@example.com")}}, nil)
-	if err := d.Deliver(context.Background(), domain.Monitor{ID: "m1", Name: name}, false); err != nil {
+	if err := d.Deliver(context.Background(), domain.Monitor{ID: "m1", Name: name}, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	m, err := mail.ReadMessage(bytes.NewReader(s.msg))
@@ -89,7 +89,7 @@ func TestChannelMailRefusesAnAddressItCannotSend(t *testing.T) {
 					wantField = "from"
 				}
 				err := New(&fakeStore{channels: []domain.NotificationChannel{ch}}, nil).
-					Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false)
+					Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false, nil)
 				if err == nil {
 					t.Fatalf("%s %q was accepted", field, value)
 				}
@@ -105,7 +105,7 @@ func TestChannelMailRefusesAnAddressItCannotSend(t *testing.T) {
 	t.Run("from with surrounding spaces", func(t *testing.T) {
 		s := captureChannelMail(t)
 		err := New(&fakeStore{channels: []domain.NotificationChannel{emailChannel("  ops@example.com  ", "a@example.com")}}, nil).
-			Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false)
+			Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false, nil)
 		if err != nil || !s.called {
 			t.Fatalf("err %v, sent %v; want sent", err, s.called)
 		}

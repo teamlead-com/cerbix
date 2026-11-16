@@ -11,7 +11,8 @@ func TestSearch(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "api-gateway", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "api-gateway", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
 	inc, _ := st.CreateIncidentBySystem(ctx, domain.Incident{

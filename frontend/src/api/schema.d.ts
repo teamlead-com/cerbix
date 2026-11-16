@@ -8699,12 +8699,21 @@ export interface components {
             retries?: number;
             /** @description Consecutive failed checks before "down" (confirmations); default 1. */
             failure_threshold?: number;
+            /** @description Consecutive successful checks a "down" monitor needs before it is "up" again (FR-043). 1 = the first success recovers, the behaviour before this field existed. Exactly 1 for push and composite monitors. A "pending" monitor becomes "up" on its first success whatever the value. */
+            recovery_threshold?: number;
             /** @description Accelerated probe interval while confirming a failure (first fail → verdict). 0 = off; clamped to [5, interval]; effective with failure_threshold > 1. */
             confirm_interval_seconds?: number;
             /** @description Parent monitors (same project). While any transitive parent is down, alerts for this monitor are suppressed; data keeps recording. Must stay acyclic. */
             depends_on?: string[];
             /** @description Live confirmation counter ("confirming N/M" when > 0 and status is up). */
             readonly consecutive_failures?: number;
+            /** @description Live recovery counter ("recovering N/M" when > 0; the status stays down until it reaches recovery_threshold). 0 outside a run. N may exceed M after the threshold was lowered during a run. */
+            readonly consecutive_successes?: number;
+            /**
+             * Format: date-time
+             * @description When the first success of the current recovery run was recorded; null outside a run (set exactly when consecutive_successes > 0).
+             */
+            readonly recovery_started_at?: string | null;
             /** @description Re-send the down alert every N seconds while down (0 = off). */
             renotify_seconds?: number;
             /** @description Push monitors: extra tolerance beyond the interval before "down". */
@@ -8863,6 +8872,8 @@ export interface components {
              * @default 1
              */
             failure_threshold: number;
+            /** @description Consecutive successful checks before a "down" monitor is "up" again. Omitted means 1; an explicit value outside 1..10, 0 included, is a 400 and is never clamped. Push and composite monitors take exactly 1 (a larger value is a 400). */
+            recovery_threshold?: number;
             /**
              * @description Faster probes while confirming a failure. 0 = off; clamped to [5, interval].
              * @default 10
@@ -8918,6 +8929,8 @@ export interface components {
             timeout_seconds?: number;
             retries?: number;
             failure_threshold?: number;
+            /** @description Omitted leaves the stored value unchanged. The rules of CreateMonitor.recovery_threshold; raising a push or composite monitor above 1 is a 400. A change does not reset a recovery run in progress: the next success is compared against the new value. */
+            recovery_threshold?: number;
             confirm_interval_seconds?: number;
             depends_on?: string[];
             renotify_seconds?: number;

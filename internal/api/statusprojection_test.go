@@ -46,7 +46,7 @@ func TestPublicRenderNeverPublishesUnknownAsHealth(t *testing.T) {
 		Visibility: domain.VisibilityPublic}
 	fs.components["cm"] = domain.Component{ID: "cm", StatusPageID: "spx", OrgID: "o1",
 		Name: "Third-party CDN", Source: domain.ComponentSourceManual}
-	fs.monitors["monp"] = domain.Monitor{ID: "monp", ProjectID: "p1", Name: "new",
+	fs.monitors["monp"] = domain.Monitor{RecoveryThreshold: 1, ID: "monp", ProjectID: "p1", Name: "new",
 		Type: domain.MonitorHTTP, Status: domain.StatusPending, Enabled: true}
 	fs.components["cp"] = domain.Component{ID: "cp", StatusPageID: "spx", OrgID: "o1",
 		Name: "New API", Source: domain.ComponentSourceMonitor, SourceProject: "p1", MonitorID: "monp"}
@@ -115,7 +115,7 @@ func TestPublicRenderIgnoresDormantBindings(t *testing.T) {
 	fs := seededStore()
 	fs.pages["spd"] = domain.StatusPage{ID: "spd", OrgID: "o1", Slug: "d-status", Title: "D",
 		Visibility: domain.VisibilityPublic}
-	fs.monitors["mdown"] = domain.Monitor{ID: "mdown", ProjectID: "p1", Name: "old probe",
+	fs.monitors["mdown"] = domain.Monitor{RecoveryThreshold: 1, ID: "mdown", ProjectID: "p1", Name: "old probe",
 		Type: domain.MonitorHTTP, Status: domain.StatusDown, Enabled: true}
 	// Service ACTIVE, monitor DORMANT — and the dormant monitor is DOWN, so reading the wrong
 	// one is loudly visible instead of a subtle mismatch.
@@ -294,7 +294,7 @@ func TestCompositeLifecycleEndpoints(t *testing.T) {
 	// §15.5 is a COMPOSITE section, so the lifecycle actions target a composite. The previous
 	// version of this test used an HTTP monitor and thereby PINNED surface the phase was never
 	// authorized to add ([314] P1-6).
-	fs.monitors["comp2"] = domain.Monitor{ID: "comp2", ProjectID: "p1", Name: "Edge", Slug: "edge2",
+	fs.monitors["comp2"] = domain.Monitor{RecoveryThreshold: 1, ID: "comp2", ProjectID: "p1", Name: "Edge", Slug: "edge2",
 		Type: domain.MonitorComposite, Enabled: true,
 		Config: map[string]string{"children": "mon1", "mode": "all"}}
 	h := newHandler(fs)
@@ -357,7 +357,7 @@ func TestCompositeLifecycleEndpoints(t *testing.T) {
 // service.
 func TestConvertCompositeEndpointIsIdempotent(t *testing.T) {
 	fs := seededStore()
-	fs.monitors["comp1"] = domain.Monitor{ID: "comp1", ProjectID: "p1", Name: "Edge",
+	fs.monitors["comp1"] = domain.Monitor{RecoveryThreshold: 1, ID: "comp1", ProjectID: "p1", Name: "Edge",
 		Slug: "edge", Type: domain.MonitorComposite, Enabled: true,
 		Config: map[string]string{"children": "mon1", "mode": "all"}}
 	h := newHandler(fs)
@@ -427,7 +427,7 @@ func TestPublicRenderIsBoundedAtTheCeiling(t *testing.T) {
 			continue
 		}
 		mon := fmt.Sprintf("m%03d", i)
-		fs.monitors[mon] = domain.Monitor{ID: mon, ProjectID: project, Name: mon,
+		fs.monitors[mon] = domain.Monitor{RecoveryThreshold: 1, ID: mon, ProjectID: project, Name: mon,
 			Type: domain.MonitorHTTP, Status: domain.StatusUp, Enabled: true}
 		fs.components[id] = domain.Component{ID: id, StatusPageID: "spmax", OrgID: "o1",
 			Name: id, Source: domain.ComponentSourceMonitor, SourceProject: project, MonitorID: mon}

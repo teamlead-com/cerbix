@@ -17,7 +17,8 @@ func TestCreatedMonitorGetsADerivedSlug(t *testing.T) {
 	proj, _ := st.CreateProject(ctx, org.ID, "payments", "Payments")
 
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "Checkout HTTP  /healthz", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "Checkout HTTP  /healthz", Type: domain.MonitorHTTP,
 		Target: "https://checkout.example.com/healthz", IntervalSeconds: 30, Enabled: true,
 	})
 	if err != nil {
@@ -41,7 +42,8 @@ func TestSlugCollisionIsResolvedDeterministically(t *testing.T) {
 
 	mk := func(name string) string {
 		m, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: proj.ID, Name: name, Type: domain.MonitorHTTP,
+			RecoveryThreshold: 1,
+			ProjectID:         proj.ID, Name: name, Type: domain.MonitorHTTP,
 			Target: "https://example.com/", IntervalSeconds: 30, Enabled: true,
 		})
 		if err != nil {
@@ -69,7 +71,8 @@ func TestExplicitSlugIsHonouredAndValidated(t *testing.T) {
 	proj, _ := st.CreateProject(ctx, org.ID, "payments", "Payments")
 
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "Anything", Slug: "checkout-api", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "Anything", Slug: "checkout-api", Type: domain.MonitorHTTP,
 		Target: "https://example.com/", IntervalSeconds: 30, Enabled: true,
 	})
 	if err != nil {
@@ -80,7 +83,8 @@ func TestExplicitSlugIsHonouredAndValidated(t *testing.T) {
 	}
 
 	_, err = st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "Bad", Slug: "Not A Slug", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "Bad", Slug: "Not A Slug", Type: domain.MonitorHTTP,
 		Target: "https://example.com/", IntervalSeconds: 30, Enabled: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "must match") {
@@ -96,7 +100,8 @@ func TestSlugIsImmutable(t *testing.T) {
 	proj, _ := st.CreateProject(ctx, org.ID, "payments", "Payments")
 
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "checkout http", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "checkout http", Type: domain.MonitorHTTP,
 		Target: "https://example.com/", IntervalSeconds: 30, Enabled: true,
 	})
 	if err != nil {
@@ -130,7 +135,8 @@ func TestSlugsAreUniquePerProject(t *testing.T) {
 
 	for _, proj := range []string{a.ID, b.ID} {
 		m, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: proj, Name: "checkout http", Type: domain.MonitorHTTP,
+			RecoveryThreshold: 1,
+			ProjectID:         proj, Name: "checkout http", Type: domain.MonitorHTTP,
 			Target: "https://example.com/", IntervalSeconds: 30, Enabled: true,
 		})
 		if err != nil {
@@ -175,14 +181,16 @@ func TestBackfillPrefersTheProviderSourceUID(t *testing.T) {
 	proj, _ := st.CreateProject(ctx, org.ID, "payments", "Payments")
 
 	uiMon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "UI Created Monitor", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "UI Created Monitor", Type: domain.MonitorHTTP,
 		Target: "https://example.com/", IntervalSeconds: 30, Enabled: true,
 	})
 	if err != nil {
 		t.Fatalf("ui monitor: %v", err)
 	}
 	fileMon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "Display Name Nobody Should Use", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "Display Name Nobody Should Use", Type: domain.MonitorHTTP,
 		Target: "https://example.com/2", IntervalSeconds: 30, Enabled: true,
 	})
 	if err != nil {

@@ -35,7 +35,8 @@ func seedDeclaration(t *testing.T, st *Store, ctx context.Context) declFixture {
 	}
 	mk := func(name string, typ domain.MonitorType, region string) string {
 		m, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: proj.ID, Name: name, Type: typ, Target: "https://" + name + ".example.com/",
+			RecoveryThreshold: 1,
+			ProjectID:         proj.ID, Name: name, Type: typ, Target: "https://" + name + ".example.com/",
 			IntervalSeconds: 30, Region: region, Enabled: true,
 		})
 		if err != nil {
@@ -372,7 +373,8 @@ func TestEpochSnapshotCarriesNoSecretMaterial(t *testing.T) {
 	f := seedDeclaration(t, st, ctx)
 
 	redisMon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: f.projectID, Name: "cache", Type: domain.MonitorRedis,
+		RecoveryThreshold: 1,
+		ProjectID:         f.projectID, Name: "cache", Type: domain.MonitorRedis,
 		Target: "redis://cache:6379", IntervalSeconds: 30, Region: "core", Enabled: true,
 		Config: map[string]string{"password": "hunter2"},
 	})

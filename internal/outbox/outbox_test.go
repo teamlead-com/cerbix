@@ -244,10 +244,13 @@ type fakeNotify struct {
 	text       string
 	projectID  string
 	channelIDs []string
-	called     int
-	err        error
-	resolved   *int
-	delivered  *int
+	// recovery is the snapshot the last Deliver was handed (FR-043 §4.6): the worker must pass the
+	// event's, never one rebuilt from the monitor row.
+	recovery  *domain.RecoverySnapshot
+	called    int
+	err       error
+	resolved  *int
+	delivered *int
 	// captureDeadline records whether the delivery context carried one, and burnBudget spends it —
 	// the two halves of "bounded by the lease" that a test can otherwise only assert about itself.
 	captureDeadline bool
@@ -256,8 +259,8 @@ type fakeNotify struct {
 	burnBudget      bool
 }
 
-func (f *fakeNotify) Deliver(_ context.Context, m domain.Monitor, up bool) error {
-	f.monitor, f.up, f.called = m, up, f.called+1
+func (f *fakeNotify) Deliver(_ context.Context, m domain.Monitor, up bool, recovery *domain.RecoverySnapshot) error {
+	f.monitor, f.up, f.recovery, f.called = m, up, recovery, f.called+1
 	return f.err
 }
 

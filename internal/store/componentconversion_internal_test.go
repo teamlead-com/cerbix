@@ -218,7 +218,8 @@ func TestRetireMonitorEndsLifecycleAndExecution(t *testing.T) {
 	// A COMPOSITE: §15.5 scopes the lifecycle to composites, and the earlier version of this test
 	// used the fixture's HTTP monitor — pinning surface the phase never had ([314] P1-6).
 	comp, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: f.projectID, Name: "Edge", Type: domain.MonitorComposite,
+		RecoveryThreshold: 1,
+		ProjectID:         f.projectID, Name: "Edge", Type: domain.MonitorComposite,
 		IntervalSeconds: 60, Region: domain.DefaultRegion, Enabled: true,
 		Config: map[string]string{"children": f.monitorID, "mode": "all"},
 	})
@@ -313,7 +314,8 @@ func TestSuccessorLinkClearedOnServiceDelete(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := seedProjection(t, st, ctx)
 	comp, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: f.projectID, Name: "Edge", Type: domain.MonitorComposite,
+		RecoveryThreshold: 1,
+		ProjectID:         f.projectID, Name: "Edge", Type: domain.MonitorComposite,
 		IntervalSeconds: 60, Region: domain.DefaultRegion, Enabled: true,
 		Config: map[string]string{"children": f.monitorID, "mode": "all"},
 	})

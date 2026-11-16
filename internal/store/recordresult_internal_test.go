@@ -18,7 +18,8 @@ func TestRecordScheduledResultPipeline(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "r", Type: domain.MonitorTCP, Target: "10.0.0.1:80",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "r", Type: domain.MonitorTCP, Target: "10.0.0.1:80",
 		IntervalSeconds: 60, TimeoutSeconds: 5, FailureThreshold: 1, Enabled: true,
 	})
 	if err != nil {
@@ -113,7 +114,8 @@ func TestRecordScheduledResultRefusesDisabledMonitor(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "disabled-result-org", "Disabled result org")
 	proj, _ := st.CreateProject(ctx, org.ID, "app", "App")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "disabled-result", Type: domain.MonitorTCP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "disabled-result", Type: domain.MonitorTCP,
 		Target: "10.0.0.1:80", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
 	if err != nil {
@@ -148,7 +150,8 @@ func TestRecordPushResult(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "cron", Type: domain.MonitorPush,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "cron", Type: domain.MonitorPush,
 		IntervalSeconds: 3600, FailureThreshold: 1, Enabled: true, PushToken: "cbxp_x",
 	})
 	if err != nil {
@@ -201,7 +204,8 @@ func TestRevisionGate(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "r", Type: domain.MonitorTCP, Target: "10.0.0.1:80",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "r", Type: domain.MonitorTCP, Target: "10.0.0.1:80",
 		IntervalSeconds: 60, TimeoutSeconds: 5, FailureThreshold: 1, Enabled: true,
 	})
 	if err != nil {
@@ -268,7 +272,8 @@ func TestRecordDeadmanResult(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "cron", Type: domain.MonitorPush,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "cron", Type: domain.MonitorPush,
 		IntervalSeconds: 60, FailureThreshold: 1, Enabled: true, PushToken: "cbxp_dm",
 	})
 	if err != nil {

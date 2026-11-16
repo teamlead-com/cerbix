@@ -63,7 +63,9 @@ type WebhookDeliverer interface {
 
 // NotifyDeliverer delivers a monitor transition to the monitor's channels.
 type NotifyDeliverer interface {
-	Deliver(ctx context.Context, monitor domain.Monitor, up bool) error
+	// Deliver sends a transition. recovery is the event's snapshot (FR-043 §4.6), nil when the
+	// event carries none; it adds one sentence to the text and leaves every other field alone.
+	Deliver(ctx context.Context, monitor domain.Monitor, up bool, recovery *domain.RecoverySnapshot) error
 	DeliverText(ctx context.Context, monitor domain.Monitor, text string) error
 	DeliverProjectText(ctx context.Context, projectID, text string) error
 	DeliverChannels(ctx context.Context, channelIDs []string, text string) error
@@ -685,7 +687,7 @@ func (w *Worker) deliver(ctx, settleCtx context.Context, e domain.OutboxEvent) e
 				return nil
 			}
 		}
-		return w.notifs.Deliver(ctx, monitor, mt.Cur == domain.StatusUp)
+		return w.notifs.Deliver(ctx, monitor, mt.Cur == domain.StatusUp, mt.Recovery())
 
 	case domain.TopicSLOBurnAlert:
 		var a domain.SLOBurnAlert

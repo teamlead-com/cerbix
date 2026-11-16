@@ -47,7 +47,8 @@ func seedService(t *testing.T, st *Store, ctx context.Context) (projectID, monit
 		t.Fatalf("project: %v", err)
 	}
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "checkout-http", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "checkout-http", Type: domain.MonitorHTTP,
 		Target: "https://checkout.example.com/healthz", IntervalSeconds: 30, Enabled: true,
 	})
 	if err != nil {

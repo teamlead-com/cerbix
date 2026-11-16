@@ -77,7 +77,7 @@ func TestValidateRabbitMgmtPathPercentEncoding(t *testing.T) {
 
 func TestMonitorValidateRefusesHostileTargets(t *testing.T) {
 	base := func(typ MonitorType, target string, cfg map[string]string) Monitor {
-		return Monitor{ProjectID: "p", Name: "n", Type: typ, Target: target, IntervalSeconds: 60, TimeoutSeconds: 10, Config: cfg}
+		return Monitor{RecoveryThreshold: 1, ProjectID: "p", Name: "n", Type: typ, Target: target, IntervalSeconds: 60, TimeoutSeconds: 10, Config: cfg}
 	}
 	cases := []Monitor{
 		base(MonitorWebSocket, "ws://h/a\r\nX-Evil: 1", nil),
@@ -156,7 +156,7 @@ func TestMonitorValidateHTTPAndPromQLTargets(t *testing.T) {
 		if typ == MonitorPromQL {
 			cfg = map[string]string{"query": "up"}
 		}
-		return Monitor{ProjectID: "p", Name: "n", Type: typ, Target: target, IntervalSeconds: 60, TimeoutSeconds: 10, Config: cfg}
+		return Monitor{RecoveryThreshold: 1, ProjectID: "p", Name: "n", Type: typ, Target: target, IntervalSeconds: 60, TimeoutSeconds: 10, Config: cfg}
 	}
 	for _, m := range []Monitor{
 		base(MonitorHTTP, "http://user:secret@h.example\x7f/"),

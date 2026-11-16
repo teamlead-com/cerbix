@@ -408,7 +408,8 @@ func TestNoMachineWriterAudits(t *testing.T) {
 		org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 		proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 		mon, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://api.example.com/",
+			RecoveryThreshold: 1,
+			ProjectID:         proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://api.example.com/",
 			IntervalSeconds: 30, Region: "core", Enabled: true,
 		})
 		if err != nil {
@@ -485,7 +486,8 @@ func TestNoMachineWriterAudits(t *testing.T) {
 		org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 		proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 		mon, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://api.example.com/",
+			RecoveryThreshold: 1,
+			ProjectID:         proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://api.example.com/",
 			IntervalSeconds: 30, Region: "core", Enabled: true,
 		})
 		if err != nil {
@@ -511,7 +513,8 @@ func TestNoMachineWriterAudits(t *testing.T) {
 		org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 		proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 		mon, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://api.example.com/",
+			RecoveryThreshold: 1,
+			ProjectID:         proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://api.example.com/",
 			IntervalSeconds: 30, Region: "core", Enabled: true,
 		})
 		if err != nil {

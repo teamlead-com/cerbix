@@ -54,7 +54,8 @@ func TestEveryClientValidFormVariantIsValidToTheServer(t *testing.T) {
 				cfg[k] = val
 			}
 			m := Monitor{
-				ProjectID: "p", Name: "canary", Type: MonitorAsyncCanary, Region: "core",
+				RecoveryThreshold: 1,
+				ProjectID:         "p", Name: "canary", Type: MonitorAsyncCanary, Region: "core",
 				IntervalSeconds: fixture.MonitorTimeoutSeconds,
 				TimeoutSeconds:  fixture.MonitorTimeoutSeconds,
 				Enabled:         true, Config: cfg,

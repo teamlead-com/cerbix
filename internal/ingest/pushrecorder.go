@@ -59,6 +59,6 @@ func (p *PushRecorder) Record(ctx context.Context, monitorID string, up bool, ms
 	}
 	if o.Applied && o.Prev != o.Cur {
 		hb := domain.Heartbeat{MonitorID: monitorID, Up: up, Msg: msg, Ts: receivedAt}
-		p.reconciler.Reconcile(ctx, hb, o.Prev, o.Cur, o.Suppressed)
+		p.reconciler.Reconcile(ctx, hb, o.Prev, o.Cur, o.Suppressed, o.Recovery)
 	}
 }

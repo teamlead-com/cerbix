@@ -618,7 +618,8 @@ func TestBothWriteSurfacesStoreTheSameCanonicalDocument(t *testing.T) {
 		cfg[CanarySecretRefKey(binding)] = secret
 	}
 	m := Monitor{
-		Type: MonitorAsyncCanary, IntervalSeconds: 300, TimeoutSeconds: 300,
+		RecoveryThreshold: 1,
+		Type:              MonitorAsyncCanary, IntervalSeconds: 300, TimeoutSeconds: 300,
 		Config: cfg,
 	}
 	m.Normalize()
@@ -637,7 +638,8 @@ func TestBothWriteSurfacesStoreTheSameCanonicalDocument(t *testing.T) {
 func TestNormalizeLeavesAnUnparseableWorkflowForValidateToRefuse(t *testing.T) {
 	const broken = `{"kind":"async_transaction_v1","submit":`
 	m := Monitor{
-		Type: MonitorAsyncCanary, IntervalSeconds: 300, TimeoutSeconds: 300,
+		RecoveryThreshold: 1,
+		Type:              MonitorAsyncCanary, IntervalSeconds: 300, TimeoutSeconds: 300,
 		Config: map[string]string{CanaryWorkflowKey: broken},
 	}
 	m.Normalize()
@@ -676,7 +678,8 @@ func TestABodyNumberSurvivesCanonicalisationExactly(t *testing.T) {
 				`"result":{"max_latency":240,"required_json_fields":["a"],"lifecycle_path":"a"},` +
 				`"cleanup":{"kind":"none","acknowledged":true}}`
 			m := Monitor{
-				ProjectID: "p", Name: "c", Type: MonitorAsyncCanary, Region: "core",
+				RecoveryThreshold: 1,
+				ProjectID:         "p", Name: "c", Type: MonitorAsyncCanary, Region: "core",
 				IntervalSeconds: 300, TimeoutSeconds: 300, Enabled: true,
 				Config: map[string]string{CanaryWorkflowKey: doc},
 			}
@@ -730,7 +733,8 @@ func TestAnAsyncCanaryRefusesARetryCount(t *testing.T) {
 			cfg[CanarySecretRefKey(binding)] = secret
 		}
 		return Monitor{
-			ProjectID: "p", Name: "canary", Type: MonitorAsyncCanary, Region: "core",
+			RecoveryThreshold: 1,
+			ProjectID:         "p", Name: "canary", Type: MonitorAsyncCanary, Region: "core",
 			IntervalSeconds: 300, TimeoutSeconds: 300, Enabled: true, Config: cfg,
 		}
 	}
@@ -762,7 +766,8 @@ func TestAnAsyncCanaryRefusesARetryCount(t *testing.T) {
 	// The rule is TYPE-SCOPED. An ordinary monitor's retry count is legal and common, and writing
 	// this as a general rule would refuse configurations nobody meant it to.
 	other := Monitor{
-		ProjectID: "p", Name: "http", Type: MonitorHTTP, Target: "https://x", Region: "core",
+		RecoveryThreshold: 1,
+		ProjectID:         "p", Name: "http", Type: MonitorHTTP, Target: "https://x", Region: "core",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Retries: 3, Enabled: true,
 	}
 	if err := other.Validate(); err != nil {

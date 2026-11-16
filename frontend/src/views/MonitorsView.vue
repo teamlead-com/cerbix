@@ -4,6 +4,7 @@ import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import StatusPill from "@/components/StatusPill.vue";
+import { confirmingLabel, recoveringLabel, recoveringTooltip } from "@/lib/monitorRun";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 
@@ -54,14 +55,10 @@ function suppressedBy(m: Monitor, visited = new Set<string>()): string | undefin
   return undefined;
 }
 
-// While a failure is being confirmed (up, but fails counted) the pill switches
-// to the degraded style with a live "Confirming N/M…" label.
-function confirmingLabel(m: Monitor): string | undefined {
-  const fails = m.consecutive_failures ?? 0;
-  const threshold = m.failure_threshold ?? 1;
-  if (m.status === "up" && fails > 0 && fails < threshold) return `Confirming ${fails}/${threshold}…`;
-  return undefined;
-}
+// While a failure is being confirmed (up, but fails counted) the pill switches to the degraded style
+// with a "Confirming N/M…" label; while a down monitor's recovery is being confirmed the Down pill
+// stays and a "recovering N/M" chip qualifies it (FR-043 §8). Both rules live in @/lib/monitorRun so
+// this row and the monitor page header cannot drift; both are as of the last load (D13).
 
 // Tag filter (AND: a monitor must carry every selected tag).
 const activeTags = ref<Set<string>>(new Set());
@@ -202,6 +199,7 @@ watch(() => ws.projectId, load);
                   <span class="inline-flex flex-wrap items-center gap-[6px]">
                     <StatusPill :status="confirmingLabel(m) ? 'degraded' : statusOf(m)" :label="confirmingLabel(m)" />
                     <span v-if="m.type === 'composite' && m.config?.mode === 'quorum'" class="inline-flex h-6 items-center rounded-full bg-accent-weak px-[9px] text-[11px] font-medium text-accent" :title="'Down when ≥ ' + m.config?.quorum + ' members report down'">quorum {{ m.config?.quorum }}/{{ (m.config?.children ?? '').split(',').filter(Boolean).length }}</span>
+                    <span v-if="recoveringLabel(m)" class="inline-flex h-6 items-center gap-[5px] whitespace-nowrap rounded-full bg-inset px-[9px] text-[11px] font-medium tabular-nums text-ink-2" :title="recoveringTooltip(m)" data-testid="monitor-recovering">{{ recoveringLabel(m) }}</span>
                     <span v-if="m.status === 'down' && suppressedBy(m)" class="inline-flex h-6 items-center gap-[5px] rounded-full bg-inset px-[9px] text-[11px] font-medium text-ink-2" :title="'Alerts suppressed: depends on ' + suppressedBy(m) + ', which is down'">⏸ suppressed by {{ suppressedBy(m) }}</span>
                   </span>
                 </td>

@@ -17,7 +17,8 @@ func TestCanaryInflightHoldsOneRunPerMonitorAndBoundsTheRegion(t *testing.T) {
 
 	mk := func(name string) string {
 		m, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: proj.ID, Name: name, Type: domain.MonitorHTTP, Target: "https://x",
+			RecoveryThreshold: 1,
+			ProjectID:         proj.ID, Name: name, Type: domain.MonitorHTTP, Target: "https://x",
 			IntervalSeconds: 300, TimeoutSeconds: 60, Enabled: true, Region: "eu",
 		})
 		if err != nil {
@@ -91,7 +92,8 @@ func TestCanaryInflightExpiresSoACrashedExecutorDoesNotParkAMonitor(t *testing.T
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "canary", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "canary", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 300, TimeoutSeconds: 60, Enabled: true, Region: "eu",
 	})
 	if err != nil {
@@ -128,7 +130,8 @@ func TestAStaleCanaryResultCannotReleaseANewerRunsSlot(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "canary", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "canary", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 300, TimeoutSeconds: 60, Enabled: true, Region: "eu",
 	})
 	if err != nil {
@@ -173,7 +176,8 @@ func TestACanaryClaimWithoutARunKeyIsRefused(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "canary", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "canary", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 300, TimeoutSeconds: 60, Enabled: true, Region: "eu",
 	})
 	if err != nil {

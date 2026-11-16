@@ -31,7 +31,8 @@ func TestScenarioIsEncryptedAtRestAndReadPerMode(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "checkout journey", Type: domain.MonitorSynthetic,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "checkout journey", Type: domain.MonitorSynthetic,
 		IntervalSeconds: 60, TimeoutSeconds: 30, Enabled: true,
 		Config: map[string]string{domain.SyntheticScenarioKey: scenarioWithToken},
 	})
@@ -92,7 +93,8 @@ func TestScenarioSurvivesAPartialUpdate(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "journey", Type: domain.MonitorSynthetic,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "journey", Type: domain.MonitorSynthetic,
 		IntervalSeconds: 60, TimeoutSeconds: 30, Enabled: true,
 		Config: map[string]string{domain.SyntheticScenarioKey: scenarioWithToken},
 	})
@@ -124,7 +126,8 @@ func TestScenarioWriteRefusedWithoutAnAtRestKey(t *testing.T) {
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
 	_, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "journey", Type: domain.MonitorSynthetic,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "journey", Type: domain.MonitorSynthetic,
 		IntervalSeconds: 60, TimeoutSeconds: 30, Enabled: true,
 		Config: map[string]string{domain.SyntheticScenarioKey: scenarioWithToken},
 	})
@@ -134,7 +137,8 @@ func TestScenarioWriteRefusedWithoutAnAtRestKey(t *testing.T) {
 
 	// Every other monitor type still writes: the refusal is scoped to what it protects.
 	if _, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "plain", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "plain", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	}); err != nil {
 		t.Fatalf("an ordinary monitor must still be writable on a keyless instance: %v", err)
@@ -221,16 +225,16 @@ func TestScenarioRefsAreContributedBySyntheticMonitorsOnly(t *testing.T) {
 		domain.ScenarioSecretRefKey("login"): "login-token",
 		"password_ref":                       "db-password",
 	}
-	synthetic := monitorRefSettings(domain.Monitor{Type: domain.MonitorSynthetic, Config: cfg})
+	synthetic := monitorRefSettings(domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorSynthetic, Config: cfg})
 	if synthetic[domain.ScenarioSecretRefKey("login")] != "login-token" {
 		t.Fatalf("a synthetic monitor must contribute its binding refs, got %v", synthetic)
 	}
-	http := monitorRefSettings(domain.Monitor{Type: domain.MonitorHTTP, Config: cfg})
+	http := monitorRefSettings(domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorHTTP, Config: cfg})
 	if _, ok := http[domain.ScenarioSecretRefKey("login")]; ok {
 		t.Fatalf("an http monitor must contribute no scenario refs, got %v", http)
 	}
 	// The credentialed half is untouched: postgres still contributes password_ref.
-	pg := monitorRefSettings(domain.Monitor{Type: domain.MonitorPostgres, Config: cfg})
+	pg := monitorRefSettings(domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorPostgres, Config: cfg})
 	if pg["password_ref"] != "db-password" {
 		t.Fatalf("password_ref must still be contributed, got %v", pg)
 	}
@@ -253,7 +257,8 @@ func TestScenarioBindingRidesTheOrdinaryRefPath(t *testing.T) {
 	}
 	scenario := `{"steps":[{"url":"https://api.internal/login","headers":{"authorization":"{{secret:login}}"}}]}`
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: projID, Name: "checkout journey", Type: domain.MonitorSynthetic,
+		RecoveryThreshold: 1,
+		ProjectID:         projID, Name: "checkout journey", Type: domain.MonitorSynthetic,
 		IntervalSeconds: 60, TimeoutSeconds: 30, Enabled: true,
 		Config: map[string]string{
 			domain.SyntheticScenarioKey:          scenario,
@@ -318,7 +323,8 @@ func TestAPreFixNonSyntheticBindingRowBehavesAsDocumented(t *testing.T) {
 		t.Fatalf("create secret: %v", err)
 	}
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: projID, Name: "api", Type: domain.MonitorHTTP, Target: "https://api.internal/health",
+		RecoveryThreshold: 1,
+		ProjectID:         projID, Name: "api", Type: domain.MonitorHTTP, Target: "https://api.internal/health",
 		IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true,
 	})
 	if err != nil {

@@ -150,7 +150,8 @@ func TestReencryptRotatesToPrimary(t *testing.T) {
 	// A monitor with an encrypted config secret (password) and a user TOTP secret —
 	// both were previously MISSED by reencrypt and would break on old-key removal.
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "db", Type: domain.MonitorTCP, Target: "db:5432",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "db", Type: domain.MonitorTCP, Target: "db:5432",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 		Config: map[string]string{"password": "dbpass"},
 	})
@@ -159,7 +160,8 @@ func TestReencryptRotatesToPrimary(t *testing.T) {
 	}
 	// A push monitor whose token is encrypted at rest + blind-indexed for lookup.
 	push, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "cron", Type: domain.MonitorPush,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "cron", Type: domain.MonitorPush,
 		IntervalSeconds: 3600, Enabled: true, PushToken: "cbxp_rotate_me",
 	})
 	if err != nil {
@@ -259,7 +261,8 @@ func TestBackfillPushTokenEnc(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "cron", Type: domain.MonitorPush,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "cron", Type: domain.MonitorPush,
 		IntervalSeconds: 3600, Enabled: true, PushToken: "cbxp_seed",
 	})
 	if err != nil {

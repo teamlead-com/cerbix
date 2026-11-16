@@ -106,7 +106,7 @@ func TestDeliveryErrorNamesNoURL(t *testing.T) {
 			telegramAPI = fs.base
 			for _, ch := range channelsFor(fs.base) {
 				d := New(&fakeStore{channels: []domain.NotificationChannel{ch}}, fs.guard.HTTPClient(5*time.Second))
-				err := d.Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false)
+				err := d.Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false, nil)
 				if err == nil {
 					t.Errorf("%s: delivery to a failing endpoint succeeded", ch.ID)
 					continue
@@ -125,7 +125,7 @@ func TestDeliveryErrorNamesNoURL(t *testing.T) {
 			{ID: "nc-webhook", Type: domain.ChannelWebhook, Enabled: true, Config: map[string]string{"url": "https://hooks.example/" + plantedPath + "\x7f?token=" + plantedQuery}},
 			{ID: "nc-telegram", Type: domain.ChannelTelegram, Enabled: true, Config: map[string]string{"bot_token": plantedBot + "\x7f", "chat_id": "42"}},
 		} {
-			err := New(&fakeStore{channels: []domain.NotificationChannel{ch}}, nil).Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false)
+			err := New(&fakeStore{channels: []domain.NotificationChannel{ch}}, nil).Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false, nil)
 			if err == nil {
 				t.Errorf("%s: a URL with a control byte was sent", ch.ID)
 				continue

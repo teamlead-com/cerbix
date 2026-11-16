@@ -26,7 +26,8 @@ func TestDormantBindingCannotEscapeTenancy(t *testing.T) {
 	org2, _ := st.CreateOrganization(ctx, "other", "Other")
 	proj2, _ := st.CreateProject(ctx, org2.ID, "p2", "P2")
 	alien, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj2.ID, Name: "alien-http", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj2.ID, Name: "alien-http", Type: domain.MonitorHTTP,
 		Target: "https://alien.example.com/", IntervalSeconds: 60, Region: "core", Enabled: true,
 	})
 	if err != nil {

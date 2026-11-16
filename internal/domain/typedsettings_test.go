@@ -8,7 +8,7 @@ import (
 // sec-hardening-2 H-2 fix 3: `tls_skip_verify` is a PLAIN typed setting of the websocket type — no
 // credential schema, so no credential envelope is demanded for every WebSocket monitor.
 func TestPrepareTypedSettingsWebSocket(t *testing.T) {
-	if !HasTypedSettings(MonitorWebSocket) || CredentialedType(MonitorWebSocket) || RequiresExecutionEnvelope(Monitor{Type: MonitorWebSocket, Config: map[string]string{"tls_skip_verify": "true"}}) {
+	if !HasTypedSettings(MonitorWebSocket) || CredentialedType(MonitorWebSocket) || RequiresExecutionEnvelope(Monitor{RecoveryThreshold: 1, Type: MonitorWebSocket, Config: map[string]string{"tls_skip_verify": "true"}}) {
 		t.Fatal("websocket must have plain typed settings, no credential schema, and no envelope")
 	}
 	got, err := PrepareTypedSettings(MonitorWebSocket, map[string]string{"tls_skip_verify": "true"}, SurfaceAPI)
@@ -131,7 +131,7 @@ func TestPrepareTypedSettingsRouting(t *testing.T) {
 // plaintext in a column that Redacted() does not touch.
 func TestMonitorTargetRejectsURLUserinfo(t *testing.T) {
 	base := func(target string) Monitor {
-		return Monitor{ProjectID: "p1", Name: "m", Type: MonitorHTTP, Target: target,
+		return Monitor{RecoveryThreshold: 1, ProjectID: "p1", Name: "m", Type: MonitorHTTP, Target: target,
 			IntervalSeconds: 60, TimeoutSeconds: 5}
 	}
 	// The credential in each fixture is a distinctive literal, so the assertion below tests
@@ -158,8 +158,8 @@ func TestMonitorTargetRejectsURLUserinfo(t *testing.T) {
 	// here is only that url.Parse does not read a userinfo into host:port or a bare host.
 	for name, m := range map[string]Monitor{
 		"plain https":   base("https://prom.example:9090"),
-		"host and port": {ProjectID: "p1", Name: "m", Type: MonitorTCP, Target: "prom.example:9090", IntervalSeconds: 60, TimeoutSeconds: 5},
-		"bare host":     {ProjectID: "p1", Name: "m", Type: MonitorICMP, Target: "prom.example", IntervalSeconds: 60, TimeoutSeconds: 5},
+		"host and port": {RecoveryThreshold: 1, ProjectID: "p1", Name: "m", Type: MonitorTCP, Target: "prom.example:9090", IntervalSeconds: 60, TimeoutSeconds: 5},
+		"bare host":     {RecoveryThreshold: 1, ProjectID: "p1", Name: "m", Type: MonitorICMP, Target: "prom.example", IntervalSeconds: 60, TimeoutSeconds: 5},
 		"path with @":   base("https://prom.example/api/v1/query?query=up@rate"),
 	} {
 		t.Run(name, func(t *testing.T) {

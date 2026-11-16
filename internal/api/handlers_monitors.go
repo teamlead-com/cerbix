@@ -255,6 +255,10 @@ func (h *Handler) testMonitor(w http.ResponseWriter, r *http.Request) {
 		ProjectID: proj.ID, Name: "probe-test", Type: domain.MonitorType(body.Type), Target: body.Target,
 		Method: body.Method, Region: body.Region, IntervalSeconds: interval, TimeoutSeconds: timeout, Retries: 0,
 		Conditions: body.Conditions, Config: body.Config,
+		// Delivery hysteresis is not part of a probe, so the body above does not decode it — a
+		// recovery_threshold here is an unknown field and a 400 (FR-043 §4.5, I16). The monitor
+		// built for the probe still has to pass Validate, which refuses 0.
+		RecoveryThreshold: 1,
 	}
 	m.Normalize()
 	if domain.CredentialedType(m.Type) {
@@ -339,6 +343,7 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds     int               `json:"timeout_seconds"`
 		Retries            *int              `json:"retries"` // nil = instance default; 0 is a real value
 		FailureThreshold   int               `json:"failure_threshold"`
+		RecoveryThreshold  *int              `json:"recovery_threshold"`       // nil = 1; 0 is refused by Validate, not defaulted (FR-043)
 		ConfirmInterval    *int              `json:"confirm_interval_seconds"` // nil = default 10; 0 = off
 		RenotifySeconds    *int              `json:"renotify_seconds"`         // nil = instance default; 0 = never re-notify
 		GraceSeconds       int               `json:"grace_seconds"`
@@ -390,6 +395,14 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 	if body.ConfirmInterval != nil {
 		confirmInterval = *body.ConfirmInterval
 	}
+	// FR-043 §4.5: this decoder is the one place an absent recovery_threshold becomes 1. An explicit
+	// value — 0 included — is copied verbatim, and Validate below refuses it outside 1..10 or above 1
+	// on push and composite (D3, D8). Nothing downstream clamps, and there is no instance default
+	// (D12).
+	recoveryThreshold := 1
+	if body.RecoveryThreshold != nil {
+		recoveryThreshold = *body.RecoveryThreshold
+	}
 	m := domain.Monitor{
 		ProjectID:              proj.ID,
 		Name:                   body.Name,
@@ -401,6 +414,7 @@ func (h *Handler) createMonitor(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds:         body.TimeoutSeconds,
 		Retries:                retries,
 		FailureThreshold:       body.FailureThreshold,
+		RecoveryThreshold:      recoveryThreshold,
 		ConfirmIntervalSeconds: confirmInterval,
 		RenotifySeconds:        renotify,
 		GraceSeconds:           body.GraceSeconds,
@@ -598,6 +612,7 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds     *int               `json:"timeout_seconds"`
 		Retries            *int               `json:"retries"`
 		FailureThreshold   *int               `json:"failure_threshold"`
+		RecoveryThreshold  *int               `json:"recovery_threshold"` // FR-043: omitted = the stored value
 		ConfirmInterval    *int               `json:"confirm_interval_seconds"`
 		RenotifySeconds    *int               `json:"renotify_seconds"`
 		GraceSeconds       *int               `json:"grace_seconds"`
@@ -648,6 +663,12 @@ func (h *Handler) updateMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.FailureThreshold != nil {
 		mon.FailureThreshold = *body.FailureThreshold
+	}
+	// FR-043 §4.5: an omitted recovery_threshold keeps the stored value; an explicit one is copied
+	// verbatim and judged by Validate, so raising an existing push or composite above 1 is a 400 (D8).
+	// The run counter and the status are not touched by a threshold change (D10).
+	if body.RecoveryThreshold != nil {
+		mon.RecoveryThreshold = *body.RecoveryThreshold
 	}
 	if body.ConfirmInterval != nil {
 		mon.ConfirmIntervalSeconds = *body.ConfirmInterval

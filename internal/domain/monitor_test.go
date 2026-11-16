@@ -18,23 +18,23 @@ func TestMonitorTypeValidAndActive(t *testing.T) {
 }
 
 func TestMonitorValidate(t *testing.T) {
-	ok := Monitor{Name: "api", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 10}
+	ok := Monitor{RecoveryThreshold: 1, Name: "api", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 10}
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("valid monitor rejected: %v", err)
 	}
 	// Push needs no target, but its interval is the expected heartbeat window.
-	push := Monitor{Name: "cron", ProjectID: "p", Type: MonitorPush, IntervalSeconds: 300}
+	push := Monitor{RecoveryThreshold: 1, Name: "cron", ProjectID: "p", Type: MonitorPush, IntervalSeconds: 300}
 	if err := push.Validate(); err != nil {
 		t.Fatalf("valid push rejected: %v", err)
 	}
 
 	bad := []Monitor{
-		{ProjectID: "p", Type: MonitorHTTP, Target: "x", IntervalSeconds: 1, TimeoutSeconds: 1},             // no name
-		{Name: "n", Type: MonitorHTTP, Target: "x", IntervalSeconds: 1, TimeoutSeconds: 1},                  // no project
-		{Name: "n", ProjectID: "p", Type: MonitorType("bad"), IntervalSeconds: 1, TimeoutSeconds: 1},        // bad type
-		{Name: "n", ProjectID: "p", Type: MonitorHTTP, IntervalSeconds: 1, TimeoutSeconds: 1},               // no target
-		{Name: "n", ProjectID: "p", Type: MonitorTCP, Target: "x:1", IntervalSeconds: 0, TimeoutSeconds: 1}, // interval 0
-		{Name: "n", ProjectID: "p", Type: MonitorTCP, Target: "x:1", IntervalSeconds: 1, TimeoutSeconds: 0}, // timeout 0
+		{RecoveryThreshold: 1, ProjectID: "p", Type: MonitorHTTP, Target: "x", IntervalSeconds: 1, TimeoutSeconds: 1},             // no name
+		{RecoveryThreshold: 1, Name: "n", Type: MonitorHTTP, Target: "x", IntervalSeconds: 1, TimeoutSeconds: 1},                  // no project
+		{RecoveryThreshold: 1, Name: "n", ProjectID: "p", Type: MonitorType("bad"), IntervalSeconds: 1, TimeoutSeconds: 1},        // bad type
+		{RecoveryThreshold: 1, Name: "n", ProjectID: "p", Type: MonitorHTTP, IntervalSeconds: 1, TimeoutSeconds: 1},               // no target
+		{RecoveryThreshold: 1, Name: "n", ProjectID: "p", Type: MonitorTCP, Target: "x:1", IntervalSeconds: 0, TimeoutSeconds: 1}, // interval 0
+		{RecoveryThreshold: 1, Name: "n", ProjectID: "p", Type: MonitorTCP, Target: "x:1", IntervalSeconds: 1, TimeoutSeconds: 0}, // timeout 0
 	}
 	for i, m := range bad {
 		if err := m.Validate(); err == nil {
@@ -50,11 +50,11 @@ func TestStatusFor(t *testing.T) {
 }
 
 func TestPushMonitorRequiresInterval(t *testing.T) {
-	valid := Monitor{ProjectID: "p1", Name: "cron", Type: MonitorPush, IntervalSeconds: 60}
+	valid := Monitor{RecoveryThreshold: 1, ProjectID: "p1", Name: "cron", Type: MonitorPush, IntervalSeconds: 60}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid push monitor rejected: %v", err)
 	}
-	noInterval := Monitor{ProjectID: "p1", Name: "cron", Type: MonitorPush}
+	noInterval := Monitor{RecoveryThreshold: 1, ProjectID: "p1", Name: "cron", Type: MonitorPush}
 	if err := noInterval.Validate(); err == nil {
 		t.Fatal("push monitor without interval should fail validation")
 	}
@@ -64,18 +64,18 @@ func TestICMPMonitorValidateAndActive(t *testing.T) {
 	if !MonitorICMP.Active() {
 		t.Fatal("icmp should be an active (probed) type")
 	}
-	ok := Monitor{Name: "ping", ProjectID: "p", Type: MonitorICMP, Target: "10.0.0.1", IntervalSeconds: 30, TimeoutSeconds: 5}
+	ok := Monitor{RecoveryThreshold: 1, Name: "ping", ProjectID: "p", Type: MonitorICMP, Target: "10.0.0.1", IntervalSeconds: 30, TimeoutSeconds: 5}
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("valid icmp monitor rejected: %v", err)
 	}
-	noTarget := Monitor{Name: "ping", ProjectID: "p", Type: MonitorICMP, IntervalSeconds: 30, TimeoutSeconds: 5}
+	noTarget := Monitor{RecoveryThreshold: 1, Name: "ping", ProjectID: "p", Type: MonitorICMP, IntervalSeconds: 30, TimeoutSeconds: 5}
 	if err := noTarget.Validate(); err == nil {
 		t.Fatal("icmp monitor without target should fail")
 	}
 }
 
 func TestMonitorMethodAndGrace(t *testing.T) {
-	base := Monitor{Name: "x", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5}
+	base := Monitor{RecoveryThreshold: 1, Name: "x", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5}
 
 	m := base
 	m.Method = "TRACE"
@@ -100,20 +100,20 @@ func TestMonitorMethodAndGrace(t *testing.T) {
 		t.Fatalf("normalize empty = %q, want GET", m.Method)
 	}
 	// Non-http clears method and grace.
-	tcp := Monitor{Name: "x", ProjectID: "p", Type: MonitorTCP, Target: "h:1", IntervalSeconds: 60, TimeoutSeconds: 5, Method: "POST", GraceSeconds: 30}
+	tcp := Monitor{RecoveryThreshold: 1, Name: "x", ProjectID: "p", Type: MonitorTCP, Target: "h:1", IntervalSeconds: 60, TimeoutSeconds: 5, Method: "POST", GraceSeconds: 30}
 	tcp.Normalize()
 	if tcp.Method != "" || tcp.GraceSeconds != 0 {
 		t.Fatalf("non-http normalize = %+v, want cleared", tcp)
 	}
 	// A push monitor's failure_threshold is pinned to 1: a dead-man timeout is a
 	// single definitive signal, not confirmation-gated over N missed intervals.
-	pushT := Monitor{Name: "x", ProjectID: "p", Type: MonitorPush, IntervalSeconds: 60, FailureThreshold: 5}
+	pushT := Monitor{RecoveryThreshold: 1, Name: "x", ProjectID: "p", Type: MonitorPush, IntervalSeconds: 60, FailureThreshold: 5}
 	pushT.Normalize()
 	if pushT.FailureThreshold != 1 {
 		t.Fatalf("push failure_threshold = %d, want pinned to 1", pushT.FailureThreshold)
 	}
 	// Negative grace is rejected.
-	push := Monitor{Name: "x", ProjectID: "p", Type: MonitorPush, IntervalSeconds: 60, GraceSeconds: -1}
+	push := Monitor{RecoveryThreshold: 1, Name: "x", ProjectID: "p", Type: MonitorPush, IntervalSeconds: 60, GraceSeconds: -1}
 	if err := push.Validate(); err == nil {
 		t.Fatal("negative grace should be rejected")
 	}
@@ -124,7 +124,7 @@ func TestDNSAndTLSMonitorTypesActive(t *testing.T) {
 		if !tp.Valid() || !tp.Active() {
 			t.Fatalf("%s should be a valid active type", tp)
 		}
-		m := Monitor{Name: "x", ProjectID: "p", Type: tp, Target: "example.com", IntervalSeconds: 60, TimeoutSeconds: 5}
+		m := Monitor{RecoveryThreshold: 1, Name: "x", ProjectID: "p", Type: tp, Target: "example.com", IntervalSeconds: 60, TimeoutSeconds: 5}
 		if err := m.Validate(); err != nil {
 			t.Fatalf("%s validate: %v", tp, err)
 		}
@@ -141,7 +141,8 @@ func TestDNSAndTLSMonitorTypesActive(t *testing.T) {
 func TestCompositeQuorumValidation(t *testing.T) {
 	mk := func(mode, quorum string) Monitor {
 		return Monitor{
-			Name: "q", ProjectID: "p", Type: MonitorComposite, IntervalSeconds: 60,
+			RecoveryThreshold: 1,
+			Name:              "q", ProjectID: "p", Type: MonitorComposite, IntervalSeconds: 60,
 			Config: map[string]string{"children": "a,b,c", "mode": mode, "quorum": quorum},
 		}
 	}
@@ -164,7 +165,7 @@ func TestCompositeQuorumValidation(t *testing.T) {
 }
 
 func TestCompositeMonitorValidation(t *testing.T) {
-	base := Monitor{Name: "c", ProjectID: "p", Type: MonitorComposite, IntervalSeconds: 60}
+	base := Monitor{RecoveryThreshold: 1, Name: "c", ProjectID: "p", Type: MonitorComposite, IntervalSeconds: 60}
 	// Needs children.
 	if err := base.Validate(); err == nil {
 		t.Fatal("composite without children should be invalid")
@@ -200,7 +201,7 @@ func TestPostgresTypeAndRedaction(t *testing.T) {
 	if !MonitorPostgres.Valid() || !MonitorPostgres.Active() || !MonitorPostgres.NeedsTarget() {
 		t.Fatal("postgres should be a valid, active, target-needing type")
 	}
-	m := Monitor{Name: "db", ProjectID: "p", Type: MonitorPostgres, Target: "db.internal:5432", IntervalSeconds: 60, TimeoutSeconds: 5,
+	m := Monitor{RecoveryThreshold: 1, Name: "db", ProjectID: "p", Type: MonitorPostgres, Target: "db.internal:5432", IntervalSeconds: 60, TimeoutSeconds: 5,
 		Config: map[string]string{"username": "cerbix", "password": "s3cr3t", "database": "app"}}
 	if err := m.Validate(); err != nil {
 		t.Fatalf("valid postgres rejected: %v", err)
@@ -227,7 +228,7 @@ func TestRabbitMQWebSocketSSHTypes(t *testing.T) {
 		if tp == MonitorWebSocket {
 			target = "ws://host:1" // a websocket target needs its scheme (sec-hardening-2 H-2)
 		}
-		m := Monitor{Name: "x", ProjectID: "p", Type: tp, Target: target, IntervalSeconds: 60, TimeoutSeconds: 5}
+		m := Monitor{RecoveryThreshold: 1, Name: "x", ProjectID: "p", Type: tp, Target: target, IntervalSeconds: 60, TimeoutSeconds: 5}
 		if err := m.Validate(); err != nil {
 			t.Fatalf("%s validate: %v", tp, err)
 		}
@@ -247,7 +248,7 @@ func TestMySQLRedisPromQLTypes(t *testing.T) {
 		if tp == MonitorPromQL {
 			target = "http://host:1" // a Prometheus base URL (external review of iter-0210, P2-2)
 		}
-		m := Monitor{Name: "x", ProjectID: "p", Type: tp, Target: target, IntervalSeconds: 60, TimeoutSeconds: 5}
+		m := Monitor{RecoveryThreshold: 1, Name: "x", ProjectID: "p", Type: tp, Target: target, IntervalSeconds: 60, TimeoutSeconds: 5}
 		if err := m.Validate(); err != nil {
 			t.Fatalf("%s validate: %v", tp, err)
 		}
@@ -259,7 +260,7 @@ func TestMySQLRedisPromQLTypes(t *testing.T) {
 }
 
 func TestNormalizeTags(t *testing.T) {
-	m := Monitor{Name: "x", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5,
+	m := Monitor{RecoveryThreshold: 1, Name: "x", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5,
 		Tags: []string{"  env:prod ", "env:prod", "ENV:PROD", "", "team:pay", "   "}}
 	m.Normalize()
 	// trimmed, case-insensitive dedupe (keeps first spelling), empties dropped.
@@ -267,7 +268,7 @@ func TestNormalizeTags(t *testing.T) {
 		t.Fatalf("normalized tags = %#v, want [env:prod team:pay]", m.Tags)
 	}
 	// nil → empty slice (never nil, for a stable JSON [] and NOT NULL column).
-	empty := Monitor{Name: "x", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5}
+	empty := Monitor{RecoveryThreshold: 1, Name: "x", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5}
 	empty.Normalize()
 	if empty.Tags == nil || len(empty.Tags) != 0 {
 		t.Fatalf("nil tags should normalize to [], got %#v", empty.Tags)
@@ -276,25 +277,25 @@ func TestNormalizeTags(t *testing.T) {
 
 func TestMonitorRegionNormalizeAndValidate(t *testing.T) {
 	// Normalize: trim/lowercase; empty → core.
-	m := Monitor{Name: "h", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5, Region: "  GEO1 "}
+	m := Monitor{RecoveryThreshold: 1, Name: "h", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5, Region: "  GEO1 "}
 	m.Normalize()
 	if m.Region != "geo1" {
 		t.Fatalf("normalize region = %q, want geo1", m.Region)
 	}
-	empty := Monitor{Name: "h", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5}
+	empty := Monitor{RecoveryThreshold: 1, Name: "h", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5}
 	empty.Normalize()
 	if empty.Region != DefaultRegion {
 		t.Fatalf("empty region default = %q, want %q", empty.Region, DefaultRegion)
 	}
 	// Validate: good slug ok, bad slug rejected.
-	if err := (Monitor{Name: "h", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5, Region: "geo1"}).Validate(); err != nil {
+	if err := (Monitor{RecoveryThreshold: 1, Name: "h", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5, Region: "geo1"}).Validate(); err != nil {
 		t.Fatalf("valid region rejected: %v", err)
 	}
-	if err := (Monitor{Name: "h", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5, Region: "Geo 1!"}).Validate(); err == nil {
+	if err := (Monitor{RecoveryThreshold: 1, Name: "h", ProjectID: "p", Type: MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5, Region: "Geo 1!"}).Validate(); err == nil {
 		t.Fatal("invalid region slug should be rejected")
 	}
 	// Composite pinned to core: non-core rejected by Validate, forced by Normalize.
-	comp := Monitor{Name: "c", ProjectID: "p", Type: MonitorComposite, IntervalSeconds: 60, Config: map[string]string{"children": "m1"}, Region: "geo1"}
+	comp := Monitor{RecoveryThreshold: 1, Name: "c", ProjectID: "p", Type: MonitorComposite, IntervalSeconds: 60, Config: map[string]string{"children": "m1"}, Region: "geo1"}
 	if err := comp.Validate(); err == nil {
 		t.Fatal("composite in a non-core region should be rejected")
 	}
@@ -308,7 +309,7 @@ func TestMonitorRegionNormalizeAndValidate(t *testing.T) {
 // accepting realistic ones.
 func TestMonitorResourceBounds(t *testing.T) {
 	base := func() Monitor {
-		return Monitor{Name: "m", ProjectID: "p", Type: MonitorHTTP, Target: "https://x",
+		return Monitor{RecoveryThreshold: 1, Name: "m", ProjectID: "p", Type: MonitorHTTP, Target: "https://x",
 			IntervalSeconds: 60, TimeoutSeconds: 5, Retries: 1}
 	}
 	if err := base().Validate(); err != nil {

@@ -16,7 +16,8 @@ func TestRecordCheckStatusConfirmNotify(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "c", Type: domain.MonitorTCP, Target: "10.0.0.1:80",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "c", Type: domain.MonitorTCP, Target: "10.0.0.1:80",
 		IntervalSeconds: 60, TimeoutSeconds: 5, FailureThreshold: 3, ConfirmIntervalSeconds: 10, Enabled: true,
 	})
 	if err != nil {

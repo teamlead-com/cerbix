@@ -4,7 +4,7 @@ import "testing"
 
 func TestConfirmIntervalNormalize(t *testing.T) {
 	mk := func(typ MonitorType, confirm, interval, threshold int) Monitor {
-		m := Monitor{Name: "x", ProjectID: "p", Type: typ, Target: "t:1",
+		m := Monitor{RecoveryThreshold: 1, Name: "x", ProjectID: "p", Type: typ, Target: "t:1",
 			IntervalSeconds: interval, TimeoutSeconds: 5, FailureThreshold: threshold,
 			ConfirmIntervalSeconds: confirm}
 		m.Normalize()

@@ -39,7 +39,8 @@ func TestRollupDailyAvailability(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true,
 	})
 
@@ -103,8 +104,8 @@ func TestProjectDailyAvailabilityLive(t *testing.T) {
 	st, ctx := rollupTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	m1, _ := st.CreateMonitor(ctx, domain.Monitor{ProjectID: proj.ID, Name: "a", Type: domain.MonitorHTTP, Target: "https://a", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true})
-	m2, _ := st.CreateMonitor(ctx, domain.Monitor{ProjectID: proj.ID, Name: "b", Type: domain.MonitorHTTP, Target: "https://b", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true})
+	m1, _ := st.CreateMonitor(ctx, domain.Monitor{RecoveryThreshold: 1, ProjectID: proj.ID, Name: "a", Type: domain.MonitorHTTP, Target: "https://a", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true})
+	m2, _ := st.CreateMonitor(ctx, domain.Monitor{RecoveryThreshold: 1, ProjectID: proj.ID, Name: "b", Type: domain.MonitorHTTP, Target: "https://b", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true})
 	_ = st.InsertHeartbeat(ctx, domain.Heartbeat{MonitorID: m1.ID, Up: true, Code: 200})
 	_ = st.InsertHeartbeat(ctx, domain.Heartbeat{MonitorID: m2.ID, Up: false, Code: 500})
 

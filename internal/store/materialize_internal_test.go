@@ -44,7 +44,8 @@ func TestMaterializerSnapshotAndPayloadPlaintextAbsence(t *testing.T) {
 		t.Fatal(err)
 	}
 	inline, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: projectID, Name: "inline-db", Type: domain.MonitorPostgres,
+		RecoveryThreshold: 1,
+		ProjectID:         projectID, Name: "inline-db", Type: domain.MonitorPostgres,
 		Target: "inline.internal:5432", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 		Config: map[string]string{"username": "cerbix", "database": "app", "password": "inline-plaintext"},
 	})
@@ -388,7 +389,8 @@ func TestEveryMaterializedJobCarriesItsOwnIdentity(t *testing.T) {
 	var ids []string
 	for _, name := range []string{"a", "b"} {
 		m, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: proj.ID, Name: name, Type: domain.MonitorHTTP, Target: "https://x",
+			RecoveryThreshold: 1,
+			ProjectID:         proj.ID, Name: name, Type: domain.MonitorHTTP, Target: "https://x",
 			IntervalSeconds: 60, TimeoutSeconds: 5, FailureThreshold: 1, Enabled: true,
 		})
 		if err != nil {
@@ -457,7 +459,8 @@ func TestACredentialedSchemaWithNoCredentialCrossesTheCarrierStamp(t *testing.T)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "promql-no-auth", Type: domain.MonitorPromQL,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "promql-no-auth", Type: domain.MonitorPromQL,
 		Target: "https://prometheus.internal", IntervalSeconds: 60, TimeoutSeconds: 5,
 		FailureThreshold: 1, Enabled: true,
 		Config: map[string]string{"auth_mode": "none", "query": "up"},
@@ -519,7 +522,8 @@ func TestTheMaterializerReportsTheCarrierItStamped(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "plain-http", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "plain-http", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, FailureThreshold: 1, Enabled: true,
 	})
 	if err != nil {
@@ -527,7 +531,8 @@ func TestTheMaterializerReportsTheCarrierItStamped(t *testing.T) {
 	}
 	// Disabled monitors are the refusal half of the biconditional below.
 	off, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "disabled", Type: domain.MonitorHTTP, Target: "https://y",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "disabled", Type: domain.MonitorHTTP, Target: "https://y",
 		IntervalSeconds: 60, TimeoutSeconds: 5, FailureThreshold: 1, Enabled: false,
 	})
 	if err != nil {

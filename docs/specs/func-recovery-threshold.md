@@ -1,7 +1,11 @@
 # func-recovery-threshold — a monitor leaves DOWN only after a confirmed run of successes (FR-043 / NFR-036)
 
-> **STATUS: revision 5 — APPROVED by the owner on 2026-11-15; not implemented.** Implementation
-> follows sec-hardening-3. Revision 1 (2026-11-14) was written from an owner
+> **STATUS: revision 7 — APPROVED by the owner; revision 5 on 2026-11-15, revisions 6 and 7 on
+> 2026-11-16. Revision 7 adds migration 00118 and I13a: a writer that does not know about the run ends
+> it by leaving `down`, and no check result is lost (§5, §11). Implemented in [iter-0214](../iterations/iter-0214.md) / [D-0281](../decisions.md),
+> DONE: the owner closed the iteration on 2026-11-16 after the code review APPROVED (§11).** Revision 6 (2026-11-16) restates NFR-036 and I5 as
+> three statements after the implementation found that the confirm phase reads `status` (§4.4, §11);
+> the code is not changed by it. Implementation follows sec-hardening-3. Revision 1 (2026-11-14) was written from an owner
 > discussion and an independent code check of two design questions. Revision 2 (2026-11-14) answers
 > the first external review of that draft — CHANGES REQUIRED, 1 P0 / 6 P1 / 3 P2 / 1 P3. Revision 3
 > (2026-11-14) answers the second review, made against `main` at `58b5a32` — CHANGES REQUIRED,
@@ -11,7 +15,9 @@
 > was checked against the code and its disposition is in §11. Three points carry an explicit owner
 > answer of 2026-11-14 and are marked **OWNER**. Everything else the author decided is marked
 > **AUTHOR'S CALL**; the six that needed the owner were confirmed on 2026-11-14 (§10).
-> The SPA surfaces in §8 need an approved mock before any frontend code.
+> The SPA surfaces in §8 need an approved mock before any frontend code. The mock
+> (`docs/design/mock-recovery-threshold.html`) was approved by the owner on 2026-11-16 with four
+> decisions; one of them narrows §8 (the dependency hint) and is recorded there and in §11.
 >
 > Invariants are numbered **within this document** (I1, I2, …). Code is cited by file and function,
 > never by line: this document is written before the change that will move the lines.
@@ -45,10 +51,23 @@ channel of its own has no protection at all.
   auto-incident open, sends no "still down" reminder and fires no escalation step. A failed check
   ends the run. The default is 1, which is today's behaviour exactly.
 - **NFR-036**: The threshold is **alerting hysteresis, not measurement**. For a monitor whose
-  configuration does not change during the period compared, it changes no probe cadence and
-  therefore no row in `heartbeats`; no monitor SLA, project SLA, burn rate, service SLI, error
-  budget, coverage, gate decision or status-page availability bar differs, for the same sequence of
-  check results, between any two values of the threshold (proven by regression).
+  configuration does not change during the period compared (**OWNER, 2026-11-16**, revision 6 — §11):
+
+  - **(a)** the threshold alters, drops and re-dates no check result: every result the monitor's
+    checks produce reaches `heartbeats` as it would at any other threshold;
+  - **(b)** with the confirm phase **not enabled** (`confirm_interval_seconds = 0` or
+    `failure_threshold = 1`), the set of checks scheduled and the rows written to `heartbeats` are
+    identical for every value of the threshold, and so no monitor SLA, project SLA, burn rate, service
+    SLI, error budget, coverage, gate decision or status-page availability bar differs, for the same
+    sequence of check results, between any two values of the threshold (proven by regression);
+  - **(c)** with the confirm phase **enabled**, a monitor the threshold holds in `down` gets no
+    accelerated checks (`Monitor.InConfirmPhase` requires `status = up`), where the same monitor at a
+    lower threshold, already `up` again, would. The number of checks — and with it the SLA — may then
+    differ between two values of the threshold. Removing the difference would mean accelerating the
+    way up, which D4 excludes.
+
+  NFR-036 is about a monitor's **own** checks. A composite parent's check is computed from its
+  children's statuses, so its `heartbeats` depend on a child's threshold (§4.4).
 
   The qualifier is not a loophole, it is D-0142: **every** monitor update — one that changes only
   this field included — runs `revisionFenceSetSQL`, and a result issued before the update is refused
@@ -279,9 +298,9 @@ These readers are **not changed**; the table states the consequence so that none
 | Status page, **service** component | Computed from `heartbeats` by `internal/reliability`; `operational` on the first success |
 | Service alerting and the service auto-incident | Also computed from `heartbeats`, but closed by `DecideServiceAlert` only after `confirm_evaluations` healthy evaluations in a row — the service has its own hysteresis and this feature does not interact with it |
 | `ServiceHealthNow` diagnostics | The member is listed as failing while the service SLI is healthy |
-| Confirm phase — `Monitor.InConfirmPhase` | Never true: it requires `status = up` |
+| Confirm phase — `Monitor.InConfirmPhase` | Never true: it requires `status = up`. The difference this makes outlives the run — see the third consequence below |
 
-Two consequences are deliberate and documented in the runbook rather than engineered away:
+Four consequences are deliberate and documented in the runbook rather than engineered away:
 
 - **A service can be green while its member monitor is still red.** The service measures; the
   monitor alerts. That split is the design (`internal/reliability` states it: alert hysteresis does
@@ -289,6 +308,18 @@ Two consequences are deliberate and documented in the runbook rather than engine
 - **A parent can recover before its child.** With a parent at threshold 1 and a child at 3, the
   parent's `down` — and with it the suppression of the child — ends first. The form says so next to
   the field when the monitor has dependencies (§8).
+- **With the confirm phase enabled, a monitor held in `down` is probed less often than it would be
+  at a lower threshold** — and not only during a run. The case is "recovered and failed again":
+  `failure_threshold = 2`, a confirm interval set, the results down, one success, one failure. At
+  threshold 1 the success made the monitor `up` and the failure put it into the confirm phase, so its
+  next check is accelerated. At threshold 3 the success was the first of a run, the failure broke it,
+  the monitor never left `down`, and nothing is accelerated. The same results so far, a different
+  next check: from there the two monitors' `heartbeats`, and their SLA, can differ. This is NFR-036
+  (c); D4 rules out the alternative.
+- **NFR-036 is about a monitor's own checks.** A composite parent computes its check from its
+  children's statuses (first row of the table), so its `heartbeats` depend on a child's threshold: a
+  child in a run is not up. When such a composite is a member of a service, the child's threshold
+  reaches the service's measurement indirectly, through the parent's `heartbeats`.
 
 ### 4.5 Editing a monitor
 
@@ -367,15 +398,17 @@ The notification keeps going through `notify.Dispatcher.Deliver`. `DeliverText` 
 it changes the webhook event to `monitor.alert`, drops `up`, and makes the email Subject equal to the
 body.
 
-Because the sentence is part of the resolving update's `body`, everything that already publishes
-incident updates carries it without formatting of its own: the project webhooks' incident event,
-status-page subscriber mail, the public incident timeline and the syndication feeds.
+Because the sentence is part of the resolving update's `body`, the surfaces that already publish an
+incident update's body carry it without formatting of its own: the project webhooks' incident event
+(the update is in its JSON), status-page subscriber mail (the body follows the status lines) and the
+public incident timeline. The syndication feeds do **not**: a feed item is built from the incident's
+title, status and impact and reads no update (§11, code review of `f164f9b`).
 
 With `N = 1` every text is byte-for-byte what it is today.
 
 ## 5. Schema (sketch — the builder owns the exact DDL)
 
-One migration, additive, no backfill beyond the defaults:
+Two migrations, additive, no backfill beyond the defaults. **00117**:
 
 - `monitors.recovery_threshold integer NOT NULL DEFAULT 1`, with a CHECK for 1..10;
 - `monitors.consecutive_successes integer NOT NULL DEFAULT 0`;
@@ -391,6 +424,15 @@ The three columns are appended to `monitorColumns` and to the destination list i
 `scanMonitorNoSecrets`) in the same order, and to the create and update SQL (`recovery_threshold`
 only — the other two are server-owned). `heartbeats` is not touched, so the storage mode does not
 matter to this change; the migration is still run in both.
+
+**00118** (revision 7, **OWNER** 2026-11-16 — §11): a `BEFORE UPDATE … FOR EACH ROW` trigger on
+`monitors` that sets `consecutive_successes = 0` and `recovery_started_at = NULL` whenever the new
+`status` is not `down`. It is the guard for writers this code does not control — a binary without
+FR-043 during a rolling upgrade or after a rollback, which writes `status` and never the run columns —
+so the run-state CHECK accepts their write instead of refusing it with the heartbeat that shares its
+transaction. The CHECKs are not weakened, and every status writer of this release keeps resetting the
+run in its own statement: the trigger is a guard, not the mechanism. Down drops the trigger and its
+function; the migration is idempotent.
 
 `openapi.yaml`: `recovery_threshold` on the monitor read model and on the create and update bodies;
 `consecutive_successes` and `recovery_started_at` (nullable) on the read model, read-only.
@@ -410,10 +452,12 @@ matter to this change; the migration is still run in both.
   open for the monitor it is resolved once; the recovery notification is delivered under the
   ordinary outbox rules (instance silence and a superseding transition still apply). A run that
   breaks produces no event, no resolution and no notification.
-- **I5** — For a monitor whose configuration does not change, the set of checks scheduled and the
-  rows written to `heartbeats` are identical for every value of the threshold: the scheduler's
-  cadence, the confirm phase, the pull-job TTL and the expected-run ledger do not read the new
-  columns (NFR-036).
+- **I5** — For a monitor whose configuration does not change (NFR-036, revision 6): (a) no check
+  result is altered, dropped or re-dated by the threshold; (b) with the confirm phase not enabled,
+  the set of checks scheduled and the rows written to `heartbeats` are identical for every value of
+  the threshold — the scheduler's cadence, the pull-job TTL and the expected-run ledger do not read
+  the new columns; (c) with the confirm phase enabled, a monitor the threshold holds in `down` is
+  never put on the accelerated rhythm, so it can be checked less often than at a lower threshold.
 - **I6** — For the same `heartbeats`, monitor SLA, project SLA, burn rate, service SLI and budget,
   gate reports and status-page availability bars are identical for every value of the threshold
   (NFR-036).
@@ -436,6 +480,9 @@ matter to this change; the migration is still run in both.
   `recovery_started_at IS NULL`.
 - **I13** — `recovery_started_at` is non-NULL exactly when `consecutive_successes > 0`, and then the
   monitor is `down` (database CHECK).
+- **I13a** — A writer that does not know about the run ends it by moving the monitor out of `down`; the
+  check result is not lost (migration 00118, revision 7). Under such a writer the threshold does not
+  apply — the monitor goes up on its first success — and on this release it applies again. A failure written by an older binary keeps the monitor `down` and leaves a run in progress as it was, so back on this release the next success continues that run rather than starting a new one.
 - **I14** — The D6 sentence is rendered from the recovery snapshot of the confirming transaction:
   it is correct when read after the commit that cleared the columns, and after the threshold has
   been edited between the recovery and the delivery. The incident update and the notification carry
@@ -456,7 +503,8 @@ matter to this change; the migration is still run in both.
 | --- | --- |
 | Store, status recording | The six rows of §4.1 as a table test, `last_notified_at` included; I2, I3, I13; the same table with threshold 1 against the pre-change expectations (I1) |
 | Store, non-verdict paths | A probe error, a duplicate result and an out-of-order result in the middle of a run leave the counter where it was |
-| Store, status writers | Retire, reactivate and re-enable in the middle of a run (I12); the CHECK refuses an inconsistent row (I13) |
+| Store, status writers | Retire, reactivate and re-enable in the middle of a run (I12); the CHECK refuses an inconsistent row (I13) — both with the 00118 guard switched off, so they prove this release's own resets and the CHECK itself |
+| Store, legacy writers | Each pre-FR-043 status writer, verbatim from b823aca, on a monitor in a run: a success goes up with its heartbeat kept and the run cleared, re-enable / retire / reactivate / `SetMonitorStatus` leave `down` without 23514, a failure leaves a valid row (I13a) |
 | Store, reminders | Reminder due, run starts → not enqueued; run breaks → enqueued without a new `down` (I7, I8) |
 | Store, escalations | Step due during a run → not fired; run breaks → fired on the next pass, two overdue steps in the same pass; `repeat_last` paused and resumed; run completes → never fired; a service incident's ladder is not paused (I8) |
 | Store, incidents | `resolved_at` at the resolving transaction; ordering against updates written during the run (I9) |
@@ -470,9 +518,11 @@ matter to this change; the migration is still run in both.
 | **Ingest + outbox, real database** | The full path `RecordScheduledResult` → `Reconciler.Reconcile` → outbox worker for a threshold-3 recovery: one event, one resolved incident, one notification, and the sentence with the right `N/M` and first-OK instant in both the incident update and the notification — read **after** the columns are cleared, and once more with the threshold edited before delivery (I4, I14). A unit test with a hand-built monitor cannot catch this |
 | Outbox | A legacy event without the snapshot renders today's text; a run that breaks delivers nothing (I4); email Subject unchanged, sentence in the body |
 | Manual resolve | An auto-incident resolved by a person mid-run: the run breaks → no new incident; the run completes → one transition, no second resolution (D11) |
-| Scheduler | For a scripted fail/success timeline the scheduled check times are the same at threshold 1 and at threshold 3 (I5) |
-| Regression (NFR-036) | Two monitors, thresholds 1 and 3, fed the same scripted results **through the scheduler and `RecordScheduledResult`**; then `heartbeats`, the expected-run ledger, SLA, burn rate, service reliability and gate report compared field by field (I5, I6). A hand-inserted `heartbeats` fixture read at two thresholds would only prove that the read queries ignore the column |
-| Frontend unit | The field, its validation, the long-soak warning, the dependency hint; the "recovering N/M" label, including `3/2` after the threshold was lowered; a type switched to `push` or `composite` after the field was edited omits `recovery_threshold` from the request; the multi-region set gives the children the form's value and omits the field on the composite parent |
+| Scheduler | For a scripted fail/success timeline, with the confirm phase off, the scheduled check times are the same at threshold 1 and at threshold 3 (I5 (b)) |
+| Scheduler, confirm phase | With the confirm phase on, "down, one success, failure again": the threshold-1 monitor is put on the accelerated rhythm by the real leader, the threshold-3 monitor is not (I5 (c), NFR-036 (c)) — pins the behaviour so it cannot change unnoticed |
+| Composite parent | A child at threshold 3 in a run counts as not-up for `all`, `any` and `quorum`; the same results at threshold 1 leave the parent up (§4.4) |
+| Regression (NFR-036) | Two monitors, thresholds 1 and 3, fed the same scripted results **through the scheduler and `RecordScheduledResult`**; then `heartbeats`, the expected-run ledger, SLA, burn rate, service reliability and gate report compared field by field, with the confirm phase off (I5 (a), (b), I6). A hand-inserted `heartbeats` fixture read at two thresholds would only prove that the read queries ignore the column |
+| Frontend unit | The field, its validation, the long-soak warning, the dependency hint (shown only above 1 with a parent); the "recovering N/M" label, including `3/2` after the threshold was lowered; both labels on the detail view and the counter reset on a live status event; a type switched to `push` or `composite` after the field was edited omits `recovery_threshold` from the request; the multi-region set gives the children the form's value and omits the field on the composite parent |
 | E2E | One monitor at threshold 2 against a target that fails, succeeds once, fails, then succeeds twice: one recovery notification, one incident |
 
 **Existing tests and callers this change moves.** They are named so that none is "fixed" by weakening
@@ -498,12 +548,17 @@ a rule:
   `composite`.
 - **Long-soak warning**: when `interval_seconds × (recovery_threshold − 1)` is 600 s or more, the
   field states how long a recovery will take to be announced.
-- **Dependency hint**: when the monitor has a parent, the field explains that a parent with a lower
-  threshold recovers — and stops suppressing this monitor — first.
+- **Dependency hint**: when the monitor has a parent **and** its `recovery_threshold` is above 1, the
+  field explains that a parent with a lower threshold recovers — and stops suppressing this monitor —
+  first. At 1 no parent can have a lower threshold, so the hint is not shown. **OWNER, 2026-11-16**
+  (mock approval; revision 5 showed it whenever the monitor had a parent — §11).
 - **Monitor list and detail**: a `down` monitor with a run in progress shows "recovering N/M", the
   counterpart of today's "confirming N/M" (`confirmingLabel` in `frontend/src/views/MonitorsView.vue`).
-  The pill stays the `down` pill; the mock decides the exact wording and placement. The detail view
-  does not show "confirming N/M" today; whether it gains both labels is the mock's decision.
+  The pill stays the `down` pill. **Decided with the mock (OWNER, 2026-11-16):** the label is a
+  neutral chip "recovering N/M" beside the `down` pill, in the list and on the detail view; the
+  detail view gains **both** labels, "confirming N/M" and "recovering N/M". When the detail view
+  applies a live status event to the loaded monitor it sets `consecutive_successes` to 0, and on a
+  move into `up` also `consecutive_failures` — otherwise a stale label survives a transition.
 - The label is computed from `consecutive_successes` and `recovery_threshold` in the monitor read
   model and is as fresh as the last load of the view (D13). It is shown whenever
   `status === "down" && consecutive_successes > 0` — **not** gated on `< recovery_threshold`, as
@@ -622,9 +677,59 @@ contradiction between D6 and I1, I9, I14 or between §7 and §8; it asked for no
 | --- | --- |
 | P2-1 — the clock test of §7 named four entry points, two of which cannot stamp a first-OK (`RecordDeadmanResult` records failures only; `RecordPushResult` acts on push monitors, threshold 1), and read the clock without waiting for the lock wait to be visible | **Confirmed.** §7 names the two reachable entry points and the `pg_stat_activity` barrier; D6 says why the other two never stamp |
 
+**Owner's decisions on the mock (2026-11-16).** `docs/design/mock-recovery-threshold.html` approved.
+
+| Decision | Effect |
+| --- | --- |
+| "recovering N/M" — the `down` pill stays, a neutral chip beside it (mock variant 2) | §8 |
+| The detail view shows both "confirming N/M" and "recovering N/M" (mock variant 1) | §8 |
+| The dependency hint is shown only when `depends_on` is non-empty **and** `recovery_threshold > 1` — a deliberate departure from revision 5's §8, which showed it whenever the monitor had a parent | §8 |
+| The detail view resets `consecutive_successes` on any live status event, and `consecutive_failures` too on a move into `up`; covered by a frontend unit test | §8, §7 "Frontend unit" |
+
+**Found during implementation; owner's decision (2026-11-16).** The NFR-036 regression test
+(iter-0214) showed that NFR-036 and I5 of revision 5 did not hold for a monitor with the confirm
+phase enabled: `Monitor.InConfirmPhase` requires `status = up`, so after "down, one success, failure
+again" a threshold-1 monitor is accelerated and a threshold-3 monitor still `down` is not, and the
+number of checks and the SLA differ for the same results. The new columns are not read by any
+cadence code; the difference comes through `status`. §4.4 had considered the confirm phase during a
+run only.
+
+| Option | Decision |
+| --- | --- |
+| 1 — restate NFR-036 and I5 as three statements (a) no result altered, dropped or re-dated, (b) identical checks and `heartbeats` with the confirm phase off, (c) no accelerated checks for a monitor held in `down`; document the case in §4.4 and the runbook; the code is not changed | **Chosen** |
+| 2 — make the confirm phase independent of the `up` the threshold delays | Rejected: D4 (checks are not accelerated during a recovery) excludes it |
+
+I6 is unchanged. Also recorded in §4.4: NFR-036 concerns a monitor's own checks — a composite
+parent's `heartbeats` follow its children's statuses and so a child's threshold, and through such a
+composite a service's measurement. Tests added: the confirm-phase and composite rows of §7.
+
+**Owner's decision (2026-11-16) — revision 7.** The stage-2 report found that a binary without FR-043
+writes `status` and never the run columns, so for a monitor in a run the run-state CHECK refused its
+status write — and, sharing the transaction, its heartbeat. Mitigating this in documents only ("raise
+thresholds after every role is upgraded, set them back to 1 before a rollback") was **not accepted**.
+
+| Option | Decision |
+| --- | --- |
+| A `BEFORE UPDATE` trigger (migration 00118) that clears the run on any row whose new status is not `down`; the CHECKs unchanged; the explicit resets in code kept | **Chosen** |
+| Documents only | Rejected by the owner |
+| Weaken the run-state CHECK | Rejected: I13 stays a database rule |
+
+I13a records the result. A failure written by an older binary keeps the monitor `down` and leaves a run in progress as it was, so back on this release the next success continues that run rather than starting a new one.
+
+**Code review of the implementation (2026-11-16, `b823aca..f164f9b`): CHANGES REQUIRED, P0 0 / P1 0 /
+P2 3 / P3 3.** Every finding was accepted; none changes code, SQL or the SPA, and revision 7 stands.
+The one finding on this spec:
+
+| Finding | Disposition |
+| --- | --- |
+| P2-1 — §4.6 said the sentence reaches the syndication feeds; `handlers_feed.go` builds a feed item from the incident's title, status and impact and reads no `incident_updates` | **Confirmed.** The feeds are removed from §4.6, the runbook and iter-0214; the feed format is not changed. The other three surfaces were checked the same way and are kept: the project webhooks marshal the whole `IncidentEvent`, whose `update.body` is the resolving update; subscriber mail appends `Update.Body` after the status lines; the public timeline lists every incident of the page's projects, auto-incidents included, with each update's body |
+
+**Final pass of the code review (2026-11-16, `b823aca..ac6312f`): APPROVED, 0/0/0/0.** All six findings of
+the first pass confirmed closed; the owner ordered the merge into `main`, which closes iter-0214.
+
 ## 12. Documents the implementation updates
 
-`openapi.yaml` and the generated TypeScript schema; `docs/overview.md`; `docs/runbook.md` (the two
+`openapi.yaml` and the generated TypeScript schema; `docs/overview.md`; `docs/runbook.md` (the four
 deliberate consequences of §4.4, the long-soak cost of D4, the overdue-step behaviour of D9);
 `docs/traceability.md` (FR-043, NFR-036); `docs/project-description.md` and `docs/status.md`, where
 FR-043 and NFR-036 are registered; `docs/decisions.md` (next free `D-NNNN`);

@@ -45,7 +45,8 @@ func TestAdvanceEscalations(t *testing.T) {
 		t.Fatalf("create policy: %v", err)
 	}
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "payments", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "payments", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true, AutoIncident: true,
 		EscalationPolicyID: policy.ID,
 	})
@@ -136,7 +137,8 @@ func TestAdvanceEscalationsSkipsDisabledMonitor(t *testing.T) {
 		t.Fatalf("policy: %v", err)
 	}
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "payments", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "payments", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true, AutoIncident: true, EscalationPolicyID: policy.ID,
 	})
 	if err != nil {
@@ -178,7 +180,8 @@ func TestCreateIncidentRejectsSecondOpenAuto(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true, AutoIncident: true,
 	})
 	if err != nil {
@@ -291,7 +294,8 @@ func TestAdvanceEscalationsRepeatLast(t *testing.T) {
 		t.Fatalf("policy: %v", err)
 	}
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "m", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "m", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true, AutoIncident: true,
 		RenotifySeconds: 300, EscalationPolicyID: policy.ID,
 	})
@@ -353,7 +357,8 @@ func TestAdvanceEscalationsRequiresDownStatus(t *testing.T) {
 		t.Fatalf("policy: %v", err)
 	}
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "payments", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "payments", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true, AutoIncident: true, EscalationPolicyID: policy.ID,
 	})
 	if err != nil {

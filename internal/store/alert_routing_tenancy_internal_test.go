@@ -56,12 +56,13 @@ func seedAlertRoutingTenantFixture(t *testing.T, st *Store, ctx context.Context)
 		t.Fatalf("create channel B: %v", err)
 	}
 	monitorA, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID:       projectA.ID,
-		Name:            "routing-a",
-		Type:            domain.MonitorHTTP,
-		Target:          "https://a.example.test/healthz",
-		IntervalSeconds: 60,
-		Enabled:         true,
+		RecoveryThreshold: 1,
+		ProjectID:         projectA.ID,
+		Name:              "routing-a",
+		Type:              domain.MonitorHTTP,
+		Target:            "https://a.example.test/healthz",
+		IntervalSeconds:   60,
+		Enabled:           true,
 	})
 	if err != nil {
 		t.Fatalf("create monitor A: %v", err)

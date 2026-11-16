@@ -401,7 +401,8 @@ func TestMonitorCRUDAndHeartbeats(t *testing.T) {
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "health", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "health", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 30, TimeoutSeconds: 5, Conditions: []string{"[STATUS] == 200"}, Enabled: true, AutoIncident: true,
 		Tags: []string{"env:prod", "team:api"}, Region: "geo1",
 	})
@@ -523,7 +524,8 @@ func TestCheckingPipelineEndToEnd(t *testing.T) {
 	org, _ := st.CreateOrganization(setup, "acme", "Acme")
 	proj, _ := st.CreateProject(setup, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(setup, domain.Monitor{
-		ProjectID: proj.ID, Name: "health", Type: domain.MonitorHTTP, Target: target.URL,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "health", Type: domain.MonitorHTTP, Target: target.URL,
 		IntervalSeconds: 1, TimeoutSeconds: 5, Enabled: true,
 	})
 	if err != nil {
@@ -606,7 +608,8 @@ func TestSLAAndMaintenanceExclusion(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "health", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "health", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
 
@@ -647,7 +650,7 @@ func TestSLATargetUpsert(t *testing.T) {
 	st, ctx := testStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	mon, _ := st.CreateMonitor(ctx, domain.Monitor{ProjectID: proj.ID, Name: "h", Type: domain.MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true})
+	mon, _ := st.CreateMonitor(ctx, domain.Monitor{RecoveryThreshold: 1, ProjectID: proj.ID, Name: "h", Type: domain.MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true})
 
 	if _, err := st.GetMonitorSLATarget(ctx, mon.ID, "30d"); err != store.ErrNotFound {
 		t.Fatalf("no target yet → ErrNotFound, got %v", err)
@@ -778,7 +781,8 @@ func TestStatusPageAndComponentPersistence(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "api-health", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "api-health", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true,
 	})
 
@@ -889,7 +893,8 @@ func TestStateSequenceIncrementsOnTransition(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "seq", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "seq", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true,
 	})
 
@@ -941,7 +946,8 @@ func TestMonitorStatusTransitionAndAutoIncident(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "api-health", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "api-health", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true,
 	})
 
@@ -1021,7 +1027,8 @@ func TestNotificationChannelPersistence(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "api-health", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "api-health", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true,
 	})
 
@@ -1092,7 +1099,8 @@ func TestUpdateMonitor(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "old", Type: domain.MonitorHTTP, Target: "https://a",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "old", Type: domain.MonitorHTTP, Target: "https://a",
 		IntervalSeconds: 60, TimeoutSeconds: 10, Conditions: []string{"[STATUS] == 200"}, Enabled: true,
 	})
 
@@ -1131,7 +1139,8 @@ func TestPushMonitorToken(t *testing.T) {
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
 	created, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "nightly-backup", Type: domain.MonitorPush,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "nightly-backup", Type: domain.MonitorPush,
 		IntervalSeconds: 3600, Enabled: true, PushToken: "cbxp_secret",
 	})
 	if err != nil {
@@ -1273,7 +1282,7 @@ func TestSubscriberLifecycleAndFanout(t *testing.T) {
 	st, ctx := testStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	mon, _ := st.CreateMonitor(ctx, domain.Monitor{ProjectID: proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5})
+	mon, _ := st.CreateMonitor(ctx, domain.Monitor{RecoveryThreshold: 1, ProjectID: proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5})
 	page, _ := st.CreateStatusPage(ctx, domain.StatusPage{OrgID: org.ID, Slug: "s", Title: "S", Visibility: domain.VisibilityPublic})
 	if _, err := st.CreateComponent(ctx, domain.Component{StatusPageID: page.ID, Name: "API", MonitorID: mon.ID}); err != nil {
 		t.Fatalf("component: %v", err)
@@ -1367,12 +1376,13 @@ func TestMonitorConfigAndStatuses(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
-	a, _ := st.CreateMonitor(ctx, domain.Monitor{ProjectID: proj.ID, Name: "a", Type: domain.MonitorHTTP, Target: "https://a", IntervalSeconds: 60, TimeoutSeconds: 5})
-	b, _ := st.CreateMonitor(ctx, domain.Monitor{ProjectID: proj.ID, Name: "b", Type: domain.MonitorHTTP, Target: "https://b", IntervalSeconds: 60, TimeoutSeconds: 5})
+	a, _ := st.CreateMonitor(ctx, domain.Monitor{RecoveryThreshold: 1, ProjectID: proj.ID, Name: "a", Type: domain.MonitorHTTP, Target: "https://a", IntervalSeconds: 60, TimeoutSeconds: 5})
+	b, _ := st.CreateMonitor(ctx, domain.Monitor{RecoveryThreshold: 1, ProjectID: proj.ID, Name: "b", Type: domain.MonitorHTTP, Target: "https://b", IntervalSeconds: 60, TimeoutSeconds: 5})
 
 	// A composite persists and round-trips its config map.
 	comp, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "group", Type: domain.MonitorComposite, IntervalSeconds: 60,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "group", Type: domain.MonitorComposite, IntervalSeconds: 60,
 		Config: map[string]string{"children": a.ID + "," + b.ID, "mode": "any"},
 	})
 	if err != nil {
@@ -1579,7 +1589,8 @@ func TestRecordCheckStatusConfirmationsAndMaintenance(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true, FailureThreshold: 2,
 	})
 	if err != nil {
@@ -1625,11 +1636,13 @@ func TestRenotifyReminders(t *testing.T) {
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	// One monitor with re-notify on, one with it off (default).
 	on, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "on", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "on", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true, FailureThreshold: 1, RenotifySeconds: 1,
 	})
 	off, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "off", Type: domain.MonitorHTTP, Target: "https://y",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "off", Type: domain.MonitorHTTP, Target: "https://y",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true, FailureThreshold: 1, RenotifySeconds: 0,
 	})
 	// Both go down (threshold 1 → immediate); this stamps last_notified_at.
@@ -1676,7 +1689,8 @@ func TestSearchScopeBeforeLimit(t *testing.T) {
 
 	mk := func(projectID, name string) {
 		if _, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: projectID, Name: name, Type: domain.MonitorHTTP, Target: "https://x",
+			RecoveryThreshold: 1,
+			ProjectID:         projectID, Name: name, Type: domain.MonitorHTTP, Target: "https://x",
 			IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 		}); err != nil {
 			t.Fatalf("create monitor %s: %v", name, err)
@@ -1722,7 +1736,8 @@ func TestFileManagedOwnershipGuard(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "payments", "Payments")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true, Region: "core",
 	})
 	if err != nil {
@@ -1778,7 +1793,8 @@ func TestDeleteProject(t *testing.T) {
 	other, _ := st.CreateOrganization(ctx, "globex", "Globex")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "web", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "web", Type: domain.MonitorHTTP,
 		Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
 	if err != nil {
@@ -1810,7 +1826,8 @@ func TestDeleteProject(t *testing.T) {
 	// A file-provider-owned project is refused and survives (a reconcile would recreate it).
 	proj2, _ := st.CreateProject(ctx, org.ID, "orders", "Orders")
 	mon2, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj2.ID, Name: "orders", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj2.ID, Name: "orders", Type: domain.MonitorHTTP,
 		Target: "https://y", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
 	conn, err := pgx.Connect(ctx, os.Getenv("CERBIX_TEST_DATABASE_DSN"))
@@ -1842,7 +1859,8 @@ func TestDeleteOrganization(t *testing.T) {
 	other, _ := st.CreateOrganization(ctx, "globex", "Globex")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "web", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "web", Type: domain.MonitorHTTP,
 		Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
 	if err != nil {
@@ -1875,7 +1893,8 @@ func TestDeleteOrganization(t *testing.T) {
 	org2, _ := st.CreateOrganization(ctx, "beta", "Beta")
 	proj2, _ := st.CreateProject(ctx, org2.ID, "svc", "Svc")
 	mon2, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj2.ID, Name: "svc", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj2.ID, Name: "svc", Type: domain.MonitorHTTP,
 		Target: "https://y", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
 	conn, err := pgx.Connect(ctx, os.Getenv("CERBIX_TEST_DATABASE_DSN"))

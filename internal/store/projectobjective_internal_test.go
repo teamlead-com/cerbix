@@ -64,7 +64,8 @@ func TestProjectObjectiveIsStoredAndCannotPage(t *testing.T) {
 	}
 	// ...and the monitor scope is untouched by that CHECK: it may page, exactly as before.
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "api", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5,
 	})
 	if err != nil {

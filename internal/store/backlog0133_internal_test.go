@@ -644,7 +644,8 @@ func TestDerivedSlugCollisionSuffixFitsTheShape(t *testing.T) {
 
 	name := "9" + strings.Repeat("8", 60) // digits only → base = "monitor-" + 55 digits = 63 chars
 	first, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: f.projectID, Name: name, Type: domain.MonitorHTTP, Target: "https://a.example",
+		RecoveryThreshold: 1,
+		ProjectID:         f.projectID, Name: name, Type: domain.MonitorHTTP, Target: "https://a.example",
 	})
 	if err != nil {
 		t.Fatalf("first create: %v", err)
@@ -653,7 +654,8 @@ func TestDerivedSlugCollisionSuffixFitsTheShape(t *testing.T) {
 		t.Fatalf("construction is wrong: first slug %q (len %d) must be the 63-char boundary", first.Slug, len(first.Slug))
 	}
 	second, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: f.projectID, Name: name, Type: domain.MonitorHTTP, Target: "https://b.example",
+		RecoveryThreshold: 1,
+		ProjectID:         f.projectID, Name: name, Type: domain.MonitorHTTP, Target: "https://b.example",
 	})
 	if err != nil {
 		t.Fatalf("the collision candidate overflowed the slug shape: %v", err)
@@ -889,13 +891,15 @@ func TestMigration00065BackfillSurvivesLongDuplicateNames(t *testing.T) {
 
 	name := "7" + strings.Repeat("6", 60)
 	m1, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: f.projectID, Name: name, Type: domain.MonitorHTTP, Target: "https://m1.example",
+		RecoveryThreshold: 1,
+		ProjectID:         f.projectID, Name: name, Type: domain.MonitorHTTP, Target: "https://m1.example",
 	})
 	if err != nil {
 		t.Fatalf("m1: %v", err)
 	}
 	m2, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: f.projectID, Name: name, Type: domain.MonitorHTTP, Target: "https://m2.example",
+		RecoveryThreshold: 1,
+		ProjectID:         f.projectID, Name: name, Type: domain.MonitorHTTP, Target: "https://m2.example",
 	})
 	if err != nil {
 		t.Fatalf("m2: %v", err)

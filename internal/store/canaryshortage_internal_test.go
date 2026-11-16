@@ -37,7 +37,8 @@ func TestACanaryShortageResultFlipsTheMonitorAndTheBareInsertDoesNot(t *testing.
 	// The pipeline: one shortage against a threshold of one flips the monitor and enqueues the
 	// transition the alerting path consumes.
 	viaPipeline, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "canary-pipeline", Type: domain.MonitorHTTP, Target: "https://a",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "canary-pipeline", Type: domain.MonitorHTTP, Target: "https://a",
 		IntervalSeconds: 60, TimeoutSeconds: 5, FailureThreshold: 1, Enabled: true,
 	})
 	if err != nil {
@@ -65,7 +66,8 @@ func TestACanaryShortageResultFlipsTheMonitorAndTheBareInsertDoesNot(t *testing.
 	// The bare insert, on the identical heartbeat. This is what the shortage used to do, and it is
 	// asserted rather than described: the row lands and NOTHING else moves.
 	viaInsert, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "canary-bare", Type: domain.MonitorHTTP, Target: "https://b",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "canary-bare", Type: domain.MonitorHTTP, Target: "https://b",
 		IntervalSeconds: 60, TimeoutSeconds: 5, FailureThreshold: 1, Enabled: true,
 	})
 	if err != nil {

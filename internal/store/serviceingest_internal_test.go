@@ -264,7 +264,8 @@ func TestDuplicatePushPingDoesNotMarkTwice(t *testing.T) {
 	f := seedDeclaration(t, st, ctx)
 
 	push, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: f.projectID, Name: "checkout-cron", Type: domain.MonitorPush,
+		RecoveryThreshold: 1,
+		ProjectID:         f.projectID, Name: "checkout-cron", Type: domain.MonitorPush,
 		IntervalSeconds: 60, Region: "core", Enabled: true,
 	})
 	if err != nil {

@@ -244,7 +244,7 @@ func (c *Consumer) handle(ctx context.Context, hb domain.Heartbeat) {
 	}
 	if o.Applied && o.Prev != o.Cur {
 		c.logger.Info("monitor_status_changed", "monitor_id", hb.MonitorID, "prev", string(o.Prev), "cur", string(o.Cur), "suppressed", o.Suppressed)
-		c.reconciler.Reconcile(ctx, hb, o.Prev, o.Cur, o.Suppressed)
+		c.reconciler.Reconcile(ctx, hb, o.Prev, o.Cur, o.Suppressed, o.Recovery)
 	}
 }
 

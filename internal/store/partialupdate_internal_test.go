@@ -28,7 +28,8 @@ func TestUpdateWithoutConfigKeepsTheStoredConfig(t *testing.T) {
 		{"postgres, a beta free-form value", pgRow(projectID, "freeform", inline), `UPDATE monitors SET config = jsonb_set(config, '{sslmode}', '"require host=a"') WHERE id = $1`},
 		{"postgres by reference, sslmode prefer", postgresRefMonitor(projectID, "ref-prefer", "db-password"), `UPDATE monitors SET config = jsonb_set(config, '{sslmode}', '"prefer"') WHERE id = $1`},
 		{"synthetic", domain.Monitor{
-			ProjectID: projectID, Name: "synthetic", Type: domain.MonitorSynthetic,
+			RecoveryThreshold: 1,
+			ProjectID:         projectID, Name: "synthetic", Type: domain.MonitorSynthetic,
 			IntervalSeconds: 60, TimeoutSeconds: 30, Enabled: true,
 			Config: map[string]string{"scenario": `{"steps":[{"url":"https://example.test/health"}]}`},
 		}, ""},
@@ -72,7 +73,8 @@ func pgRow(projectID, name string, config map[string]string) domain.Monitor {
 		c[k] = v
 	}
 	return domain.Monitor{
-		ProjectID: projectID, Name: name, Type: domain.MonitorPostgres, Target: "db.internal:5432",
+		RecoveryThreshold: 1,
+		ProjectID:         projectID, Name: name, Type: domain.MonitorPostgres, Target: "db.internal:5432",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true, Config: c,
 	}
 }

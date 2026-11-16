@@ -33,6 +33,7 @@ import {
 } from "@/lib/canaryWorkflow";
 import { MAX_MONITOR_DESCRIPTION, descriptionLength } from "@/lib/monitorBounds";
 import { createdMonitorDestination } from "@/lib/onboarding";
+import { dependencyHintShown, hasRecoveryThreshold, soakWarning } from "@/lib/monitorRun";
 import AppShell from "@/components/AppShell.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
@@ -89,6 +90,7 @@ const form = reactive<{
   timeout_seconds: number;
   retries: number;
   failure_threshold: number;
+  recovery_threshold: number;
   confirm_interval_seconds: number;
   renotify_seconds: number;
   grace_seconds: number;
@@ -107,6 +109,7 @@ const form = reactive<{
   timeout_seconds: 10,
   retries: 0,
   failure_threshold: 1,
+  recovery_threshold: 1,
   confirm_interval_seconds: 10,
   renotify_seconds: 0,
   grace_seconds: 0,
@@ -133,6 +136,17 @@ function removeTag(t: string) {
 const isComposite = computed(() => form.type === "composite");
 const isSynthetic = computed(() => form.type === "synthetic");
 const isCanary = computed(() => form.type === "async_canary");
+
+// FR-043 (func-recovery-threshold.md §8, approved mock sections 1–3). push and composite have no
+// field and send none (D8) — whatever it held before the type was switched, since a hidden value
+// above 1 would be a 400. The warning and the hint are the shared module's (lib/monitorRun.ts).
+const showRecoveryThreshold = computed(() => hasRecoveryThreshold(form.type));
+const recoverySoakWarning = computed(() =>
+  showRecoveryThreshold.value ? soakWarning(Number(form.interval_seconds) || 0, Number(form.recovery_threshold) || 1) : undefined,
+);
+const recoveryDependencyHint = computed(
+  () => showRecoveryThreshold.value && dependencyHintShown([...depIds.value], Number(form.recovery_threshold) || 1),
+);
 // B3: a canary REFUSES a retry count. The runner applies `retries + 1` attempts each bounded by the
 // monitor's own timeout, while the in-flight lease is ONE timeout plus a fixed slack — so two
 // attempts outlive the lease and the job is re-claimed while the first journey is still running. A
@@ -453,6 +467,9 @@ async function createMultiRegionSet(): Promise<void> {
     auto_incident: false, // children stay quiet; the composite owns incidents/alerts
     tags: form.tags,
   };
+  // FR-043: the regional children carry the form's recovery threshold; the composite parent below
+  // carries none — above 1 it is refused (D8) and would roll back the children already created.
+  if (showRecoveryThreshold.value) base.recovery_threshold = form.recovery_threshold;
   if (form.type === "http") base.method = form.method as CreateMonitor["method"];
   if (showConditions.value) base.conditions = assembled.value;
   { const cfg = typeConfig(); if (cfg) base.config = cfg; }
@@ -736,6 +753,7 @@ async function submit() {
       if (showTarget.value) patch.target = form.target.trim();
       if (form.type === "http") patch.method = form.method as UpdateMonitor["method"];
       if (form.type === "push") patch.grace_seconds = form.grace_seconds;
+      if (showRecoveryThreshold.value) patch.recovery_threshold = form.recovery_threshold;
       if (showConditions.value) patch.conditions = assembled.value;
       { const cfg = typeConfig(); if (cfg) patch.config = cfg; }
       const res = await api.PATCH("/api/v1/monitors/{monitorID}", {
@@ -786,6 +804,7 @@ async function submit() {
     };
     if (showTarget.value) body.target = form.target.trim();
     if (form.type === "http") body.method = form.method as CreateMonitor["method"];
+    if (showRecoveryThreshold.value) body.recovery_threshold = form.recovery_threshold;
     if (showConditions.value) body.conditions = assembled.value;
     { const cfg = typeConfig(); if (cfg) body.config = cfg; }
     const res = await api.POST("/api/v1/projects/{projectID}/monitors", {
@@ -822,6 +841,7 @@ async function loadForEdit() {
   form.timeout_seconds = m.timeout_seconds ?? 10;
   form.retries = m.retries ?? 0;
   form.failure_threshold = m.failure_threshold ?? 1;
+  form.recovery_threshold = m.recovery_threshold ?? 1;
   form.confirm_interval_seconds = m.confirm_interval_seconds ?? 10;
   depIds.value = new Set(m.depends_on ?? []);
   form.renotify_seconds = m.renotify_seconds ?? 0;
@@ -1847,6 +1867,17 @@ const selectCls =
                   </span>
                   <span class="text-[11.5px] text-ink-3">Re-send the alert every N sec while down (0 = off).</span>
                 </label>
+                <!-- FR-043: opens the third row, directly under Confirmations — the way down above, the way up below. -->
+                <label v-if="showRecoveryThreshold" class="flex flex-col gap-[6px]" data-testid="monitor-recovery-threshold">
+                  <span class="text-[12px] font-semibold text-ink-2">Recovery threshold</span>
+                  <span class="relative">
+                    <input v-model.number="form.recovery_threshold" type="number" min="1" max="10" step="1" :class="[inputCls, 'pr-[44px] font-mono']" />
+                    <span class="pointer-events-none absolute right-[11px] top-1/2 -translate-y-1/2 font-mono text-[12px] text-ink-3">ok</span>
+                  </span>
+                  <span class="text-[11.5px] text-ink-3">Consecutive successful checks before "up" again. The monitor stays down until this many checks in a row succeed. 1–10.</span>
+                </label>
+                <div v-if="recoverySoakWarning" data-testid="recovery-soak-warning" class="col-span-full rounded-sm border border-degraded/40 bg-degraded-weak px-3 py-2 text-[12.5px] leading-[1.5] text-ink-2"><b class="font-semibold text-degraded">Slow recovery.</b> {{ recoverySoakWarning }}</div>
+                <div v-if="recoveryDependencyHint" data-testid="recovery-dependency-hint" class="col-span-full rounded-sm border border-border bg-inset px-3 py-2 text-[12.5px] leading-[1.5] text-ink-2"><b class="font-semibold text-ink">This monitor depends on other monitors.</b> A parent with a lower recovery threshold recovers first — and from that moment stops suppressing this monitor's alerts, even while this monitor is still down.</div>
               </div>
               <div v-else class="grid grid-cols-2 gap-3 max-[560px]:grid-cols-1">
                 <label class="flex flex-col gap-[6px]">

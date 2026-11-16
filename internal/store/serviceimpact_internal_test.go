@@ -37,7 +37,8 @@ func seedImpact(t *testing.T, st *Store, ctx context.Context, names ...string) i
 	f := impactFixture{projectID: proj.ID, svc: map[string]string{}, mon: map[string]string{}}
 	for _, name := range names {
 		m, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: proj.ID, Name: name + "-mon", Type: domain.MonitorHTTP,
+			RecoveryThreshold: 1,
+			ProjectID:         proj.ID, Name: name + "-mon", Type: domain.MonitorHTTP,
 			Target: "https://" + name + ".example.com/", IntervalSeconds: 30, Region: "core", Enabled: true,
 		})
 		if err != nil {
@@ -364,7 +365,8 @@ func TestImpactTenancyBySchema(t *testing.T) {
 		t.Fatalf("alien service: %v", err)
 	}
 	alienMon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj2.ID, Name: "alien-mon", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj2.ID, Name: "alien-mon", Type: domain.MonitorHTTP,
 		Target: "https://alien.example.com/", IntervalSeconds: 30, Region: "core", Enabled: true,
 	})
 	if err != nil {

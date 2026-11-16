@@ -177,6 +177,13 @@ type MonitorTransition struct {
 	// Zero means "unset" (legacy events pre-dating the counter): never treated as
 	// stale, always delivered.
 	Seq int64 `json:"seq,omitempty"`
+	// The recovery snapshot of a confirmed down→up (FR-043 §4.6), captured by the confirming
+	// transaction before it reset the columns. The worker renders from these, never from the
+	// monitor row. All three are absent on every other event and on every event enqueued before
+	// the upgrade, which then renders today's text.
+	RecoveryRun       int        `json:"recovery_run,omitempty"`
+	RecoveryThreshold int        `json:"recovery_threshold,omitempty"`
+	RecoveryFirstOK   *time.Time `json:"recovery_first_ok,omitempty"`
 }
 
 // SLOBurnAlert is the payload for a TopicSLOBurnAlert outbox event: a monitor's

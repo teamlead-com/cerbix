@@ -28,7 +28,7 @@ func TestRenderPerType(t *testing.T) {
 	mon := domain.Monitor{ID: "m1", Name: "API", ProjectID: "p1"}
 
 	// Slack → {text}.
-	_, body, ct, err := render(domain.NotificationChannel{Type: domain.ChannelSlack, Config: map[string]string{"url": "http://s"}}, mon, false)
+	_, body, ct, err := render(domain.NotificationChannel{Type: domain.ChannelSlack, Config: map[string]string{"url": "http://s"}}, mon, false, nil)
 	if err != nil || ct != "application/json" {
 		t.Fatalf("slack render: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestRenderPerType(t *testing.T) {
 	}
 
 	// Telegram → api URL + chat_id.
-	url, body, _, err := render(domain.NotificationChannel{Type: domain.ChannelTelegram, Config: map[string]string{"bot_token": "BOT", "chat_id": "42"}}, mon, true)
+	url, body, _, err := render(domain.NotificationChannel{Type: domain.ChannelTelegram, Config: map[string]string{"bot_token": "BOT", "chat_id": "42"}}, mon, true, nil)
 	if err != nil || !strings.Contains(url, "/botBOT/sendMessage") {
 		t.Fatalf("telegram url = %q err %v", url, err)
 	}
@@ -50,7 +50,7 @@ func TestRenderPerType(t *testing.T) {
 	}
 
 	// Webhook → structured JSON.
-	_, body, _, err = render(domain.NotificationChannel{Type: domain.ChannelWebhook, Config: map[string]string{"url": "http://w"}}, mon, false)
+	_, body, _, err = render(domain.NotificationChannel{Type: domain.ChannelWebhook, Config: map[string]string{"url": "http://w"}}, mon, false, nil)
 	if err != nil || !strings.Contains(string(body), "monitor.transition") || !strings.Contains(string(body), "m1") {
 		t.Fatalf("webhook body = %s err %v", body, err)
 	}
@@ -103,7 +103,7 @@ func TestEmailDelivery(t *testing.T) {
 	}}}
 	d := New(store, nil)
 
-	if err := d.Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false); err != nil {
+	if err := d.Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false, nil); err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
 	s := <-captured
@@ -132,7 +132,7 @@ func TestDeliveryPosts(t *testing.T) {
 	}}
 	d := New(store, srv.Client())
 
-	if err := d.Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false); err != nil {
+	if err := d.Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false, nil); err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
 	b := <-got
@@ -151,7 +151,7 @@ func TestDeliverReportsFailure(t *testing.T) {
 	store := &fakeStore{channels: []domain.NotificationChannel{
 		{ID: "nc1", Type: domain.ChannelWebhook, Config: map[string]string{"url": bad.URL}, Enabled: true},
 	}}
-	if err := New(store, bad.Client()).Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false); err == nil {
+	if err := New(store, bad.Client()).Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false, nil); err == nil {
 		t.Fatal("non-2xx channel should surface an error")
 	}
 }

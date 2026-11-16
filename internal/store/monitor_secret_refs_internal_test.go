@@ -13,7 +13,8 @@ import (
 
 func postgresRefMonitor(projectID, name, ref string) domain.Monitor {
 	return domain.Monitor{
-		ProjectID: projectID, Name: name, Type: domain.MonitorPostgres,
+		RecoveryThreshold: 1,
+		ProjectID:         projectID, Name: name, Type: domain.MonitorPostgres,
 		Target: "db.internal:5432", IntervalSeconds: 60, TimeoutSeconds: 5,
 		Enabled: true,
 		Config: map[string]string{

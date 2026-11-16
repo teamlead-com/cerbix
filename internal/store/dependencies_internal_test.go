@@ -19,7 +19,8 @@ func TestMonitorDependencies(t *testing.T) {
 	other, _ := st.CreateProject(ctx, org.ID, "web", "Web")
 	mk := func(projID, name string) domain.Monitor {
 		m, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: projID, Name: name, Type: domain.MonitorTCP, Target: "10.0.0.1:80",
+			RecoveryThreshold: 1,
+			ProjectID:         projID, Name: name, Type: domain.MonitorTCP, Target: "10.0.0.1:80",
 			IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 		})
 		if err != nil {

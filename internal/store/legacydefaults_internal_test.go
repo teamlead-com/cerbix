@@ -28,7 +28,8 @@ func TestMaterializeStatesTheLegacyValueOfAnAbsentKey(t *testing.T) {
 		{domain.MonitorMySQL, map[string]string{"username": "u", "database": "d", "password": "inline-pw"}, "tls", "false"},
 	} {
 		m, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: projectID, Name: "beta-" + string(tc.typ), Type: tc.typ, Target: "db.internal:5432",
+			RecoveryThreshold: 1,
+			ProjectID:         projectID, Name: "beta-" + string(tc.typ), Type: tc.typ, Target: "db.internal:5432",
 			IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true, Config: tc.config,
 		})
 		if err != nil {

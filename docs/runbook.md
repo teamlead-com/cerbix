@@ -1392,6 +1392,147 @@ Fix each row where it lives:
 - **Email channel:** edit the channel.
 - **Instance sender:** Settings → Mail.
 
+## Monitor recovery threshold (FR-043 / NFR-036)
+
+Since iter-0214 a monitor declares `recovery_threshold`: how many checks in a row must succeed while it
+is `down` before it is `up` again. The contract is [`func-recovery-threshold.md`](specs/func-recovery-threshold.md)
+(D-0281).
+- **Values.** An integer 1..10. 1 means the first success recovers, which is the behaviour before this
+  field existed. Migration 00117 gives every existing monitor 1, so nothing changes until you raise it.
+- **Push and composite** take exactly 1. A larger value is a 400 in the API and a `domain_invalid` bundle
+  error for `push` in Monitoring-as-Code. Nothing is clamped: `0` and `11` are refused, not corrected.
+- **Only the way back from `down`.** A `pending` monitor (new, or re-enabled) is `up` on its first success
+  whatever the value.
+- **Where to set it.** The monitor form (Schedule card, under Confirmations), `recovery_threshold` on API
+  create and update (omitted on update keeps the stored value), and `recovery_threshold` in a bundle
+  (omitted is 1). A bundle that omits the key or declares `1` keeps its `spec_hash`, so the upgrade plans
+  no change for an unchanged file. Test-connection refuses the key as an unknown field.
+
+### During a recovery run
+
+- **Status.** The monitor stays `down`. The monitor list and the monitor page show a neutral
+  `recovering N/M` chip beside the Down pill; the page also shows `Confirming N/M…` for the way down.
+  Both labels are as fresh as the last load of the page: the run advances without a status change, and
+  nothing is pushed live until one.
+- **Alerts.** No transition event, no recovery notification, and the auto-incident stays open.
+- **A failed check ends the run.** The monitor needs M successes again. A broken run sends nothing and
+  resolves nothing.
+- **Reminders pause (D1).** No "still down" reminder is enqueued while the run is in progress. When it
+  breaks, reminders continue on the schedule they already had: the success that started the run did not
+  clear `last_notified_at`.
+- **The monitor's escalation ladder pauses (D2, D9).** No step and no `repeat_last` repetition fires for
+  the monitor's incident during the run. Nothing is re-dated: each step stays due at `started_at +
+  after_seconds`, and the repeat counts from `last_escalated_at`. So:
+  - a step that fell due during a run that then broke fires on the first pass after the break;
+  - if several fell due during a long run, **all of them fire in that one pass**;
+  - `repeat_last` resumes after a break the same way;
+  - a run that completes never fires the paused steps: the monitor is `up`, and the ladder pages only a
+    `down` monitor.
+
+  A **service** incident's ladder is not paused by a member's run.
+- **What does not touch the run.** A probe error, a duplicate or out-of-order result, and a result
+  refused as stale or from the future.
+- **What ends it without a check.** Re-enable, retire and reactivate reset the run in the same statement.
+  Disabling does not; the run is reset when the monitor is enabled again.
+- **Changing the threshold never changes the status (D10).** The next success is compared against the
+  new value. After lowering 4 to 2 with three successes in, the chip reads `recovering 3/2` until the next
+  check, which confirms the recovery.
+- **A person resolved the incident mid-run (D11).** Nothing new: if the run breaks, no new incident
+  opens; if it completes, the recovery is notified and the person's resolution stands.
+
+To see the runs in progress:
+
+```sql
+SELECT id, name, status, consecutive_successes, recovery_threshold, recovery_started_at
+  FROM monitors
+ WHERE consecutive_successes > 0
+ ORDER BY recovery_started_at;
+```
+
+`recovery_started_at` is the database clock of the run's first success, read after the monitor's row
+lock is held. It is never earlier than the commit of the `down` verdict before the run. With one ingest
+consumer it is also never earlier than that verdict's auto-incident `started_at`. Across several `api`
+replicas consuming a backlog it can precede `started_at` by the gap between the verdict's commit and the
+incident's open (milliseconds, or the open's retry backoff).
+
+### What a confirmed recovery says
+
+A run of more than one success adds one sentence, after one space, to today's text:
+
+```
+Recovered: 3/3 consecutive checks passed; first OK at 2026-11-16T14:04:05Z
+```
+
+- **Where.** The auto-incident's resolving update (`Monitor recovered — automatically resolved. Recovered: …`)
+  and the notification (`🟢 <Name> recovered — it is back UP. Recovered: …`) carry the same string.
+  Through the resolving update it also reaches project webhooks, status-page subscriber mail and the
+  public timeline. Not the RSS/Atom/JSON feeds: a feed item carries the incident's title, status and
+  impact, never an update's text.
+- **What stays.** The email Subject, and the webhook channel's JSON keys (`"event": "monitor.transition"`,
+  `"up": true`): the sentence is in `text` only.
+- **N and M** differ only when the threshold was lowered during the run (`4/2`). The time is UTC, whole
+  seconds.
+- **No sentence** at threshold 1, for a run of one, and for an event queued before the upgrade: those texts
+  are byte for byte what they were.
+
+### The cost: recovery is announced later
+
+- **Checks are not accelerated on the way up (D4).** The run is checked at the monitor's ordinary
+  interval, so "recovered" arrives about `interval_seconds × (recovery_threshold − 1)` after the first good
+  answer: two minutes at 60 s and 3, ten minutes at 300 s and 3.
+- **The form warns** ("Slow recovery.") when that product reaches 600 s.
+- **Incident duration grows (D5).** An auto-incident is resolved at the instant the recovery is
+  confirmed, so its displayed duration (`resolved_at − started_at`) grows by
+  `(recovery_threshold − 1) × interval_seconds`. The first success is in the sentence above, not in
+  `resolved_at`. No SLA, SLI or budget number reads `resolved_at`.
+
+### Four consequences that are deliberate
+
+1. **A service can be green while its member monitor is still red.** A service measures from heartbeats,
+   which already hold the successes, and closes its own alert after its own `confirm_evaluations`. The
+   monitor alerts, and holds `down` for its run. `ServiceHealthNow` lists the member as failing while the
+   service SLI is healthy.
+2. **A parent can recover before its child.** With a parent at 1 and a child at 3, the parent's `down`
+   ends first, and with it the dependency suppression of the child's alerts. The form says so next to the
+   field when the monitor has a parent and a threshold above 1.
+3. **With the confirm phase on, a monitor held `down` gets no accelerated checks** — and the difference
+   outlives the run. The case is "recovered and failed again": `failure_threshold = 2`, a confirm interval
+   set, the monitor `down`, then one success and one failure.
+   - **At threshold 1** the success made it `up`, the failure put it into the confirm phase, and its next
+     check is accelerated.
+   - **At threshold 3** the success started a run, the failure broke it, the monitor never left `down`,
+     and nothing is accelerated.
+
+   From the same results on, the two monitors' checks — and their SLA — can differ (NFR-036 (c)).
+   Accelerating the way up would remove the difference; D4 excludes it.
+4. **NFR-036 is about a monitor's own checks.** A composite parent computes its check from its children's
+   statuses, and a child in a run is not up for `all`, `any` or `quorum`. So the parent's heartbeats depend
+   on the child's threshold. When that composite is a member of a service, the child's threshold reaches
+   the service's measurement through the parent's heartbeats.
+
+### What the threshold does not change (NFR-036)
+
+For a monitor whose configuration does not change:
+- **(a)** it alters, drops and re-dates no check result: every result reaches `heartbeats` as at any other
+  threshold;
+- **(b)** with the confirm phase off (`confirm_interval_seconds = 0` or `failure_threshold = 1`), the checks
+  scheduled and the heartbeats written are the same at every threshold, and so are monitor and project
+  SLA, burn rate, service SLI and budget, coverage, gate decisions and status-page availability bars.
+
+Editing the threshold is a monitor update like any other: the revision fence (D-0142) refuses results
+issued before it as stale.
+
+### Upgrading and rolling back
+
+- **Upgrade.** Migrations 00117 (three columns, three CHECKs) and 00118 (a trigger) are additive and need
+  no maintenance step. Thresholds can be raised at any point of a rolling upgrade.
+- **Older binaries — a role not yet upgraded, or every role after a rollback.** An older binary knows
+  nothing about the run: under it the threshold does not apply, a monitor goes up on its first success, and
+  no check result is lost. Migration 00118's trigger clears the run whenever a writer moves a monitor out of
+  `down`, so the run-state CHECK (`monitors_recovery_run_state`) accepts the older binary's write. Back on
+  this release the threshold applies again. Nothing needs to be set back before a rollback.
+- **One residue.** A failure written by an older binary keeps the monitor `down` and leaves a run in progress as it was, so back on this release the next success continues that run rather than starting a new one. At worst one recovery is confirmed a few checks early.
+
 ## Service reliability operations (FR-021)
 
 The persisted relationships for this subsystem are summarized in the

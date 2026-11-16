@@ -316,7 +316,9 @@ const monitorColumns = "id, project_id, name, type, target, interval_seconds, ti
 	// stays the execution switch. New columns append at the END, here and in scanMonitorMode.
 	"COALESCE(superseded_by_service_id::text,''), retired_at, " +
 	// FR-030: appended at the END, here and in the scan below, as every column before it was.
-	"description"
+	"description, " +
+	// FR-043 §5: appended at the END, here and in scanMonitorAs, in this order.
+	"recovery_threshold, consecutive_successes, recovery_started_at"
 
 // methodOrGet keeps the NOT NULL method column concrete; the prober ignores it
 // for non-HTTP monitors.
@@ -397,7 +399,8 @@ func (s *Store) scanMonitorAs(row pgx.Row, mode readMode, extra ...any) (domain.
 	dests := []any{&m.ID, &m.ProjectID, &m.Name, &typ, &m.Target,
 		&m.IntervalSeconds, &m.TimeoutSeconds, &m.Retries, &m.Conditions,
 		&m.Enabled, &stat, &m.CreatedAt, &m.UpdatedAt, &pushToken, &m.Method, &m.GraceSeconds, &config, &m.AutoIncident, &m.FailureThreshold, &m.RenotifySeconds, &m.Tags, &m.Region, &escPolicy, &m.ConfirmIntervalSeconds, &m.ConsecutiveFailures, &m.ExecutionRevision, &m.StateSequence, &probeReason, &m.LastProbeErrorAt, &probeJobID, &m.DependsOn, &m.Slug,
-		&m.SupersededByServiceID, &m.RetiredAt, &m.Description}
+		&m.SupersededByServiceID, &m.RetiredAt, &m.Description,
+		&m.RecoveryThreshold, &m.ConsecutiveSuccesses, &m.RecoveryStartedAt}
 	dests = append(dests, extra...)
 	err := row.Scan(dests...)
 	if err != nil {
@@ -739,7 +742,7 @@ func (s *Store) RecordPushResult(ctx context.Context, monitorID string, up bool,
 			return ResultOutcome{}, err
 		}
 	}
-	prev, cur, suppressed, err := recordCheckStatusTx(ctx, tx, monitorID, up)
+	sc, err := recordCheckStatusTx(ctx, tx, monitorID, up)
 	if err != nil {
 		return ResultOutcome{}, err
 	}
@@ -753,7 +756,7 @@ func (s *Store) RecordPushResult(ctx context.Context, monitorID string, up bool,
 		return ResultOutcome{}, fmt.Errorf("store: advance last_result_ts: %w", err)
 	}
 	return s.commitOutcome(ctx, tx, ResultOutcome{
-		Applied: true, Inserted: true, Prev: prev, Cur: cur, Suppressed: suppressed,
+		Applied: true, Inserted: true, Prev: sc.Prev, Cur: sc.Cur, Suppressed: sc.Suppressed, Recovery: sc.Recovery,
 	})
 }
 
@@ -994,7 +997,7 @@ func updateMonitorTxRow(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monit
 	row := tx.QueryRow(ctx,
 		`UPDATE monitors
 		    SET name = $2, target = $3, interval_seconds = $4, timeout_seconds = $5,
-		        retries = $6, conditions = $7, enabled = $8, method = $9, grace_seconds = $10, config = COALESCE($11::jsonb, config), auto_incident = $12, failure_threshold = $13, renotify_seconds = $14, tags = $15, region = $16, escalation_policy_id = $17, confirm_interval_seconds = $18, description = $19, updated_at = now(),
+		        retries = $6, conditions = $7, enabled = $8, method = $9, grace_seconds = $10, config = COALESCE($11::jsonb, config), auto_incident = $12, failure_threshold = $13, renotify_seconds = $14, tags = $15, region = $16, escalation_policy_id = $17, confirm_interval_seconds = $18, description = $19, recovery_threshold = $20, updated_at = now(),
 		        -- Config generation + freshness watermark, shared verbatim with the rotation
 		        -- fence (see revisionFenceSetSQL): bump on ANY UpdateMonitor, because a missed
 		        -- bump reopens the stale-config vulnerability while an extra one costs a single
@@ -1010,9 +1013,14 @@ func updateMonitorTxRow(ctx context.Context, tx pgx.Tx, s *Store, m domain.Monit
 		        push_armed_at = CASE WHEN type = 'push' AND NOT enabled AND $8 THEN statement_timestamp() ELSE push_armed_at END,
 		        status = CASE WHEN NOT enabled AND $8 THEN 'pending' ELSE status END,
 		        consecutive_failures = CASE WHEN NOT enabled AND $8 THEN 0 ELSE consecutive_failures END,
+		        -- FR-043 §4.1, I12: the re-arm ends a recovery run as well. Disabling does not (it writes
+		        -- no status); the run is reset when the monitor is enabled again. A threshold change
+		        -- alone touches neither the run nor the status (D10).
+		        consecutive_successes = CASE WHEN NOT enabled AND $8 THEN 0 ELSE consecutive_successes END,
+		        recovery_started_at = CASE WHEN NOT enabled AND $8 THEN NULL ELSE recovery_started_at END,
 		        state_sequence = CASE WHEN NOT enabled AND $8 THEN state_sequence + 1 ELSE state_sequence END
 		  WHERE id = $1 RETURNING `+monitorColumns,
-		m.ID, m.Name, m.Target, m.IntervalSeconds, m.TimeoutSeconds, m.Retries, conditions, m.Enabled, methodOrGet(m), m.GraceSeconds, config, m.AutoIncident, m.FailureThreshold, m.RenotifySeconds, tags, region, nullableID(m.EscalationPolicyID), m.ConfirmIntervalSeconds, m.Description)
+		m.ID, m.Name, m.Target, m.IntervalSeconds, m.TimeoutSeconds, m.Retries, conditions, m.Enabled, methodOrGet(m), m.GraceSeconds, config, m.AutoIncident, m.FailureThreshold, m.RenotifySeconds, tags, region, nullableID(m.EscalationPolicyID), m.ConfirmIntervalSeconds, m.Description, m.RecoveryThreshold)
 	updated, err := s.scanMonitorNoSecrets(row)
 	if noRows(err) {
 		return domain.Monitor{}, ErrNotFound
@@ -1174,7 +1182,10 @@ func (s *Store) SetMonitorStatus(ctx context.Context, id string, status domain.M
 	var prev domain.MonitorStatus
 	err = tx.QueryRow(ctx,
 		`WITH prev AS (SELECT id, status AS old FROM monitors WHERE id = $1)
-		 UPDATE monitors m SET status = $2, updated_at = now()
+		 UPDATE monitors m SET status = $2, updated_at = now(),
+		        -- FR-043 §4.1: a run lives only on a down monitor, so any other status ends it.
+		        consecutive_successes = CASE WHEN $2 = 'down' THEN m.consecutive_successes ELSE 0 END,
+		        recovery_started_at = CASE WHEN $2 = 'down' THEN m.recovery_started_at ELSE NULL END
 		 FROM prev WHERE m.id = prev.id
 		 RETURNING prev.old`,
 		id, string(status)).Scan(&prev)
@@ -1206,15 +1217,19 @@ func (s *Store) SetMonitorStatus(ctx context.Context, id string, status domain.M
 }
 
 // RecordCheckStatus applies one check result to a monitor's status atomically,
-// with alert confirmations and maintenance suppression:
+// with alert confirmations, recovery confirmations and maintenance suppression:
 //   - a down flip happens only after failure_threshold consecutive failures
-//     (the live consecutive_failures counter); recovery (up) is immediate and
-//     resets the counter;
+//     (the live consecutive_failures counter);
+//   - the way back from down waits for recovery_threshold consecutive successes
+//     (the live consecutive_successes run, FR-043); pending → up is immediate (D7);
 //   - when the flip occurs inside an active maintenance window it is suppressed:
 //     the status still changes (accuracy + SLA) but no transition notification is
 //     enqueued and suppressed=true tells the caller not to open an incident.
 //
-// It returns the previous and new status plus whether the change was suppressed.
+// It returns the previous and new status plus whether the change was suppressed. It keeps
+// that signature and drops the recovery snapshot (FR-043 §7): its callers are integration
+// tests and none of them renders a recovery. The ingest paths reach the snapshot through
+// ResultOutcome.
 func (s *Store) RecordCheckStatus(ctx context.Context, monitorID string, up bool) (prev, cur domain.MonitorStatus, suppressed bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1222,14 +1237,32 @@ func (s *Store) RecordCheckStatus(ctx context.Context, monitorID string, up bool
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
-	prev, cur, suppressed, err = recordCheckStatusTx(ctx, tx, monitorID, up)
+	// FR-043 D6: take the row lock in a statement of its own, as the ingest entry points already
+	// do, so that the statement recordCheckStatusTx reads the clock in starts AFTER the wait.
+	// Without it the UPDATE below would acquire the lock itself, and its statement_timestamp() —
+	// the first-OK of a run — would be taken before the wait for a concurrent writer.
+	var exists int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM monitors WHERE id = $1 FOR UPDATE`, monitorID).Scan(&exists); noRows(err) {
+		return "", "", false, ErrNotFound
+	} else if err != nil {
+		return "", "", false, fmt.Errorf("store: record status lock: %w", err)
+	}
+	sc, err := recordCheckStatusTx(ctx, tx, monitorID, up)
 	if err != nil {
 		return "", "", false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return "", "", false, fmt.Errorf("store: commit record status: %w", err)
 	}
-	return prev, cur, suppressed, nil
+	return sc.Prev, sc.Cur, sc.Suppressed, nil
+}
+
+// statusChange is what recordCheckStatusTx did: the old and new status, whether the change fell
+// inside maintenance, and the recovery snapshot of a confirmed down→up (nil otherwise).
+type statusChange struct {
+	Prev, Cur  domain.MonitorStatus
+	Suppressed bool
+	Recovery   *domain.RecoverySnapshot
 }
 
 // recordCheckStatusTx applies one check result to a monitor's live status inside an
@@ -1237,13 +1270,30 @@ func (s *Store) RecordCheckStatus(ctx context.Context, monitorID string, up bool
 // semantics). It does NOT commit — the caller owns the transaction, which lets the
 // heartbeat insert, the status flip and the transition-outbox event all land in one
 // atomic unit (RecordResult).
-func recordCheckStatusTx(ctx context.Context, tx pgx.Tx, monitorID string, up bool) (prev, cur domain.MonitorStatus, suppressed bool, err error) {
+//
+// The CALLER holds the monitor's row lock before this runs (RecordScheduledResult,
+// RecordPushResult, RecordDeadmanResult and RecordCheckStatus each take it in a statement of
+// their own). That is what makes statement_timestamp() below the clock AFTER the lock — the
+// first-OK of a recovery run (FR-043 D6, I17). Not now(): that is the transaction's start,
+// taken before any wait.
+//
+// The recovery run (FR-043 §4.1). `continuing` is a success on a down monitor that does not yet
+// complete the run: the monitor stays down, the run grows, its first-OK is stamped once and kept,
+// and last_notified_at is KEPT (§4.2 — clearing it here would silence the reminders of an outage
+// whose run then breaks). Every other result leaves the run at 0 / NULL: a failure ends it, and
+// the success that completes it confirms the recovery. With recovery_threshold = 1 `continuing`
+// can never hold and the statement is today's (I1).
+func recordCheckStatusTx(ctx context.Context, tx pgx.Tx, monitorID string, up bool) (statusChange, error) {
 	var prevS, curS string
 	var inMaint bool
 	var fails, threshold, confirmSec int
-	err = tx.QueryRow(ctx,
+	var run, recThreshold int
+	var firstOK time.Time
+	err := tx.QueryRow(ctx,
 		`WITH cur AS (
-		   SELECT id, project_id, status AS old_status, consecutive_failures, failure_threshold
+		   SELECT id, project_id, status AS old_status, consecutive_failures, failure_threshold,
+		          recovery_threshold, consecutive_successes, recovery_started_at,
+		          ($2 AND status = 'down' AND consecutive_successes + 1 < recovery_threshold) AS continuing
 		   FROM monitors WHERE id = $1 FOR UPDATE
 		 ),
 		 maint AS (
@@ -1256,16 +1306,24 @@ func recordCheckStatusTx(ctx context.Context, tx pgx.Tx, monitorID string, up bo
 		 UPDATE monitors m SET
 		   consecutive_failures = CASE WHEN $2 THEN 0 ELSE cur.consecutive_failures + 1 END,
 		   status = CASE
+		     WHEN cur.continuing THEN 'down'
 		     WHEN $2 THEN 'up'
 		     WHEN cur.consecutive_failures + 1 >= cur.failure_threshold THEN 'down'
 		     ELSE m.status
 		   END,
+		   consecutive_successes = CASE WHEN cur.continuing THEN cur.consecutive_successes + 1 ELSE 0 END,
+		   recovery_started_at = CASE
+		     WHEN cur.continuing THEN COALESCE(cur.recovery_started_at, statement_timestamp())
+		     ELSE NULL
+		   END,
 		   -- last_notified_at drives re-notify: stamped on a fresh down (including a
 		   -- down that starts during maintenance, so the renotify job re-enqueues it
 		   -- and it delivers once the window ends — the initial notify is muted at
-		   -- DELIVERY, not dropped here), cleared on recovery, else left for the
-		   -- reminder job to bump.
+		   -- DELIVERY, not dropped here), cleared on a transition into up and on a
+		   -- success while up, KEPT by a success that leaves the monitor down (FR-043
+		   -- §4.2), else left for the reminder job to bump.
 		   last_notified_at = CASE
+		     WHEN cur.continuing THEN m.last_notified_at
 		     WHEN $2 THEN NULL
 		     WHEN cur.consecutive_failures + 1 >= cur.failure_threshold AND cur.old_status <> 'down' THEN now()
 		     ELSE m.last_notified_at
@@ -1273,22 +1331,31 @@ func recordCheckStatusTx(ctx context.Context, tx pgx.Tx, monitorID string, up bo
 		   updated_at = now()
 		 FROM cur, maint
 		 WHERE m.id = cur.id
-		 RETURNING cur.old_status, m.status, maint.in_maint, m.consecutive_failures, m.failure_threshold, m.confirm_interval_seconds`,
-		monitorID, up).Scan(&prevS, &curS, &inMaint, &fails, &threshold, &confirmSec)
+		 RETURNING cur.old_status, m.status, maint.in_maint, m.consecutive_failures, m.failure_threshold, m.confirm_interval_seconds,
+		           -- The recovery snapshot (§4.6), read from the PRE-update row before the reset: the
+		           -- run this result completes, the threshold it was compared against, and its first
+		           -- OK (this statement's clock for a run of one). Meaningful only on down → up.
+		           cur.consecutive_successes + 1, cur.recovery_threshold,
+		           COALESCE(cur.recovery_started_at, statement_timestamp())`,
+		monitorID, up).Scan(&prevS, &curS, &inMaint, &fails, &threshold, &confirmSec, &run, &recThreshold, &firstOK)
 	if noRows(err) {
-		return "", "", false, ErrNotFound
+		return statusChange{}, ErrNotFound
 	}
 	if err != nil {
-		return "", "", false, fmt.Errorf("store: record check status: %w", err)
+		return statusChange{}, fmt.Errorf("store: record check status: %w", err)
 	}
-	prev, cur = domain.MonitorStatus(prevS), domain.MonitorStatus(curS)
+	out := statusChange{Prev: domain.MonitorStatus(prevS), Cur: domain.MonitorStatus(curS), Suppressed: inMaint}
+	if up && out.Prev == domain.StatusDown && out.Cur == domain.StatusUp {
+		out.Recovery = &domain.RecoverySnapshot{Run: run, Threshold: recThreshold, FirstOK: firstOK}
+	}
 	// Confirmation phase entered/continuing (a failure counted, no verdict yet):
 	// wake the scheduler leader so the next probe comes at the confirm interval
 	// instead of the main one. Same-transaction NOTIFY — delivered on commit; a
-	// missed signal is harmless (the snapshot refresh path catches up).
-	if !up && cur != domain.StatusDown && fails > 0 && fails < threshold && confirmSec > 0 {
+	// missed signal is harmless (the snapshot refresh path catches up). A recovery
+	// run sends nothing: the way up is never accelerated (FR-043 D4).
+	if !up && out.Cur != domain.StatusDown && fails > 0 && fails < threshold && confirmSec > 0 {
 		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, ConfirmChannel, monitorID); err != nil {
-			return "", "", false, fmt.Errorf("store: notify confirm phase: %w", err)
+			return statusChange{}, fmt.Errorf("store: notify confirm phase: %w", err)
 		}
 	}
 	// Enqueue the transition on every real flip, INCLUDING one during maintenance:
@@ -1297,20 +1364,29 @@ func recordCheckStatusTx(ctx context.Context, tx pgx.Tx, monitorID string, up bo
 	// meant a monitor that went down mid-window and stayed down was never alerted
 	// even after the window closed. (Incident opening is still gated on !inMaint in
 	// ingest via the returned suppressed flag — maintenance shouldn't spawn incidents.)
-	if prev != cur {
+	// A run in progress, or one that breaks, changes no status and so enqueues nothing (§4.2).
+	if out.Prev != out.Cur {
 		seq, err := bumpStateSequenceTx(ctx, tx, monitorID)
 		if err != nil {
-			return "", "", false, err
+			return statusChange{}, err
 		}
-		payload, err := json.Marshal(domain.MonitorTransition{MonitorID: monitorID, Prev: prev, Cur: cur, Seq: seq})
+		mt := domain.MonitorTransition{MonitorID: monitorID, Prev: out.Prev, Cur: out.Cur, Seq: seq}
+		// The worker renders the recovery sentence from the event, never from the row, which this
+		// statement has just reset (§4.6). Only a run of more than one carries a sentence, so a
+		// threshold-1 recovery enqueues the payload it always did, byte for byte (I1).
+		if out.Recovery != nil && out.Recovery.Run > 1 {
+			first := out.Recovery.FirstOK
+			mt.RecoveryRun, mt.RecoveryThreshold, mt.RecoveryFirstOK = out.Recovery.Run, out.Recovery.Threshold, &first
+		}
+		payload, err := json.Marshal(mt)
 		if err != nil {
-			return "", "", false, fmt.Errorf("store: marshal transition: %w", err)
+			return statusChange{}, fmt.Errorf("store: marshal transition: %w", err)
 		}
 		if err := enqueueOutboxTx(ctx, tx, domain.TopicMonitorTransition, payload); err != nil {
-			return "", "", false, err
+			return statusChange{}, err
 		}
 	}
-	return prev, cur, inMaint, nil
+	return out, nil
 }
 
 // bumpStateSequenceTx increments the monitor's monotonic transition counter and
@@ -1355,6 +1431,8 @@ type ResultOutcome struct {
 	Prev, Cur  domain.MonitorStatus
 	Suppressed bool
 	Reason     string
+	// Recovery is the snapshot of a confirmed down→up (FR-043 §4.6), nil on every other outcome.
+	Recovery *domain.RecoverySnapshot
 	// MissingRevisionObserved is set when a scheduled result carried no revision and was
 	// accepted under observe mode (the migration counter watched before switching to
 	// enforce). Orthogonal to Reason (the result is still applied/inserted normally).
@@ -1612,7 +1690,7 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 		// Out-of-order: heartbeat kept for SLA, live state untouched.
 		return s.commitOutcome(ctx, tx, ResultOutcome{Inserted: true, Reason: ReasonOutOfOrder}.withMissing(missingObserved))
 	}
-	prev, cur, suppressed, err := recordCheckStatusTx(ctx, tx, hb.MonitorID, hb.Up)
+	sc, err := recordCheckStatusTx(ctx, tx, hb.MonitorID, hb.Up)
 	if err != nil {
 		return ResultOutcome{}, err
 	}
@@ -1626,7 +1704,7 @@ func (s *Store) RecordScheduledResult(ctx context.Context, hb domain.Heartbeat) 
 		return ResultOutcome{}, fmt.Errorf("store: advance last_result_ts: %w", err)
 	}
 	return s.commitOutcome(ctx, tx, ResultOutcome{
-		Applied: true, Inserted: true, Prev: prev, Cur: cur, Suppressed: suppressed,
+		Applied: true, Inserted: true, Prev: sc.Prev, Cur: sc.Cur, Suppressed: sc.Suppressed, Recovery: sc.Recovery,
 	}.withMissing(missingObserved))
 }
 
@@ -1687,12 +1765,12 @@ func (s *Store) RecordDeadmanResult(ctx context.Context, monitorID string, revis
 			return ResultOutcome{}, err
 		}
 	}
-	prev, cur, suppressed, err := recordCheckStatusTx(ctx, tx, monitorID, false)
+	sc, err := recordCheckStatusTx(ctx, tx, monitorID, false)
 	if err != nil {
 		return ResultOutcome{}, err
 	}
 	return s.commitOutcome(ctx, tx, ResultOutcome{
-		Applied: true, Inserted: true, Prev: prev, Cur: cur, Suppressed: suppressed,
+		Applied: true, Inserted: true, Prev: sc.Prev, Cur: sc.Cur, Suppressed: sc.Suppressed, Recovery: sc.Recovery,
 	})
 }
 
@@ -1720,6 +1798,11 @@ func (s *Store) EnqueueRenotifyReminders(ctx context.Context) (int, error) {
 		`SELECT id, state_sequence FROM monitors
 		  WHERE status = 'down' AND renotify_seconds > 0 AND last_notified_at IS NOT NULL
 		    AND escalation_policy_id IS NULL
+		    -- FR-043 D1: no "still DOWN" while a recovery run is in progress — it would be the same
+		    -- false statement as a premature "recovered", in the other direction. When the run breaks
+		    -- the reminder is due on the schedule it already had (last_notified_at is kept by a
+		    -- success that leaves the monitor down, §4.2).
+		    AND consecutive_successes = 0
 		    AND last_notified_at <= now() - make_interval(secs => renotify_seconds)
 		  FOR UPDATE`)
 	if err != nil {

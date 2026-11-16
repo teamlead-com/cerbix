@@ -262,9 +262,9 @@ func seededStore() *fakeStore {
 		fs.byOrg[p.OrgID] = append(fs.byOrg[p.OrgID], p)
 	}
 	fs.users["u1"] = domain.User{ID: "u1", Email: "u1@x"}
-	fs.monitors["mon1"] = domain.Monitor{ID: "mon1", ProjectID: "p1", Name: "api-health", Type: domain.MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true}
-	fs.monitors["mon3"] = domain.Monitor{ID: "mon3", ProjectID: "p3", Name: "globex", Type: domain.MonitorHTTP, Target: "https://y", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true}
-	fs.monitors["monp"] = domain.Monitor{ID: "monp", ProjectID: "p1", Name: "nightly-backup", Type: domain.MonitorPush, IntervalSeconds: 3600, Enabled: true, PushToken: "tok-push"}
+	fs.monitors["mon1"] = domain.Monitor{RecoveryThreshold: 1, ID: "mon1", ProjectID: "p1", Name: "api-health", Type: domain.MonitorHTTP, Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true}
+	fs.monitors["mon3"] = domain.Monitor{RecoveryThreshold: 1, ID: "mon3", ProjectID: "p3", Name: "globex", Type: domain.MonitorHTTP, Target: "https://y", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true}
+	fs.monitors["monp"] = domain.Monitor{RecoveryThreshold: 1, ID: "monp", ProjectID: "p1", Name: "nightly-backup", Type: domain.MonitorPush, IntervalSeconds: 3600, Enabled: true, PushToken: "tok-push"}
 	// A seeded open incident in p1, and a resolved one in p3 (other org).
 	fs.incidents["inc1"] = domain.Incident{ID: "inc1", ProjectID: "p1", Title: "api degraded", Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceManual}
 	fs.incUpdates["inc1"] = []domain.IncidentUpdate{{ID: "iu1", IncidentID: "inc1", Status: domain.IncidentInvestigating, Body: "looking into it"}}
@@ -1465,9 +1465,9 @@ func TestFakeStoreComponentCreateContract(t *testing.T) {
 }
 
 func seedComponentContractBindings(fs *fakeStore) {
-	fs.monitors[componentBindingID] = domain.Monitor{ID: componentBindingID, ProjectID: "p1", Name: "contract-a", Type: domain.MonitorHTTP, Target: "https://a.example.test", IntervalSeconds: 60, Enabled: true}
-	fs.monitors[componentBindingProjectBID] = domain.Monitor{ID: componentBindingProjectBID, ProjectID: "p2", Name: "contract-b", Type: domain.MonitorHTTP, Target: "https://b.example.test", IntervalSeconds: 60, Enabled: true}
-	fs.monitors[componentBindingForeignID] = domain.Monitor{ID: componentBindingForeignID, ProjectID: "p3", Name: "contract-foreign", Type: domain.MonitorHTTP, Target: "https://foreign.example.test", IntervalSeconds: 60, Enabled: true}
+	fs.monitors[componentBindingID] = domain.Monitor{RecoveryThreshold: 1, ID: componentBindingID, ProjectID: "p1", Name: "contract-a", Type: domain.MonitorHTTP, Target: "https://a.example.test", IntervalSeconds: 60, Enabled: true}
+	fs.monitors[componentBindingProjectBID] = domain.Monitor{RecoveryThreshold: 1, ID: componentBindingProjectBID, ProjectID: "p2", Name: "contract-b", Type: domain.MonitorHTTP, Target: "https://b.example.test", IntervalSeconds: 60, Enabled: true}
+	fs.monitors[componentBindingForeignID] = domain.Monitor{RecoveryThreshold: 1, ID: componentBindingForeignID, ProjectID: "p3", Name: "contract-foreign", Type: domain.MonitorHTTP, Target: "https://foreign.example.test", IntervalSeconds: 60, Enabled: true}
 	fs.serviceStore()[componentBindingID] = &fakeService{svc: domain.Service{ID: componentBindingID, ProjectID: "p1", Slug: "contract-a", Name: "Contract A"}}
 	fs.serviceStore()[componentBindingProjectBID] = &fakeService{svc: domain.Service{ID: componentBindingProjectBID, ProjectID: "p2", Slug: "contract-b", Name: "Contract B"}}
 	fs.serviceStore()[componentBindingForeignID] = &fakeService{svc: domain.Service{ID: componentBindingForeignID, ProjectID: "p3", Slug: "contract-foreign", Name: "Contract foreign"}}

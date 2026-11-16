@@ -37,7 +37,8 @@ func canaryWithBinding(t *testing.T, projectID, slug, secretName string) domain.
 		t.Fatalf("canonical workflow: %v", err)
 	}
 	return domain.Monitor{
-		ProjectID: projectID, Name: slug, Slug: slug, Type: domain.MonitorAsyncCanary,
+		RecoveryThreshold: 1,
+		ProjectID:         projectID, Name: slug, Slug: slug, Type: domain.MonitorAsyncCanary,
 		Region: "core", Enabled: true, IntervalSeconds: 120, TimeoutSeconds: 60,
 		Config: map[string]string{"workflow": doc, "canary_secret_upload_ref": secretName},
 	}

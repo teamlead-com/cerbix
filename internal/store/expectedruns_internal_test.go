@@ -63,7 +63,8 @@ func seedLedgerProject(t *testing.T, st *Store, ctx context.Context, slug string
 func ledgerMonitor(t *testing.T, st *Store, ctx context.Context, projectID, name string, intervalSeconds int) domain.Monitor {
 	t.Helper()
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: projectID, Name: name, Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         projectID, Name: name, Type: domain.MonitorHTTP,
 		Target: "https://example.com/" + name, Method: "GET",
 		IntervalSeconds: intervalSeconds, TimeoutSeconds: 5, FailureThreshold: 1, Enabled: true,
 	})

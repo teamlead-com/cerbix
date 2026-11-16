@@ -41,7 +41,8 @@ func TestClassificationHasNoStaleEntries(t *testing.T) {
 
 func baseMonitor() Monitor {
 	return Monitor{
-		ID: "m1", ProjectID: "p1", Name: "checkout http",
+		RecoveryThreshold: 1,
+		ID:                "m1", ProjectID: "p1", Name: "checkout http",
 		Type: MonitorHTTP, Target: "https://checkout.example.com/healthz", Method: "GET",
 		IntervalSeconds: 30, TimeoutSeconds: 5, Retries: 1,
 		Region: "core", Enabled: true, Conditions: []string{"status==200"},

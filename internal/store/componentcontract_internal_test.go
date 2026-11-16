@@ -75,7 +75,8 @@ func seedComponentContractFixture(t *testing.T, st *Store) componentContractFixt
 	serviceIDs := map[contracttest.ComponentRef]string{contracttest.RefMissing: "00000000-0000-4000-8000-000000000099"}
 	for _, ref := range []contracttest.ComponentRef{contracttest.RefLocalA, contracttest.RefLocalB, contracttest.RefForeignOrg} {
 		monitor, createErr := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: projectIDs[ref], Name: "Monitor " + string(ref), Type: domain.MonitorHTTP,
+			RecoveryThreshold: 1,
+			ProjectID:         projectIDs[ref], Name: "Monitor " + string(ref), Type: domain.MonitorHTTP,
 			Target: "https://" + string(ref) + ".example.test", IntervalSeconds: 60, Enabled: true,
 		})
 		if createErr != nil {

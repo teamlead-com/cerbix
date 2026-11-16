@@ -81,10 +81,24 @@ func TestEveryDeclaredTypeCarriesEveryCommonField(t *testing.T) {
 		"    retries: 0\n" +
 		"    failure_threshold: 4\n"
 
+	// recovery_threshold is common to every type, but D8 of FR-043 pins it to 1 for push and refuses
+	// anything above — so the one value that cannot ride the shared block is set per type: a
+	// distinctive 3 everywhere it is allowed, 1 on push, and the refusal of 3 on push asserted on
+	// its own below. Every other type still proves the builder copies a value that is not the default.
+	recoveryLine := func(typ domain.MonitorType) string {
+		if typ == domain.MonitorPush {
+			return "    recovery_threshold: 1\n"
+		}
+		return "    recovery_threshold: 3\n"
+	}
+	bundleFor := func(typ domain.MonitorType, recovery string) string {
+		return "format: 2\norganization: acme\nproject: api\nmonitors:\n  subject:\n" +
+			"    name: Subject\n    type: " + string(typ) + "\n" + common + recovery + typeFixtures[typ]
+	}
+
 	for typ := range typeFixtures {
 		t.Run(string(typ), func(t *testing.T) {
-			body := "format: 2\norganization: acme\nproject: api\nmonitors:\n  subject:\n" +
-				"    name: Subject\n    type: " + string(typ) + "\n" + common + typeFixtures[typ]
+			body := bundleFor(typ, recoveryLine(typ))
 			proj, err := Decode([]byte(body), config.ProviderScopeConfig{Type: config.ProviderScopeInstance})
 			if err != nil {
 				t.Fatalf("the fixture for %s does not decode: %v", typ, err)
@@ -146,6 +160,19 @@ func TestEveryDeclaredTypeCarriesEveryCommonField(t *testing.T) {
 			}
 			if m.FailureThreshold != wantThreshold {
 				t.Errorf("failure_threshold = %d, want %d", m.FailureThreshold, wantThreshold)
+			}
+			wantRecovery := 3
+			if typ == domain.MonitorPush {
+				wantRecovery = 1
+				// D8: the value every other type carries is a validation error here, not a reset.
+				_, perr := Decode([]byte(bundleFor(typ, "    recovery_threshold: 3\n")),
+					config.ProviderScopeConfig{Type: config.ProviderScopeInstance})
+				if perr == nil || !strings.Contains(perr.Error(), "recovery_threshold") {
+					t.Errorf("push with recovery_threshold 3: err = %v, want a refusal naming recovery_threshold", perr)
+				}
+			}
+			if m.RecoveryThreshold != wantRecovery {
+				t.Errorf("recovery_threshold = %d, want %d", m.RecoveryThreshold, wantRecovery)
 			}
 			if m.Name != "Subject" {
 				t.Errorf("name = %q", m.Name)

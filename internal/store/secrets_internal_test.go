@@ -54,7 +54,8 @@ func secretsFixture(t *testing.T, st *Store, ctx context.Context, orgSlug, projS
 func createRefMonitor(t *testing.T, st *Store, ctx context.Context, projID, name, refName string, enabled bool) domain.Monitor {
 	t.Helper()
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: projID, Name: name, Type: domain.MonitorPostgres, Target: "db:5432",
+		RecoveryThreshold: 1,
+		ProjectID:         projID, Name: name, Type: domain.MonitorPostgres, Target: "db:5432",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: enabled,
 		Config: map[string]string{"username": "cerbix", "database": "app", "password_ref": refName},
 	})

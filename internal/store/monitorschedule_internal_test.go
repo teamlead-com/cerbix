@@ -288,7 +288,8 @@ func TestAPushMonitorNeverExpectsAWindow(t *testing.T) {
 	st, ctx := ledgerStore(t)
 	proj := seedLedgerProject(t, st, ctx, "pushexcl")
 	push, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj, Name: "pinged", Type: domain.MonitorPush,
+		RecoveryThreshold: 1,
+		ProjectID:         proj, Name: "pinged", Type: domain.MonitorPush,
 		IntervalSeconds: 60, TimeoutSeconds: 5, GraceSeconds: 30, Enabled: true,
 		PushToken: "push-token-fixture",
 	})

@@ -576,7 +576,8 @@ func TestDeletingAMonitorDeclaredByAFileOwnedServiceIsRefused(t *testing.T) {
 
 	// A UI-owned monitor, declared into the FILE-owned service by a UI declaration.
 	ui, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: projID, Name: "ui-extra", Type: domain.MonitorTCP,
+		RecoveryThreshold: 1,
+		ProjectID:         projID, Name: "ui-extra", Type: domain.MonitorTCP,
 		Target: "localhost:1", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
 	if err != nil {
@@ -613,7 +614,8 @@ func TestDeletingAMonitorKeepsItsMaintenanceProvenance(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	_, projID := seedTenant(t, st, ctx)
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: projID, Name: "doomed", Type: domain.MonitorTCP,
+		RecoveryThreshold: 1,
+		ProjectID:         projID, Name: "doomed", Type: domain.MonitorTCP,
 		Target: "localhost:1", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
 	if err != nil {

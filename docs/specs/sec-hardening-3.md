@@ -53,13 +53,13 @@
 | # | Sev | Finding | Where |
 | --- | --- | --- | --- |
 | T-1a | P1 | The PostgreSQL probe never asks for TLS: `require`, `verify-ca` and `verify-full` connect in plaintext and verify nothing | `pgProber.Probe` in `internal/prober/postgres.go` (before iter-0213) |
-| T-1b | P2 | `sslmode` is concatenated into a libpq connection string and the probe does not check it again, so a stored value can add `host=`, `sslrootcert=`, `service=` and other keys. The process environment and the prober user's files also reach every probe | `internal/prober/postgres.go:34-38` |
-| T-1c | P1 | On a body-bound job (envelope v2), deleting `sslmode` (postgres) or `tls` (mysql, redis, rabbitmq management) keeps the envelope valid. The digest binds the absent key as its canonical default, but the prober reads absence as "no TLS" (`prefer` for postgres). A carrier writer downgrades the probe and the credential goes out in plaintext | `internal/domain/credsettings.go:567-574`, `internal/dispatch/execbinding.go:63-66`, `internal/prober/mysql.go:79`, `internal/prober/redis.go:39`, `internal/domain/targets.go:165` |
-| T-1d | P2 | A partial monitor update that carries no `config` still re-validates and rewrites the stored one. A row with no `sslmode` is silently written `require`; a row with `prefer` or a beta-era value answers 500 | `internal/store/monitors.go:766-775` |
-| T-5 | P2 | A partial update of a synthetic monitor is refused with 400 `synthetic: config.scenario is required`: the handler validates the monitor it read without the writer-only scenario. The SPA's Pause/Resume button hits it. A correctness defect, found while checking T-1d | `internal/api/handlers_monitors.go:42`, `:688` |
-| T-2 | P2 | Alert delivery follows redirects with the library's policy. On 307/308 it sends the incident body and its HMAC signature to another host. On any redirect it sends the previous URL, token included, in `Referer`. A 301/302/303 counts as delivered although the body was dropped. The pull agent's client does the same with its `Authorization` header | `internal/prober/guard.go:167-181`, `internal/notify/notify.go:46-49`, `internal/notify/notify.go:234-252`, `webhook.New` (`internal/webhook/webhook.go`), `webhook.Dispatcher.post` (`internal/webhook/webhook.go`), `internal/agent/agent.go:97` |
-| T-3 | P2 | A mail subject is written into the message as is. Any name or title that reaches it with CR/LF adds headers or replaces the body: a monitor, service or project name, an incident title (an Alertmanager `summary` among them) or a status-page title. The mail goes from the instance's own sender to channel recipients and public status-page subscribers. Every scheduled SLA report already puts its raw line breaks into the subject | `notify.Dispatcher.sendMail` (before iter-0213), `internal/mailer/mailer.go:249-253` |
-| T-4 | P2 | A delivery that fails before a response quotes its full URL in the error text: a Telegram bot token, a Slack webhook path, a tokened webhook URL. The API treats those values as write-only, yet the text is stored in the outbox's `last_error`, written to the log, and served by the dead-letter API | `internal/notify/notify.go:239`, `:244`, `internal/webhook/webhook.go:80`, `:87`, `internal/outbox/outbox.go:322-343` |
+| T-1b | P2 | `sslmode` is concatenated into a libpq connection string and the probe does not check it again, so a stored value can add `host=`, `sslrootcert=`, `service=` and other keys. The process environment and the prober user's files also reach every probe | `internal/prober/postgres.go:34-38` (at `7744e95`) |
+| T-1c | P1 | On a body-bound job (envelope v2), deleting `sslmode` (postgres) or `tls` (mysql, redis, rabbitmq management) keeps the envelope valid. The digest binds the absent key as its canonical default, but the prober reads absence as "no TLS" (`prefer` for postgres). A carrier writer downgrades the probe and the credential goes out in plaintext | `internal/domain/credsettings.go:573-580`, `internal/dispatch/execbinding.go:63-66`, `internal/prober/mysql.go:79`, `internal/prober/redis.go:39`, `internal/domain/targets.go:165` |
+| T-1d | P2 | A partial monitor update that carries no `config` still re-validates and rewrites the stored one. A row with no `sslmode` is silently written `require`; a row with `prefer` or a beta-era value answers 500 | `internal/store/monitors.go:766-775` (at `7744e95`) |
+| T-5 | P2 | A partial update of a synthetic monitor is refused with 400 `synthetic: config.scenario is required`: the handler validates the monitor it read without the writer-only scenario. The SPA's Pause/Resume button hits it. A correctness defect, found while checking T-1d | `internal/api/handlers_monitors.go:42`, `:724` |
+| T-2 | P2 | Alert delivery follows redirects with the library's policy. On 307/308 it sends the incident body and its HMAC signature to another host. On any redirect it sends the previous URL, token included, in `Referer`. A 301/302/303 counts as delivered although the body was dropped. The pull agent's client does the same with its `Authorization` header | `internal/prober/guard.go:167-181` (at `7744e95`), `internal/notify/notify.go:46-49` (at `7744e95`), `internal/notify/notify.go:255-272`, `webhook.New` (`internal/webhook/webhook.go`), `webhook.Dispatcher.post` (`internal/webhook/webhook.go`), `internal/agent/agent.go:97` (at `7744e95`) |
+| T-3 | P2 | A mail subject is written into the message as is. Any name or title that reaches it with CR/LF adds headers or replaces the body: a monitor, service or project name, an incident title (an Alertmanager `summary` among them) or a status-page title. The mail goes from the instance's own sender to channel recipients and public status-page subscribers. Every scheduled SLA report already puts its raw line breaks into the subject | `notify.Dispatcher.sendMail` (before iter-0213), `internal/mailer/mailer.go:249-254` (at `7744e95`) |
+| T-4 | P2 | A delivery that fails before a response quotes its full URL in the error text: a Telegram bot token, a Slack webhook path, a tokened webhook URL. The API treats those values as write-only, yet the text is stored in the outbox's `last_error`, written to the log, and served by the dead-letter API | `internal/notify/notify.go:239`, `:244`, `internal/webhook/webhook.go:80`, `:87` (these four at `7744e95`), `internal/outbox/outbox.go:324-345` |
 
 **Severity scale** (`sec-hardening-2`'s):
 - **P0** — an authentication or tenant boundary is crossed.
@@ -88,7 +88,7 @@ across both packages.
 
 ### 2.1 T-1a: `sslmode` is not applied
 
-**Code.** `pgProber.Probe` (`internal/prober/postgres.go:30-63`):
+**Code.** `pgProber.Probe` (`internal/prober/postgres.go:30-63` at `7744e95`):
 
 ```go
 cfg, err := pgx.ParseConfig("sslmode=" + sslmode)   // :38
@@ -128,11 +128,11 @@ The same holds on macOS (`/private/tmp`) and on any Linux host. A correct client
 (code 80877103) first for every mode but `disable`.
 
 **The suite already depends on the defect.**
-- `e2e/tests/probers.spec.ts:49-56` test-connects a postgres monitor to the dev stack's Postgres
+- `e2e/tests/probers.spec.ts:49-56` (at `7744e95`) test-connects a postgres monitor to the dev stack's Postgres
   without an `sslmode`.
 - The test-connection handler normalizes the missing value to `require`
-  (`internal/api/handlers_monitors.go:265`, through `domain.PrepareCredentialSettings` and the schema
-  default at `internal/domain/credsettings.go:197`).
+  (`internal/api/handlers_monitors.go:269`, through `domain.PrepareCredentialSettings` and the schema
+  default at `internal/domain/credsettings.go:203`).
 - The dev Postgres runs with `ssl = off`.
 - The test asserts `up: true` and passes, which is possible only because no TLS is asked for.
 
@@ -164,18 +164,18 @@ reaches the executor without a second check:
 - through the AMQP job, for `worker`;
 - through the pull job, for `agent`.
 
-`dispatch.ValidateAndMaterialize` (`internal/dispatch/credentials.go:428`) checks the credential field
+`dispatch.ValidateAndMaterialize` (`internal/dispatch/credentials.go:442`) checks the credential field
 set and the envelope, not the value of `sslmode`.
 
 The values that can be stored:
 
 | Source | Values | Checked by |
 | --- | --- | --- |
-| API create, test-connection and update with a `config` | `disable`, `require`, `verify-ca`, `verify-full`; absent → `require` | `domain.PrepareCredentialSettings` (`internal/domain/credsettings.go`), from `internal/api/handlers_monitors.go:265`, `:421`, `:665` and the store's own writers `internal/store/monitors.go:471`, `:641` |
-| API update **without** a `config` (T-1d) | the stored value, re-validated anyway: absent → `require` is written; `prefer` or a beta value → 500 | `internal/store/monitors.go:768-775` |
-| Monitoring-as-code files | the same four | `domain.PrepareTypedSettings` → `PrepareCredentialSettings` (`internal/fileprovider/parse.go:461`) |
+| API create, test-connection and update with a `config` | `disable`, `require`, `verify-ca`, `verify-full`; absent → `require` | `domain.PrepareCredentialSettings` (`internal/domain/credsettings.go`), from `internal/api/handlers_monitors.go:269`, `:435`, `:701` and the store's own writers `internal/store/monitors.go:474`, `:644` |
+| API update **without** a `config` (T-1d) | the stored value, re-validated anyway: absent → `require` is written; `prefer` or a beta value → 500 | `internal/store/monitors.go:768-775` (at `7744e95`) |
+| Monitoring-as-code files | the same four | `domain.PrepareTypedSettings` → `PrepareCredentialSettings` (`internal/fileprovider/parse.go:468`) |
 | Rows written by v0.1.0-beta.1 … beta.5, before `a724df8` | **any string** (the API took a free-form map). The beta UI offered `disable`, `prefer` (its default), `require` and `verify-full` | nothing. No migration rewrote them. An update that carries a `config` re-validates, so a row keeps its value until someone edits its settings |
-| Absent key on such a row | `""` → the probe uses `prefer` (`postgres.go:35-37`) | — |
+| Absent key on such a row | `""` → the probe uses `prefer` (`postgres.go:60-62`) | — |
 | A generation-1 AMQP carrier | whatever the message says | the worker trusts the broker. A forged message needs broker publish rights |
 | A pull job | whatever core sends | the agent trusts core over HTTPS with its token |
 
@@ -212,14 +212,14 @@ variables; a systemd install may have both.
 **The two readings of one absent key.**
 - **Digest.** Envelope v2 binds the job's execution body (`dispatch.ExecutionBodyDigest`,
   `internal/dispatch/execbinding.go:35`). An absent key enters that digest as its schema default:
-  `domain.CanonicalSettingValue` returns `def` when the key is missing (`internal/domain/credsettings.go:567-574`),
+  `domain.CanonicalSettingValue` returns `def` when the key is missing (`internal/domain/credsettings.go:573-580`),
   and "absent and explicitly-set-to-default encode identically" is a stated rule
   (`execbinding.go:63-66`, `func-secret-inventory.md` §4.7).
 - **Prober.** The prober reads the same absence differently:
 
 | Type | Key | Canonical default | What the prober does when the key is absent |
 | --- | --- | --- | --- |
-| postgres | `sslmode` | `require` | `prefer` (`internal/prober/postgres.go:35-37`); after the T-1a fix that means plaintext when TLS fails |
+| postgres | `sslmode` | `require` | `prefer` (`internal/prober/postgres.go:60-62`); after the T-1a fix that means plaintext when TLS fails |
 | mysql | `tls` | `true` | no TLS (`internal/prober/mysql.go:79`) |
 | redis | `tls` | `true` | no TLS (`internal/prober/redis.go:39`) |
 | rabbitmq, management | `tls` | `true` | `http://` to a socket target (`domain.RabbitMgmtTLS`, `internal/domain/targets.go:165`) |
@@ -252,8 +252,8 @@ deleted key from a row that never had one. Two kinds of row lack one:
   - Such a row exists only if someone wrote the database directly.
 - **A row with an inline password and no `sslmode`** (or no `tls`): rows from v0.1.0-beta.1 … beta.5.
   - The path *(run)*: `MaterializeExecutionConfigs` decrypts the inline ciphertext
-    (`internal/store/materialize.go:320-328`) and seals it into an envelope
-    (`internal/store/materialize.go:348`): v1 on carrier 2, v2 on carriers 3 and 4.
+    (`internal/store/materialize.go:329-337`) and seals it into an envelope
+    (`internal/store/materialize.go:357`): v1 on carrier 2, v2 on carriers 3 and 4.
   - The body is the stored config as it is. A beta row was observed going out on carrier 3 with
     envelope v2 and no `sslmode` in the body.
 
@@ -263,17 +263,17 @@ states the key before it seals. §2.6 item 5 does both.
 ### 2.4 T-1d and T-5: a partial update rewrites or refuses the stored config
 
 `PATCH /monitors/{id}` with no `config` member is meant to change other fields only. The SPA's
-Pause/Resume button sends exactly that, `{"enabled": …}` (`frontend/src/views/MonitorDetailView.vue:727-738`).
+Pause/Resume button sends exactly that, `{"enabled": …}` (`frontend/src/views/MonitorDetailView.vue:728-740`).
 
 - **Handler.**
   - It reads the monitor through the safe reader: `monitorAccess` → `GetMonitor`
     (`internal/api/handlers_monitors.go:42`). That reader drops the write-only password and the
     writer-only `scenario`.
   - It runs the settings preparation (`PrepareCredentialSettings` / `PrepareTypedSettings`) only
-    under `body.Config != nil` (`:665-681`).
-  - It **always** runs `Monitor.Validate()` on what it read (`:688`).
+    under `body.Config != nil` (`:701-723`).
+  - It **always** runs `Monitor.Validate()` on what it read (`:724`).
 - **Store.** `updateMonitor` re-prepares `m.Config` unconditionally for every credentialed type
-  (`internal/store/monitors.go:768-775`).
+  (`internal/store/monitors.go:768-775` at `7744e95`).
 
 Observed on the current code *(run)*. The rows went through the real handler and `Store`, in the
 application harness of `internal/appmux` on a throwaway database of the `cerbix_test` server:
@@ -281,7 +281,7 @@ application harness of `internal/appmux` on a throwaway database of the `cerbix_
 | Stored `sslmode` | Update without `config` (e.g. `{"enabled": false}`) |
 | --- | --- |
 | absent | succeeds, and the row now holds `sslmode: require`. After the T-1a fix that row goes DOWN against a server without TLS because someone toggled `enabled` |
-| `prefer` (or a beta free-form value) | `Monitor.Validate()` passes, because it does not look at credential settings. The store then refuses with `settings: sslmode must be one of …`, and the handler, which has no branch for it, answers **500** (`h.serverError`, `handlers_monitors.go:706-721`) |
+| `prefer` (or a beta free-form value) | `Monitor.Validate()` passes, because it does not look at credential settings. The store then refuses with `settings: sslmode must be one of …`, and the handler, which has no branch for it, answers **500** (`h.serverError`, `handlers_monitors.go:744-759`) |
 
 The same happens to a mysql/redis row that predates its `tls` default: the update writes `tls: true`.
 
@@ -289,8 +289,8 @@ The same happens to a mysql/redis row that predates its `tls` default: the updat
 - **What happens.** `PATCH {"enabled": false}` on a synthetic monitor answers **400**
   `synthetic: config.scenario is required`.
   - The handler validates the monitor it read through `GetMonitor`. That reader withholds the
-    writer-only `scenario` (`domain.WriterOnlyMonitorConfigKeys`, `internal/domain/monitor.go:485`).
-  - `Monitor.Validate()` requires a scenario for this type (`internal/domain/monitor.go:256-266`).
+    writer-only `scenario` (`domain.WriterOnlyMonitorConfigKeys`, `internal/domain/monitor.go:516`).
+  - `Monitor.Validate()` requires a scenario for this type (`internal/domain/monitor.go:287-297`).
 - **Who is affected.** Every synthetic monitor, on every partial update, including the SPA's
   Pause/Resume button. The store would have carried the scenario forward (`carryWriterOnlyConfigTx`,
   FR-028 invariant 6), but the request never reaches it.
@@ -310,8 +310,8 @@ No other probe builds a DSN or URL by concatenating a config value:
 | websocket, http, synthetic, canary | parsed targets (`internal/domain/targets.go`, H-2). Headers go through `net/http`, which refuses CR/LF |
 | tls, dns, tcp, icmp, ssh, grpc | host and port only, through the guard |
 
-Outside the probes, `internal/notify/notify.go:190` formats `bot_token` into the Telegram URL path.
-The host is the variable `telegramAPI` (`:22`, a constant in production), so the value cannot change
+Outside the probes, `internal/notify/notify.go:198` formats `bot_token` into the Telegram URL path.
+The host is the variable `telegramAPI` (`:23`, a constant in production), so the value cannot change
 where the request goes. §7 lists it.
 
 ### 2.6 Fix
@@ -446,10 +446,10 @@ things.
        schema and no defaulted field, so the check has nothing to require of it.
      - **A typed refusal that does not cost the executor its readiness.** The gate returns a sentinel
        error, which `CredentialProbeErrorReason` maps to `unsupported_version`, exactly as it maps
-       `ErrLedgerIdentityMissing` (`internal/dispatch/credentials.go:230-236`).
+       `ErrLedgerIdentityMissing` (`internal/dispatch/credentials.go:238-244`).
        - `CredentialHealth.Failure` ignores that reason (`internal/dispatch/health.go:35-37`).
        - Without the mapping the refusal would fall into the default arm, `decrypt_auth_failed`
-         (`credentials.go:243-248`). Two in a row mark the executor credential-unready (below and
+         (`credentials.go:251-256`). Two in a row mark the executor credential-unready (below and
          §5).
        - "The delivery did not honour its carrier's contract" is what `unsupported_version` already
          means, so no reason is minted and the ingest vocabulary does not grow.
@@ -460,28 +460,28 @@ things.
      - **Pull.** A row stays in `pull_jobs` until claimed or until `expires_at`, also the monitor's
        interval (`internal/scheduler/scheduler.go:2115`, `internal/store/pulljobs.go:143`).
      - **The bound.** The interval is at most 86 400 s (`maxIntervalSeconds`,
-       `internal/domain/monitor.go:407`).
+       `internal/domain/monitor.go:438`).
      - **Only beta rows are affected:** monitors whose stored config lacks a defaulted key.
 
      **What the code does with such a job.**
      - **As revision 4 wrote it, without the mapping above,** the refusal would block the region until
        the executor restarts. Two consecutive refusals set `credential_ready=false`
        (`internal/dispatch/health.go:33-52`, `internal/worker/worker.go:105-112`,
-       `internal/agent/agent.go:122-130`). The scheduler then stops handing that region credentialed
+       `internal/agent/agent.go:127-134`). The scheduler then stops handing that region credentialed
        jobs, as `no_capable_executor` (`internal/scheduler/scheduler.go:1937-1951`). With no job
        there is no success to clear the streak. Only a restart sets readiness from the keyring again
-       (`agent.go:104-107`, `worker.go:51`).
+       (`agent.go:109-113`, `worker.go:51`).
      - **With the mapping,** each such job produces one `probe_error` `unsupported_version` for its
        monitor, and the region keeps working.
 
      §5 still prescribes the order, a pause, the signal and the recovery, and
      TestBodyBoundRefusalKeepsTheExecutorReady pins the mapping.
    - **Test fixtures that seal envelope v2 over a body with no defaulted keys.** They become refusals
-     and must state the keys:
+     and must state the keys (line numbers at `7744e95`):
      - `internal/agent/agent_test.go`: the monitors `m1` (`:54-56`), `m-future` (`:111-112`),
        `m-desync` (`:433-441`) and `m-null` (`:606-608`), all postgres with an empty `Config`;
      - `internal/dispatch/carrierenvelope_test.go:101-107` (postgres, `username`/`database` only);
-     - `internal/dispatch/amqptestcarrier_test.go`: the `v3_envelope_v2` case (`:93-109`, `:356`) and
+     - `internal/dispatch/amqptestcarrier_test.go`: the `v3_envelope_v2` case (`:95-108`, `:356`) and
        the well-formed v3 job (`:165-167`, `:239-241`).
 
      The list comes from reading every `Seal` call in the tests: postgres with a missing key on
@@ -620,29 +620,29 @@ This is the visible proof of S15 on a live stack. The old assertion encoded the 
 
 ### 3.1 The clients and who uses them
 
-**Delivery.** `Guard.HTTPClient` (`internal/prober/guard.go:167-181`) is used only for delivery
+**Delivery.** `Guard.HTTPClient` (`internal/prober/guard.go:167-181` at `7744e95`) is used only for delivery
 (`internal/cli/cli.go:560-564`, D-0141).
 - It dials every hop through the `notification_egress` guard, which denies private addresses by
   default.
 - Its `CheckRedirect` only caps the chain at 10. Every other redirect rule is the library's.
 - `notify.New` and `webhook.New` fall back to a plain `&http.Client{Timeout: 10s}` when given nil
-  (`internal/notify/notify.go:46-49`, `webhook.New` (`internal/webhook/webhook.go`)). Production always passes
+  (`internal/notify/notify.go:46-49` at `7744e95`, `webhook.New` (`internal/webhook/webhook.go`)). Production always passes
   the guard's client. The fallback still follows redirects with the library's policy and no cap at
   all.
 
 | Deliverer | Channel | URL | What it sends |
 | --- | --- | --- | --- |
 | `webhook.Dispatcher.post` (`webhook.Dispatcher.post` (`internal/webhook/webhook.go`)) | org/project webhook | `Webhook.URL`, any http(s) (`internal/domain/webhook.go:25-37`) | POST JSON `IncidentEvent`: incident id, project id, monitor/service ids, title, status, impact, timestamps, acknowledger's id and name, and the update text. Headers `X-Cerbix-Event` and `X-Cerbix-Signature` (HMAC-SHA256 of the body under the hook's secret) |
-| `notify.Dispatcher.post` (`internal/notify/notify.go:234-252`) | `webhook` channel | `config.url`, any http(s) (`internal/domain/notification.go:112-119`). The domain says these URLs "embed the auth token in the path" (`:51`) | POST JSON: monitor transition, alert text or SLA report (event, monitor id and name, project id, text) |
+| `notify.Dispatcher.post` (`internal/notify/notify.go:255-272`) | `webhook` channel | `config.url`, any http(s) (`internal/domain/notification.go:112-119`). The domain says these URLs "embed the auth token in the path" (`:51`) | POST JSON: monitor transition, alert text or SLA report (event, monitor id and name, project id, text) |
 | the same | `slack` channel | `config.url` (an incoming-webhook URL whose path is the secret) | POST JSON `{"text": …}` |
-| the same | `telegram` channel | `https://api.telegram.org/bot<bot_token>/sendMessage` (`:190`, `:279`, `:304`, `:327`): **the token is in the URL path** | POST JSON `{"chat_id", "text"}` |
+| the same | `telegram` channel | `https://api.telegram.org/bot<bot_token>/sendMessage` (`:198`, `:316`, `:341`, `:364`): **the token is in the URL path** | POST JSON `{"chat_id", "text"}` |
 | `notify.Dispatcher.sendMail` | `email` channel | SMTP through `EgressDialContext`: no HTTP, no redirect | — |
 
 Neither deliverer sets `Authorization` or `Cookie`. Every credential in this path is either a header
 the library does not treat as sensitive (`X-Cerbix-Signature`) or a URL (webhook, Slack, Telegram).
 
-**The pull agent** (`internal/agent/agent.go:97`) uses a plain `&http.Client{Timeout: 30s}` for
-every call to core. Every call carries `Authorization: Bearer <agent token>` (`:844`).
+**The pull agent** (`internal/agent/agent.go:97` at `7744e95`) uses a plain `&http.Client{Timeout: 30s}` for
+every call to core. Every call carries `Authorization: Bearer <agent token>` (`:857`).
 
 ### 3.2 What `net/http` does on a redirect
 
@@ -709,7 +709,7 @@ front of it.
   is retried with backoff and dead-letters; nothing is lost silently. The fix is to set the URL to its
   `Location`.
 - **Re-delivery to healthy channels.** A delivery fails as a whole when any one of its channels fails
-  (`notify.Dispatcher.Deliver`, `internal/notify/notify.go:53-57`), and the outbox retries the whole
+  (`notify.Dispatcher.Deliver`, `internal/notify/notify.go:56-65`), and the outbox retries the whole
   event.
   - So while one channel of a monitor answers a redirect, every other channel of that monitor
     receives the same alert again on each attempt, up to 10 (`maxAttempts`,
@@ -771,8 +771,8 @@ endpoint is operator-configured, so this stays out of scope (§7).
 
 | Call | Wraps | Where |
 | --- | --- | --- |
-| building the request | `url.Parse`'s error: `build request: %w` | `internal/notify/notify.go:239`, `internal/webhook/webhook.go:80` |
-| sending it | `client.Do`'s error: `post: %w` | `internal/notify/notify.go:244`, `internal/webhook/webhook.go:87` |
+| building the request | `url.Parse`'s error: `build request: %w` | `internal/notify/notify.go:239`, `internal/webhook/webhook.go:80` (both at `7744e95`) |
+| sending it | `client.Do`'s error: `post: %w` | `internal/notify/notify.go:244`, `internal/webhook/webhook.go:87` (both at `7744e95`) |
 
 A request that fails before any response returns a `*url.Error`. Its text quotes the request URL
 with its path and query; the library masks only a userinfo password. `url.Parse`'s error quotes the
@@ -791,9 +791,9 @@ build request: parse "https://hooks.example/x?token=SECRET\x7f": net/url: invali
 
 | Place | Where | Who reads it |
 | --- | --- | --- |
-| the deliverers' return value, joined per channel or hook as `channel <id>: …` / `webhook <id>: …` | `internal/notify/notify.go:53-176`, `internal/webhook/webhook.go:66-72` | the outbox worker |
-| `outbox_events.last_error` | `FailOutbox` (`internal/outbox/outbox.go:322`, `internal/store/outbox.go:317`). Kept until the event is delivered or replayed (`internal/store/outbox.go:211`, `:280`, `:297`) | anyone who reads the database |
-| the log lines `outbox_delivery_retry` and `outbox_dead` | `internal/outbox/outbox.go:343`, `:332` | anyone who reads the process log, outside the database's access control |
+| the deliverers' return value, joined per channel or hook as `channel <id>: …` / `webhook <id>: …` | `internal/notify/notify.go:56-185`, `internal/webhook/webhook.go:70-76` | the outbox worker |
+| `outbox_events.last_error` | `FailOutbox` (`internal/outbox/outbox.go:324`, `internal/store/outbox.go:317`). Kept until the event is delivered or replayed (`internal/store/outbox.go:211`, `:280`, `:297`) | anyone who reads the database |
+| the log lines `outbox_delivery_retry` and `outbox_dead` | `internal/outbox/outbox.go:345`, `:334` | anyone who reads the process log, outside the database's access control |
 | `GET /api/v1/admin/outbox/dead`, shown in Admin → Outbox | `internal/api/handlers_outbox.go:25-41` returns `ListDeadOutbox` rows unchanged | global admins |
 
 **What leaks.** A channel's `url` (Slack, webhook) and `bot_token` (Telegram) are write-only in the
@@ -807,12 +807,12 @@ URL with a token in its path or query leaks the same way.
 **The other senders, checked the same way:**
 - **Pull agent.** Not affected.
   - Its URLs are core's base URL plus fixed paths and region and agent query parameters; the token
-    travels in a header (`internal/agent/agent.go:844`).
+    travels in a header (`internal/agent/agent.go:857`).
   - Its errors are only logged on the agent's host.
   - A password in the `--server` URL's userinfo is masked by the library *(run:
     `https://user:***@core.invalid/…`)*.
 - **Mail.** Not affected by URLs.
-  - `notify.sendMail` (`smtp: %w`, `internal/notify/notify.go:229`) and `internal/mailer` return
+  - `notify.sendMail` (`smtp: %w`, `internal/notify/notify.go:250`) and `internal/mailer` return
     SMTP errors that name the server's host and port and quote the server's reply.
   - `net/smtp` never puts the password into an error.
   - A reply can quote a recipient address. That is personal data, not a credential (§7).
@@ -827,7 +827,7 @@ package imports the other today, and `internal/prober` imports neither, so this 
 
   | Reason | Recognized by |
   | --- | --- |
-  | `destination refused by the delivery egress policy` | `prober.IsEgressRefusal(err)`, a new exported predicate in `internal/prober/guard.go`: `errors.As` onto the guard's unexported `*blockedIPError` (`:38-45`). That is what the guard returns for a literal or resolved address its policy refuses (`:127-145`) |
+  | `destination refused by the delivery egress policy` | `prober.IsEgressRefusal(err)`, a new exported predicate in `internal/prober/guard.go`: `errors.As` onto the guard's unexported `*blockedIPError` (`:38-45`). That is what the guard returns for a literal or resolved address its policy refuses (`:134-152`) |
   | `certificate not accepted` | `errors.As` onto `*tls.CertificateVerificationError` |
   | `the server does not speak TLS` | `errors.Is(err, http.ErrSchemeMismatch)`. That is what `net/http` returns when an HTTPS request gets a plain HTTP answer: it replaces the TLS error with this sentinel |
   | `TLS handshake failed` | `errors.As` onto `*net.OpError` whose `Op` is `"remote error"` (the peer sent a TLS alert) or `"local error"` (the client sent one). Or `errors.As` onto the **value** type `tls.RecordHeaderError`: the bytes were neither TLS nor HTTP |
@@ -889,24 +889,24 @@ deliverer returns, `last_error`, the log, and the dead-letter API.
 cerbix builds a mail message in exactly two places. Both write `From`, `To` and `Subject` by string
 concatenation and send the message through `mailer.SendMailContext`:
 - `notify.Dispatcher.sendMail` (`internal/notify/notify.go`, before iter-0213: the message was one `fmt.Sprintf`);
-- `mailer.Mailer.SendContext` (`internal/mailer/mailer.go:236-256`, the message at `:249-253`).
+- `mailer.Mailer.SendContext` (`internal/mailer/mailer.go:236-256`, the message, at `7744e95`, `:249-254`).
 
 | Mail | Built by | `From` | `To` | `Subject` | Who controls the `Subject` |
 | --- | --- | --- | --- | --- | --- |
-| Channel email: every alert text in the table below | `notify.sendMail`; the subject **is** the alert text (`:226` writes `text` twice) | the channel's `from` | the channel's `to` list | the alert text, whole | see below |
+| Channel email: every alert text in the table below | `notify.sendMail`; the subject **is** the alert text (`:226` at `7744e95` writes `text` twice) | the channel's `from` | the channel's `to` list | the alert text, whole | see below |
 | Status-page subscriber incident mail | `subscribe.render` (`internal/subscribe/subscribe.go:67`) → `mailer.Send` | the instance mail sender (Settings → Mail) | each confirmed subscriber | `[<status>] <Incident.Title>` | project editors (incident title), **and anyone holding a project's Alertmanager token**: an alert's `summary` annotation becomes the incident title (`internal/api/handlers_alertmanager.go:148`) |
-| Subscription confirmation | `internal/api/handlers_subscribe.go:67-70`, queued (`TopicSubscriberConfirm`), sent at `internal/outbox/outbox.go:875` | the instance mail sender | the address typed into the public subscribe form | `Confirm your subscription to <StatusPage.Title>` (`:69`) | whoever may edit the status page; `StatusPage.Validate` requires only a non-blank title (`internal/domain/statuspage.go:199`) |
+| Subscription confirmation | `internal/api/handlers_subscribe.go:67-70`, queued (`TopicSubscriberConfirm`), sent at `internal/outbox/outbox.go:877` | the instance mail sender | the address typed into the public subscribe form | `Confirm your subscription to <StatusPage.Title>` (`:69`) | whoever may edit the status page; `StatusPage.Validate` requires only a non-blank title (`internal/domain/statuspage.go:199`) |
 | Password reset | `internal/auth/handlers_reset.go:65-69` | the instance mail sender | the account's email | constant | nobody |
 
 The channel alert texts, each delivered as the whole subject of a channel mail:
 
 | Text | Rendered by | Delivered at | Values from the database | Who writes them, and what is checked |
 | --- | --- | --- | --- | --- |
-| Monitor transition and reminder: `🔴 <name> is DOWN.` / recovery | `notify.Message` (`internal/notify/notify.go:254`) | `notify.Deliver` | `Monitor.Name` | project editors (API, UI, monitoring-as-code): non-blank only (`internal/domain/monitor.go:203`) |
-| Escalation step | `domain.EscalationStepAlert.Message` (`internal/domain/outbox.go:307`) | `internal/outbox/outbox.go:863` | the monitor's or service's name (`Subject()`) | project editors: monitor name as above; no service-name rule refuses a control byte either |
-| Service alert (live and burn) | `domain.ServiceAlert.Message` (`internal/domain/servicealert.go:355`) | `internal/outbox/outbox.go:764` | `ServiceName` | project editors (API, monitoring-as-code); no rule refuses a control byte |
-| **SLA report**: `📊 Weekly SLA report — <project>` then one line per window | `domain.SLAReport.Message` (`internal/domain/outbox.go:334`) | `internal/outbox/outbox.go:819` | `Project.Name` | org admins: non-blank only (`internal/api/handlers.go:230-233`). **And the text is multi-line by construction**: every scheduled report puts raw line breaks into the subject, with no attacker involved |
-| Region worker lost / regained | `domain.RegionWorkerAlert.Message` (`internal/domain/outbox.go:256`) | `internal/outbox/outbox.go:832` | the region name, twice. `%q` escapes the first; the second, in `--region %s`, is written raw | whoever sets a monitor's region. Bounded to `^[a-z0-9-]{1,40}$` (`internal/domain/monitor.go:614`) at the monitor's write (`:378`) and in the config (`internal/config/secrets.go:111`, `:163`), so today it cannot carry a control byte. Listed because the builder must not rely on that |
+| Monitor transition and reminder: `🔴 <name> is DOWN.` / recovery | `notify.Message` (`internal/notify/notify.go:275`) | `notify.Deliver` | `Monitor.Name` | project editors (API, UI, monitoring-as-code): non-blank only (`internal/domain/monitor.go:231`) |
+| Escalation step | `domain.EscalationStepAlert.Message` (`internal/domain/outbox.go:314`) | `internal/outbox/outbox.go:865` | the monitor's or service's name (`Subject()`) | project editors: monitor name as above; no service-name rule refuses a control byte either |
+| Service alert (live and burn) | `domain.ServiceAlert.Message` (`internal/domain/servicealert.go:355`) | `internal/outbox/outbox.go:766` | `ServiceName` | project editors (API, monitoring-as-code); no rule refuses a control byte |
+| **SLA report**: `📊 Weekly SLA report — <project>` then one line per window | `domain.SLAReport.Message` (`internal/domain/outbox.go:341`) | `internal/outbox/outbox.go:821` | `Project.Name` | org admins: non-blank only (`internal/api/handlers.go:230-233`). **And the text is multi-line by construction**: every scheduled report puts raw line breaks into the subject, with no attacker involved |
+| Region worker lost / regained | `domain.RegionWorkerAlert.Message` (`internal/domain/outbox.go:263`) | `internal/outbox/outbox.go:834` | the region name, twice. `%q` escapes the first; the second, in `--region %s`, is written raw | whoever sets a monitor's region. Bounded to `^[a-z0-9-]{1,40}$` (`internal/domain/monitor.go:645`) at the monitor's write (`:409`) and in the config (`internal/config/secrets.go:111`, `:163`), so today it cannot carry a control byte. Listed because the builder must not rely on that |
 
 **The SLA report today** *(run)*. The report text was formatted exactly as `notify.sendMail` formats
 it, passed through `net/smtp`'s `DATA` writer, and parsed back with `net/mail`.
@@ -924,15 +924,15 @@ it, passed through `net/smtp`'s `DATA` writer, and parsed back with `net/mail`.
   `validateLine`. So headers built from these values never reach a server.
 - **The subject has no such check.**
   - `Monitor.Validate`, `Incident.Validate` and `StatusPage.Validate` require only a non-blank name or
-    title (`internal/domain/monitor.go:203`, `internal/domain/incident.go:167`,
+    title (`internal/domain/monitor.go:231`, `internal/domain/incident.go:167`,
     `internal/domain/statuspage.go:199`).
   - The Alertmanager receiver trims the `summary` and nothing else.
 
 **Addresses are also checked weakly where they are written.**
 - **Subscriber address.** It needs only an `@` that is neither first nor last
-  (`internal/domain/statuspage.go:298-307`).
+  (`internal/domain/statuspage.go:298-307` at `7744e95`).
 - **Email channel and mail settings.** They need only non-blank `to` and `from`
-  (`internal/domain/notification.go:125-128`, `internal/domain/settings.go:214-226`).
+  (`internal/domain/notification.go:125-128`, `internal/domain/settings.go:214-225`, both at `7744e95`).
 - **What gets stored as a result.** A display-name form (`Ops <ops@example.com>`), a list in one
   subscriber field, or a non-ASCII address is stored. Each then fails at the SMTP server on every
   send. `mailFrom` writes `MAIL FROM:<%s>` and `net/smtp` writes `RCPT TO:<%s>`, so a display name
@@ -989,8 +989,8 @@ One message builder in `internal/mailer` serves both senders, so neither concate
     | --- | --- | --- |
     | subscriber | trimmed before `Validate` and stored trimmed (`internal/api/handlers_subscribe.go:50`) | the stored, trimmed value |
     | Settings → Mail `from` | trimmed before `Validate` and stored trimmed (`internal/api/handlers_settings.go:218`) | the stored, trimmed value |
-    | email channel `to` elements | split at commas, each element trimmed | each element trimmed (`internal/notify/notify.go:213-218`) |
-    | email channel `from` | trimmed for the rule | **sent as stored, untrimmed** (`internal/notify/notify.go:212`) |
+    | email channel `to` elements | split at commas, each element trimmed | each element trimmed (`internal/notify/notify.go:230-234`) |
+    | email channel `from` | trimmed for the rule | **sent as stored, untrimmed** (`internal/notify/notify.go:228`) |
     | YAML `mail.from` | checked as written by `Config.Validate()` | sent as written, so a value with spaces never starts |
 
     - **The one mismatch** is the channel `from`. `notify.sendMail` now trims it exactly as it trims
@@ -1009,14 +1009,14 @@ One message builder in `internal/mailer` serves both senders, so neither concate
   - **At startup** (owner's decision, 2026-11-15, §8 item 6). `Config.Validate()`
     (`internal/config/config.go`) checks the YAML mail block:
     - **`mail.smtp_host` set and `mail.from` empty** → refused, naming `mail.from`. Today
-      `MailConfig.Enabled()` (`internal/config/config.go:371`) treats that block as mail switched
+      `MailConfig.Enabled()` (`internal/config/config.go:374`) treats that block as mail switched
       off, and nothing is said.
     - **`mail.from` set and refused by the rule** → refused, naming `mail.from`, not quoting the
       value.
     - **`mail.smtp_host` empty** → the block is not checked, as today.
 
     The check sits beside the two the block already has: `smtp_port` and `public_base_url` when mail
-    is enabled (`internal/config/config.go:772-779`).
+    is enabled (`internal/config/config.go:787-794`).
   - **One rule, one copy.** The rule is one function in `internal/domain`. `internal/config` already
     imports that package (`domain.ValidRegion`, `internal/config/secrets.go:111`). The builder, the
     three `Validate` methods and `Config.Validate()` all call it.
@@ -1027,7 +1027,7 @@ One message builder in `internal/mailer` serves both senders, so neither concate
       through Settings → Mail marks the group configured (`SaveMail`, `:191-200`), and from then on
       the YAML block is never read.
     - **Why the check cannot see that.** `Config.Validate()` runs inside `config.Parse`
-      (`internal/config/config.go:519`), before any database exists for the process. So it cannot
+      (`internal/config/config.go:522`), before any database exists for the process. So it cannot
       know whether the seed is still in effect, and it refuses a dead `mail.from` the same way it
       refuses a live one.
     - **This is how the block is already treated.** The `smtp_port` and `public_base_url` checks
@@ -1144,7 +1144,7 @@ One iteration, iter-0213 / D-0280, branch `sec-hardening-3`:
      - `docker/config.example.yaml`, the comment above `mail:`. Today it says "leave smtp_host/from
        empty to disable both". It now says that an empty `smtp_host` turns mail off, and that once
        `smtp_host` is set, `from` is required.
-     - The doc comment of `MailConfig.Enabled` (`internal/config/config.go:370-371`), to the same
+     - The doc comment of `MailConfig.Enabled` (`internal/config/config.go:370-373`), to the same
        effect.
      - `README.md` and `INSTALL.md` do not describe the `mail` block, so they are unchanged.
    - **Traceability, D-0280 and iter-0213.**
@@ -1320,7 +1320,7 @@ Delivered rows already have an empty `last_error` (`internal/store/outbox.go:211
   - heartbeats of kind `probe_error` with reason `unsupported_version`;
   - the executor's log line with the same reason: `credential_job_rejected` from a worker
     (`internal/worker/worker.go:104`), `agent_credential_job_rejected` from a pull agent
-    (`internal/agent/agent.go:353`).
+    (`internal/agent/agent.go:361`).
 
   Each stops on its own once the old jobs have expired.
 - **The region must not go credential-unready.** This change keeps it ready, because the refusal is
@@ -1364,7 +1364,7 @@ Delivered rows already have an empty `last_error` (`internal/store/outbox.go:211
 - **Per-channel delivery state.** One failing channel retries the whole event and re-sends to the
   healthy ones (§3.3). That is today's design; changing it is an outbox change with its own spec.
 - **Found on the way, left alone:**
-  - **Telegram `bot_token` in the URL path** (`internal/notify/notify.go:190`): formatted, not escaped.
+  - **Telegram `bot_token` in the URL path** (`internal/notify/notify.go:198`): formatted, not escaped.
     The host is fixed, so it cannot redirect delivery elsewhere.
   - **Recipient addresses in SMTP error text.** A server's reply can quote a recipient's address.
     It then reaches `last_error` (channel and confirmation mail) or the `subscriber_email_failed` log
@@ -1437,7 +1437,7 @@ database.
 | **P1-1** An envelope-v2 postgres job without `sslmode` executes as `prefer` | **Accepted, and widened.** On envelope v2 the executor refuses a job whose body omits the key, before connecting. The canonical default stays `require`. Absence stays executable as `prefer` only for generation-1 carriers and envelope v1, which covers the old rows. Where an old row reaches a v2 envelope, core states the key before sealing. The same defect exists for `tls` on mysql, redis and rabbitmq management, so the rule is stated over the registry (T-1c, raised to P1 by the owner, §10.2) | §1 T-1c; §2.3 (how an old row with `password_ref` or an inline password reaches execution: the former only by a direct database write, the latter through `MaterializeExecutionConfigs`); §2.6 items 1 and 5; S19; TestBodyBoundJobWithoutADefaultedKeyIsRefused (`delete(Config, "sslmode")` among its cases), TestMaterializeStatesTheLegacyValueOfAnAbsentKey | yes. Envelope v2 on carrier 3 sealed over a full body, then the key deleted: accepted for postgres, mysql and redis; changing the value is refused. A beta-style row with no `sslmode` was observed going out on carrier 3 / envelope v2 without the key |
 | **P1-2** The constant string for `ParseConfig` still reads the environment, certificates and pgpass | **Accepted.** The new string does not enter `configTLS`, reads no certificate, key or pgpass file, and parses under invalid `PG*` values. `PGAPPNAME`, `PGOPTIONS`, `PGTZ` and `PGSSLNEGOTIATION` still get in, hence an explicit reset of every `pgconn.Config`/`pgx.ConnConfig` field, listed, with a reflection test. `PGSERVICE` is treated separately: it is read before the string applies and can only make the probe fail | §2.6 item 3; S16; TestPostgresProbeIgnoresTheEnvironment, TestPostgresConfigResetCoversEveryField | yes. pgx v5.10.0 under a hostile environment: the constant parses; `sslmode=disable` alone fails on `PGCONNECT_TIMEOUT`; garbage `PGSSLROOTCERT` breaks `host=localhost sslmode=require` and not the constant; a match-all `PGPASSFILE` fills the password for `sslmode=disable` and not for the constant; `RuntimeParams` keep `application_name`/`options`/`timezone`; `PGSERVICE` without a file fails, and with one adds `application_name` and `krbsrvname` |
 | **P1-3** `ServerName` and IP targets | **Accepted.** `verify-ca` (and `require`) send the name as SNI as pgx does: a name yes, an IP literal no. `verify-full` with an IP target verifies the IP SAN. `hostPort` strips the brackets of an IPv6 target without a port | §2.6 item 2; S15; TestPostgresVerifyFullChecksTheCertificate (IP cases), TestPostgresProbeSendsSNIAsPgxDoes, TestHostPortStripsIPv6Brackets | the pgx rule was read in `configTLS` (`sslsni`, `net.ParseIP`); the `hostPort` behaviour was read in the code |
-| **P1-4** A `PATCH` without `config` rewrites or refuses the stored config | **Accepted.** The boundary is in the store. The handler passes `configSubmitted`; when it is false, the store neither prepares nor writes `config` nor touches the refs | §1 T-1d; §2.2 table; §2.4; §2.6 item 6; S20; TestUpdateWithoutConfigKeepsTheStoredConfig, TestPatchWithoutConfigKeepsTheMonitorEditable | yes, against `cerbix_test`: absent → `require` written; `prefer` → the store's validation error, which the handler turns into 500 (read in `handlers_monitors.go:706-721`) |
+| **P1-4** A `PATCH` without `config` rewrites or refuses the stored config | **Accepted.** The boundary is in the store. The handler passes `configSubmitted`; when it is false, the store neither prepares nor writes `config` nor touches the refs | §1 T-1d; §2.2 table; §2.4; §2.6 item 6; S20; TestUpdateWithoutConfigKeepsTheStoredConfig, TestPatchWithoutConfigKeepsTheMonitorEditable | yes, against `cerbix_test`: absent → `require` written; `prefer` → the store's validation error, which the handler turns into 500 (read in `handlers_monitors.go:744-759`) |
 | **P2-1** S15 promised "the same address" and implied more protection than `prefer` gives | **Accepted otherwise.** The IP is not pinned. S15 and §7 now say that `prefer` falls back to plaintext on the same host and port after `N` or any TLS-step failure, does not protect against an active interceptor, and every connection crosses the SSRF guard | S15; §2.6 item 2; §7; TestPostgresPreferFallsBackToTheSameHostAndPort | — |
 | **P2-2** Addresses are checked only for CR/LF, only in the envelope | **Accepted; confirmed by the owner (§10.2)**, including the behaviour for stored rows. One rule (a single, unnamed, printable-ASCII address) in the message builder and at write: subscriber, email channel, mail settings → 400. Stored rows: no migration; how each kind behaves; a runbook query; a line in the upgrade note | §4.1; §4.2; S18; §5 query 2; TestMailerRefusesAnAddressItCannotSend, TestChannelMailRefusesAnAddressItCannotSend, TestAddressesAreSingleAndUnnamedAtWrite, TestSubscriberMailSkipsARefusedAddress | yes. Go's `net/mail` on 13 inputs, and the SQL approximation on the same 13 in `cerbix_test`: they agree |
 | **P2-3** The subject of a multi-line alert | **Accepted; confirmed by the owner (§10.2).** The subject is the first non-blank line, up to 200 runes, folded per RFC 5322; the full text goes in the body | §4.1; §4.2; S18; TestMailSubjectIsTheFirstLineAndBounded | — |
@@ -1480,7 +1480,7 @@ something other than revision 4.
 | --- | --- | --- | --- |
 | **P1-1** | **Rejected: does not match the text.** The constant string in §2.6 item 3 has `require_auth=''`, not `any` | nothing | — |
 | **P1-2** | **Rejected: does not match the text.** `prefer` falls back to plaintext after a failed handshake on purpose: that is the owner's ruling on P2-1 of the first review (S15, §7). The test the remark names is not in the spec | nothing | — |
-| **P1-3** PATCH without `config` and `Monitor.Validate()` | **Accepted.** (a) Reproduced through the real handler and `Store`: a synthetic monitor answers 400 on `main`. That is a separate finding, T-5 (P2, a correctness defect), with its fix. (b) The sentence "the handler already skips validation without a config" is corrected: it skips the settings preparation, and always runs `Monitor.Validate()` (`handlers_monitors.go:688`). (c) S20 is narrowed: without a `config`, no settings preparation runs and `config` and `monitor_secret_refs` are not rewritten, while `Monitor.Validate()` stays. A legacy `prefer` row passes it. (d) The S20 test runs a synthetic monitor on the real `Store` | §1 T-5; §2.4; §2.6 item 6; S20; TestUpdateWithoutConfigKeepsTheStoredConfig, TestPatchWithoutConfigKeepsTheMonitorEditable | yes, in the `internal/appmux` harness on a throwaway database of the `cerbix_test` server. `PATCH {"enabled": false}`: synthetic → 400 `synthetic: config.scenario is required`; postgres `prefer` → 500 (`Validate()` passed, the store refused); postgres with no `sslmode` → 200, `require` written |
+| **P1-3** PATCH without `config` and `Monitor.Validate()` | **Accepted.** (a) Reproduced through the real handler and `Store`: a synthetic monitor answers 400 on `main`. That is a separate finding, T-5 (P2, a correctness defect), with its fix. (b) The sentence "the handler already skips validation without a config" is corrected: it skips the settings preparation, and always runs `Monitor.Validate()` (`handlers_monitors.go:724`). (c) S20 is narrowed: without a `config`, no settings preparation runs and `config` and `monitor_secret_refs` are not rewritten, while `Monitor.Validate()` stays. A legacy `prefer` row passes it. (d) The S20 test runs a synthetic monitor on the real `Store` | §1 T-5; §2.4; §2.6 item 6; S20; TestUpdateWithoutConfigKeepsTheStoredConfig, TestPatchWithoutConfigKeepsTheMonitorEditable | yes, in the `internal/appmux` harness on a throwaway database of the `cerbix_test` server. `PATCH {"enabled": false}`: synthetic → 400 `synthetic: config.scenario is required`; postgres `prefer` → 500 (`Validate()` passed, the store refused); postgres with no `sslmode` → 200, `require` written |
 | **P2-1** (the rest) How the deliverers recognize a guard refusal and a certificate failure | **Accepted.** A new exported predicate, `prober.IsEgressRefusal`, over the guard's `*blockedIPError`; `*tls.CertificateVerificationError` for certificates; the whole classification table | §3.6 Fix | yes. Both classes recognized through `client.Do`'s error chain, with the guard's client |
 | **P2-2** Query 2 misses the instance `from`; a startup check of `mail.from` | **Accepted in part.** Query 2 checks `instance_settings.mail->>'from'`. The startup check in `Config.Validate()`: the request for revision 5 carried a placeholder instead of the decision. The owner decided on 2026-11-15, after revision 5, to refuse at startup (§8 item 6, applied in revision 6) | §5 query 2; §4.2; §8 item 6 | yes. `EXPLAIN` on `cerbix_test` |
 | **P2-3** Can an upgraded executor receive a job sealed by an old core, and does that block the region? | **Accepted.** Yes, it can receive one, through the AMQP queue or `pull_jobs`, for up to the monitor's interval. As revision 4 wrote it, the refusal would have counted as `decrypt_auth_failed`. Two in a row set `credential_ready=false`, the scheduler then withholds the region's credentialed jobs, and only a restart clears it. The refusal is now a typed `unsupported_version`, which never costs readiness. §5 gives the order, the pause (query 4), the signal and the recovery. Stated too: the check applies only to types with a credential schema. The test fixtures that seal envelope v2 over a body without the keys are named | §2.6 item 5; S19; §5; TestBodyBoundRefusalKeepsTheExecutorReady | the readiness path was read in the code; query 4 checked with `EXPLAIN` on `cerbix_test` |
@@ -1500,7 +1500,7 @@ remarks and accepted them.
 | **P2-1** The `TLS handshake failed` branch of §3.6 cannot match | **Accepted.** The branch is rewritten. A TLS alert over TCP is a `*net.OpError` with `Op` `"remote error"` or `"local error"`; `tls.RecordHeaderError` matches only as a value. An HTTPS request answered in plain HTTP has its own reason, through `http.ErrSchemeMismatch`. TestDeliveryErrorNamesNoURL gains these cases, each with a token in the URL and the reason it must name: an untrusted certificate, `https://` at an HTTP server, a TLS alert, bytes that are neither TLS nor HTTP | §3.6 Fix (the table and the run); TestDeliveryErrorNamesNoURL | yes. Six servers through `Guard.HTTPClient`: each chain as in §3.6. `tls.AlertError` and `*tls.RecordHeaderError` matched in none of them |
 | **P3-1** §5 still sent the YAML `mail.from` to §11 | **Accepted.** The reference now points at the startup check (§4.2, §8 item 6) | §5, after query 2 | — |
 | **P3-2** Only the worker's log line was named | **Accepted.** Both are named: `credential_job_rejected` (worker) and `agent_credential_job_rejected` (pull agent) | §5, the rolling-upgrade signal | — |
-| **P3-3** A channel `from` with surrounding spaces passes at write and is sent untrimmed | **Accepted, second option.** `notify.sendMail` trims the channel `from` as it trims the `to` elements. A table in §4.2 shows that write and send now give one answer for every address; query 2 keeps `btrim`. S18 states it, and TestChannelMailRefusesAnAddressItCannotSend and TestAddressesAreSingleAndUnnamedAtWrite cover a padded `from` | §4.2; S18; §4.4 | the trimming on each path was read in the code (`handlers_subscribe.go:50`, `handlers_settings.go:218`, `notify.go:212-218`) |
+| **P3-3** A channel `from` with surrounding spaces passes at write and is sent untrimmed | **Accepted, second option.** `notify.sendMail` trims the channel `from` as it trims the `to` elements. A table in §4.2 shows that write and send now give one answer for every address; query 2 keeps `btrim`. S18 states it, and TestChannelMailRefusesAnAddressItCannotSend and TestAddressesAreSingleAndUnnamedAtWrite cover a padded `from` | §4.2; S18; §4.4 | the trimming on each path was read in the code (`handlers_subscribe.go:50`, `handlers_settings.go:218`, `notify.go:228-234`) |
 | **P3-4** `docker/config.example.yaml:204` still promises the old behaviour ("leave smtp_host/from empty to disable both") | **Accepted, with the approval of revision 7.** It is added to §5's documentation list, together with the doc comment of `MailConfig.Enabled`. `README.md` and `INSTALL.md` were checked and do not describe the `mail` block | §5 | — |
 
 ### 10.6 Code review of the branch (at `6a90e5a`): dispositions (owner's rulings, 2026-11-16)

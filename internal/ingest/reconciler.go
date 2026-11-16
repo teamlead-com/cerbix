@@ -44,7 +44,10 @@ func (rc *Reconciler) WithEvents(p Publisher) *Reconciler {
 
 // Reconcile publishes the live status event and opens/resolves the auto-incident for a
 // status change. The monitor is fetched once and shared.
-func (rc *Reconciler) Reconcile(ctx context.Context, hb domain.Heartbeat, prev, cur domain.MonitorStatus, suppressed bool) {
+//
+// recovery is the snapshot of a confirmed down→up (FR-043 §4.6) — ResultOutcome.Recovery — and nil
+// for every other change; the resolving update renders its sentence from it, never from the row.
+func (rc *Reconciler) Reconcile(ctx context.Context, hb domain.Heartbeat, prev, cur domain.MonitorStatus, suppressed bool, recovery *domain.RecoverySnapshot) {
 	mon, err := rc.store.GetMonitor(ctx, hb.MonitorID)
 	if err != nil {
 		rc.logger.Error("transition_get_monitor_failed", "monitor_id", hb.MonitorID, "error", err.Error())
@@ -70,7 +73,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, hb domain.Heartbeat, prev, 
 		// as pending→up (re-arm sets pending, D-0144); that must close the stale incident
 		// too. resolveAutoIncident is a no-op when nothing is open, so a normal first
 		// pending→up (no incident) costs one lookup and does nothing.
-		rc.resolveAutoIncident(ctx, hb)
+		rc.resolveAutoIncident(ctx, hb, recovery)
 	}
 }
 
@@ -123,7 +126,12 @@ func (rc *Reconciler) openAutoIncident(ctx context.Context, mon domain.Monitor, 
 	rc.logger.Info("auto_incident_opened", "monitor_id", hb.MonitorID, "incident_id", created.ID)
 }
 
-func (rc *Reconciler) resolveAutoIncident(ctx context.Context, hb domain.Heartbeat) {
+// resolveAutoIncident closes the monitor's open auto-incident. The resolving update is dated by the
+// store with its own transaction's clock — the instant the recovery was CONFIRMED (FR-043 D5) — and,
+// for a confirmed run of more than one success, carries the snapshot's sentence after one space
+// (§4.6). The snapshot is the confirming transaction's, never the monitor row, which that commit has
+// already reset.
+func (rc *Reconciler) resolveAutoIncident(ctx context.Context, hb domain.Heartbeat, recovery *domain.RecoverySnapshot) {
 	inc, err := rc.store.FindOpenAutoIncidentByMonitor(ctx, hb.MonitorID)
 	if errors.Is(err, store.ErrNotFound) {
 		return // nothing open (e.g. incident was resolved manually)
@@ -132,10 +140,14 @@ func (rc *Reconciler) resolveAutoIncident(ctx context.Context, hb domain.Heartbe
 		rc.logger.Error("find_open_auto_incident_failed", "monitor_id", hb.MonitorID, "error", err.Error())
 		return
 	}
+	body := "Monitor recovered — automatically resolved."
+	if s := recovery.Sentence(); s != "" {
+		body += " " + s
+	}
 	if _, err := rc.store.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID,
 		Status:     domain.IncidentResolved,
-		Body:       "Monitor recovered — automatically resolved.",
+		Body:       body,
 		Author:     autoIncidentAuthor,
 	}); err != nil {
 		rc.logger.Error("auto_incident_resolve_failed", "monitor_id", hb.MonitorID, "incident_id", inc.ID, "error", err.Error())

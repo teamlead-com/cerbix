@@ -17,7 +17,7 @@ import (
 // surface — create, update and test-connection — before anything reaches a prober.
 func TestMonitorWriteSurfacesRefuseHostileTargets(t *testing.T) {
 	fs := seededStore()
-	fs.monitors["ws1"] = domain.Monitor{ID: "ws1", ProjectID: "p1", Name: "ws", Type: domain.MonitorWebSocket,
+	fs.monitors["ws1"] = domain.Monitor{RecoveryThreshold: 1, ID: "ws1", ProjectID: "p1", Name: "ws", Type: domain.MonitorWebSocket,
 		Target: "wss://chat.internal/ws", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true}
 	// A tester is wired so test-connection reaches its validation; it must never be called.
 	tester := &countingProbe{}
@@ -58,12 +58,12 @@ func TestMonitorWriteSurfacesRefuseHostileTargets(t *testing.T) {
 // credential — so the 400 is the target rule's, which the answer names.
 func TestSocketAndRabbitWriteSurfacesRefuseHostileTargets(t *testing.T) {
 	fs := seededStore()
-	fs.monitors["ssh1"] = domain.Monitor{ID: "ssh1", ProjectID: "p1", Name: "ssh", Type: domain.MonitorSSH,
+	fs.monitors["ssh1"] = domain.Monitor{RecoveryThreshold: 1, ID: "ssh1", ProjectID: "p1", Name: "ssh", Type: domain.MonitorSSH,
 		Target: "bastion.internal:22", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true}
-	fs.monitors["rd1"] = domain.Monitor{ID: "rd1", ProjectID: "p1", Name: "rd", Type: domain.MonitorRedis,
+	fs.monitors["rd1"] = domain.Monitor{RecoveryThreshold: 1, ID: "rd1", ProjectID: "p1", Name: "rd", Type: domain.MonitorRedis,
 		Target: "cache.internal:6379", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true,
 		Config: map[string]string{"password": "pw"}}
-	fs.monitors["rb1"] = domain.Monitor{ID: "rb1", ProjectID: "p1", Name: "rb", Type: domain.MonitorRabbitMQ,
+	fs.monitors["rb1"] = domain.Monitor{RecoveryThreshold: 1, ID: "rb1", ProjectID: "p1", Name: "rb", Type: domain.MonitorRabbitMQ,
 		Target: "https://rabbit.internal:15671", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true,
 		Config: map[string]string{"mode": "management", "username": "guest", "password": "pw"}}
 	tester := &countingProbe{}
@@ -107,9 +107,9 @@ func TestSocketAndRabbitWriteSurfacesRefuseHostileTargets(t *testing.T) {
 // echoes the secret.
 func TestHTTPAndPromQLUnparsableTargetsRefused(t *testing.T) {
 	fs := seededStore()
-	fs.monitors["h1"] = domain.Monitor{ID: "h1", ProjectID: "p1", Name: "h", Type: domain.MonitorHTTP,
+	fs.monitors["h1"] = domain.Monitor{RecoveryThreshold: 1, ID: "h1", ProjectID: "p1", Name: "h", Type: domain.MonitorHTTP,
 		Target: "https://app.internal/health", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true}
-	fs.monitors["q1"] = domain.Monitor{ID: "q1", ProjectID: "p1", Name: "q", Type: domain.MonitorPromQL,
+	fs.monitors["q1"] = domain.Monitor{RecoveryThreshold: 1, ID: "q1", ProjectID: "p1", Name: "q", Type: domain.MonitorPromQL,
 		Target: "http://prom.internal:9090", IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true,
 		Config: map[string]string{"query": "up"}}
 	tester := &countingProbe{}

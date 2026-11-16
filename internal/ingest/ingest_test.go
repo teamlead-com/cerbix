@@ -591,7 +591,7 @@ func TestReconcilerClosesIncidentOnPendingToUp(t *testing.T) {
 	ctx := context.Background()
 
 	// No open incident: pending→up must not create or resolve anything.
-	rc.Reconcile(ctx, domain.Heartbeat{MonitorID: "m1", Up: true}, domain.StatusPending, domain.StatusUp, false)
+	rc.Reconcile(ctx, domain.Heartbeat{MonitorID: "m1", Up: true}, domain.StatusPending, domain.StatusUp, false, nil)
 	if o, r := fs.openAutoIncidentCount("m1"); o != 0 || r != 0 {
 		t.Fatalf("pending→up with nothing open: open=%d resolved=%d, want 0/0", o, r)
 	}
@@ -606,7 +606,7 @@ func TestReconcilerClosesIncidentOnPendingToUp(t *testing.T) {
 	if o, _ := fs.openAutoIncidentCount("m1"); o != 1 {
 		t.Fatalf("precondition: want 1 open incident, got %d", o)
 	}
-	rc.Reconcile(ctx, domain.Heartbeat{MonitorID: "m1", Up: true}, domain.StatusPending, domain.StatusUp, false)
+	rc.Reconcile(ctx, domain.Heartbeat{MonitorID: "m1", Up: true}, domain.StatusPending, domain.StatusUp, false, nil)
 	if o, r := fs.openAutoIncidentCount("m1"); o != 0 || r != 1 {
 		t.Fatalf("pending→up must resolve the stale incident: open=%d resolved=%d, want 0/1", o, r)
 	}
@@ -799,5 +799,52 @@ func TestAFailedClaimNeitherRetriesNorStopsTheConsumer(t *testing.T) {
 			t.Fatalf("the consumer stopped after a failed claim (claims=%d, heartbeats=%d)", claims, hbs)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestReconcilerResolvingUpdateCarriesTheRecoverySentence (FR-043 §4.6, I14): the resolving update of
+// a confirmed run of N > 1 is today's body, ONE space, and the snapshot's sentence — rendered from
+// the snapshot handed in, never from the monitor row (which the confirming commit already reset and
+// whose threshold may have been edited since). A nil snapshot, and a run of one, keep today's body
+// byte for byte (I1).
+func TestReconcilerResolvingUpdateCarriesTheRecoverySentence(t *testing.T) {
+	const today = "Monitor recovered — automatically resolved."
+	firstOK := time.Date(2026, 11, 16, 14, 4, 5, 250_000_000, time.FixedZone("UTC+4", 4*3600))
+	cases := []struct {
+		name     string
+		recovery *domain.RecoverySnapshot
+		want     string
+	}{
+		{"no snapshot", nil, today},
+		{"run of one", &domain.RecoverySnapshot{Run: 1, Threshold: 1, FirstOK: firstOK}, today},
+		{"run of three", &domain.RecoverySnapshot{Run: 3, Threshold: 3, FirstOK: firstOK},
+			today + " Recovered: 3/3 consecutive checks passed; first OK at 2026-11-16T10:04:05Z"},
+		{"threshold lowered mid-run", &domain.RecoverySnapshot{Run: 4, Threshold: 2, FirstOK: firstOK},
+			today + " Recovered: 4/2 consecutive checks passed; first OK at 2026-11-16T10:04:05Z"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fs := newFakeStore()
+			// The row says threshold 7 and no run: what a monitor looks like after the confirming
+			// commit reset it and an edit raised the threshold. The sentence must ignore both.
+			fs.monitors["m1"] = domain.Monitor{ID: "m1", ProjectID: "p1", Name: "api", AutoIncident: true, RecoveryThreshold: 7}
+			ctx := context.Background()
+			inc, err := fs.CreateIncidentBySystem(ctx, domain.Incident{
+				ProjectID: "p1", MonitorID: "m1", Title: "api is down", Status: domain.IncidentInvestigating,
+				Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+			}, "Automatically opened: the monitor is failing its checks.", autoIncidentAuthor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rc := NewReconciler(fs, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			rc.Reconcile(ctx, domain.Heartbeat{MonitorID: "m1", Up: true}, domain.StatusDown, domain.StatusUp, false, c.recovery)
+			ups := fs.updates[inc.ID]
+			if len(ups) != 2 || ups[1].Status != domain.IncidentResolved {
+				t.Fatalf("updates = %+v, want the opening and one resolving update", ups)
+			}
+			if ups[1].Body != c.want {
+				t.Fatalf("resolving body = %q, want %q", ups[1].Body, c.want)
+			}
+		})
 	}
 }

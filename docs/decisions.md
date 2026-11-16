@@ -9555,3 +9555,105 @@ holds these findings:
 - **Startup.** A YAML `mail.from` with a display name, or `smtp_host` without `from`, stops startup.
 - **Unchanged.** The digest of an unchanged monitor, the carrier generations, the SPA and the database
   schema.
+
+## D-0281 — a monitor leaves `down` only after `recovery_threshold` consecutive successes; the threshold is alerting hysteresis, not measurement (FR-043 / NFR-036, iter-0214, 2026-11-16)
+
+**Context.** [`func-recovery-threshold.md`](specs/func-recovery-threshold.md), revision 7, approved by the
+owner (revision 5 on 2026-11-15, revisions 6 and 7 on 2026-11-16); mock
+[`mock-recovery-threshold.html`](design/mock-recovery-threshold.html) approved 2026-11-16. A monitor had
+hysteresis on the way down only: one lucky success sent a false "recovered", zeroed
+`consecutive_failures` and resolved the auto-incident, so one flapping outage became several incidents.
+
+**Decision.**
+1. **Alerting hysteresis.** `monitors.recovery_threshold` (1..10, default 1; exactly 1 for push and
+   composite) is the number of consecutive successes a `down` monitor needs before `up`. The run lives in
+   `consecutive_successes` and `recovery_started_at` (migration 00117), and a CHECK ties them to
+   `status = 'down'`. `recordCheckStatusTx` applies the spec's §4.1 table in its one UPDATE. During a run:
+   no transition, no recovery notification, the auto-incident stays open, `last_notified_at` is kept, and
+   `EnqueueRenotifyReminders` and the monitor-incident query of `AdvanceEscalations` skip the monitor
+   (D1, D2). That is a condition, not a re-dating: overdue steps fire on the first pass after a broken run
+   (D9). Every other status writer (re-enable, retire, reactivate, `SetMonitorStatus` off `down`) resets the
+   run in the same statement; migration 00118 backs that for writers this code does not control (item 9).
+   Checks are not accelerated on the way up (D4). The recovery is dated at its
+   confirmation (D5).
+2. **The snapshot travels on the event.** The confirming transaction resets the run before
+   `Reconciler.Reconcile` or the outbox worker read the row. It therefore captures a recovery snapshot
+   (run length, threshold compared against, first OK) and returns it through `ResultOutcome`. For a run
+   longer than one it is also put on `MonitorTransition`. One rendering, `RecoverySnapshot.Sentence`, serves
+   both surfaces, so the resolving update and the notification carry the same string. A threshold-1 event
+   payload, and an event queued before the upgrade, render today's text byte for byte.
+3. **The first OK is read after the row lock.** `recovery_started_at` takes `statement_timestamp()` of a
+   statement that starts once the monitor's row is locked — not `now()`, and not the locking statement's
+   own clock, both taken before the wait. It is therefore never earlier than the `down` verdict's commit.
+4. **`Store.RecordCheckStatus` keeps its signature and drops the snapshot** (the builder's choice §7
+   left open). It gains its own `SELECT … FOR UPDATE` so that its clock, too, is read after the wait. Its
+   integration-test callers are unchanged.
+5. **The canonical form carries the field only above 1** (`omitempty`, `hashedRecoveryThreshold`). A bundle
+   that omits the key or declares 1 keeps its pre-upgrade `spec_hash`, so the upgrade plans no update for
+   any file-managed monitor; any move between 1 and 2..10 is drift in both directions.
+6. **One boundary owner, no clamp.** The transport decoders (`createMonitor`, `updateMonitor`,
+   `applyCommonMonitorFields`) resolve absent to 1, or to the stored value on update. They copy an explicit
+   value, `0` included, verbatim. `Monitor.Validate` alone judges it and the CHECKs back it. `TestMonitorSpec`
+   is not extended: test-connection refuses the key as unknown, and `testMonitor` builds its probe monitor
+   at 1. `CreateMonitor.recovery_threshold` carries no OpenAPI `default`, so the generated TypeScript type
+   keeps the field optional and the form can omit it for push and composite.
+7. **NFR-036 as three statements (revision 6, owner 2026-11-16).** The NFR-036 regression test found that
+   `Monitor.InConfirmPhase` requires `status = up`. After "down, one success, failure", a threshold-1 monitor
+   is accelerated and a threshold-3 monitor still `down` is not. NFR-036 now reads: (a) no result is
+   altered, dropped or re-dated; (b) with the confirm phase off, the checks and heartbeats are identical at
+   every threshold, and so is every measured number; (c) with it on, a monitor held `down` gets no
+   accelerated checks. The code is not changed. NFR-036 concerns a monitor's own checks: a composite
+   parent's heartbeats follow its children's statuses.
+8. **The mock's four decisions (owner, 2026-11-16).**
+   - **List.** The Down pill stays, with a neutral `recovering N/M` chip beside it. The chip is not gated
+     on N < M (`3/2` after a lowered threshold, D10).
+   - **Detail view.** It shows both `Confirming N/M…` and `recovering N/M`.
+   - **Dependency hint.** Shown only with a parent **and** a threshold above 1.
+   - **Live status event.** On the detail view it zeroes `consecutive_successes`, and on a move into `up`
+     also `consecutive_failures`.
+
+   The labels are not live (D13).
+9. **A writer that does not know about the run ends it (revision 7, owner 2026-11-16; I13a).** A binary
+   without FR-043 — one role during a rolling upgrade, or every role after a rollback — writes `status` and
+   never the run columns. Against 00117 alone the run-state CHECK refused that write for a monitor in a
+   run, and the heartbeat in its transaction with it. Migration 00118 adds a `BEFORE UPDATE` trigger on
+   `monitors` (`monitors_recovery_run_guard_trg`) that clears `consecutive_successes` and
+   `recovery_started_at` whenever the new status is not `down`, before the CHECK is evaluated. The CHECKs
+   are unchanged, and the explicit resets of item 1 stay: the trigger is a guard, not the mechanism. The
+   pre-FR-043 writers are replayed verbatim against the migrated schema in
+   `TestLegacyWriterSuccessEndsTheRunAndKeepsTheResult`, `TestLegacyWriterFailureMidRunKeepsTheRowValid`
+   and `TestLegacyWritersLeavingDownEndTheRun`, red before 00118.
+
+**Rejected.**
+- **Accelerating the way up**, including to remove NFR-036 (c). It defeats the purpose, competes with failing
+  monitors for the regional confirm cap and changes measured numbers (D4, spec §11 option 2).
+- **Dating the recovery with its first success.** It would shorten every incident from both ends and could
+  resolve one before its own last update (D5).
+- **Dating the auto-incident with the verdict's clock** to order the first OK against `started_at` across
+  concurrent consumers. It changes `incidents.started_at` at threshold 1 and breaks I1 (review 3, variant B).
+- **Shifting later escalation steps by the length of a run.** It needs a stored offset per incident and
+  delays the second line of an outage just confirmed as continuing (D9).
+- **Serializing the field unconditionally in the canonical form.** The first reconcile after the upgrade
+  would update every file-managed monitor: revision bump, in-flight results refused, new service epochs.
+- **A default in `Normalize` or in SQL** to keep in-process fixtures green. That is the clamp §4.5 forbids;
+  the fixtures set `RecoveryThreshold: 1`.
+- **An instance-wide default (D12)** and **live labels (D13)**: out of scope; both stay in §9.
+- **For older binaries, documents only** ("raise thresholds after every role is upgraded, set them back to 1
+  before a rollback"): rejected by the owner (spec §11, revision 7). **Weakening the run-state CHECK**
+  instead of the trigger: rejected, I13 stays a database rule.
+
+**Consequences.**
+- **Default.** At threshold 1 every transition, event, text, incident timestamp and `last_notified_at` is
+  what it was (I1). Migration 00117 gives existing rows 1 / 0 / NULL.
+- **Above 1.** A recovery is announced about `interval × (M − 1)` after the first success, and an
+  auto-incident's displayed duration grows by the same amount. The form warns at 600 s.
+- **Deliberate.** The four consequences of spec §4.4 are documented in the runbook rather than engineered
+  away: a green service over a red member, a parent recovering before its child, NFR-036 (c) and the
+  composite parent.
+- **Older binaries (item 9).** Under a binary without FR-043 the threshold does not apply (the monitor
+  goes `up` on its first success) and no check result is lost; back on this release it applies again. No
+  threshold needs to be set back to 1 before a rollback. The one residue: a failure written by an older
+  binary keeps the monitor `down` and leaves a run in progress as it was, so back on this release the next
+  success continues that run rather than starting a new one.
+- **Unchanged.** `heartbeats`, every SLA, SLI, budget, gate and status-page reader, the confirm phase, and
+  `TestMonitorSpec`. No new metric.

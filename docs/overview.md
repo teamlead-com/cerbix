@@ -164,6 +164,25 @@ flowchart LR
 | `metrics`/`logging`/`buildinfo` | Prometheus (`cerbix_*`), slog JSON, build info. |
 | `web` | `embed.FS` with the built SPA. |
 
+**Monitor recovery threshold (FR-043 / NFR-036, iter-0214).** A monitor's status has hysteresis
+in both directions. `failure_threshold` makes it wait for N failed checks before `down`;
+`recovery_threshold` (1..10, default 1; exactly 1 for push and composite) makes a `down` monitor wait
+for M successful checks in a row before `up`. While a run is in progress the monitor stays `down`,
+shows `recovering N/M`, enqueues no transition, sends no recovery notification or reminder, keeps its
+auto-incident open and fires no step of its escalation ladder; a failed check ends the run. The run is
+`consecutive_successes` and `recovery_started_at` on `monitors` (migration 00117), handled inside
+`recordCheckStatusTx`; every status writer resets it, and migration 00118's `BEFORE UPDATE` trigger
+clears it whenever the new status is not `down`, so a writer that does not know about the run (an
+older binary) ends it instead of having its write — and its heartbeat — refused (I13a). The confirming transaction captures a recovery snapshot (N, M, first OK) and
+puts it on the transition event, so the resolving update and the notification both render
+`Recovered: N/M consecutive checks passed; first OK at …` from the event, not from the reset row. The
+threshold is alerting hysteresis, not measurement: it changes no check result, and with the confirm
+phase off it changes no scheduled check, heartbeat or measured number. With the confirm phase on, a
+monitor held `down` gets no accelerated checks (`Monitor.InConfirmPhase` requires `up`), and a
+composite parent's heartbeats follow its children's statuses. Checks are not accelerated on the way
+up, so a recovery is announced about `interval × (M − 1)` after the first success, and is dated at
+its confirmation (D-0281; the operator consequences are in the runbook).
+
 **Services (FR-021, phase 1).** A `Service` is the unit whose reliability is *explicitly
 declared*, and it sits BESIDE monitors rather than above them: a monitor may contribute to
 several services' reliability inputs, or to none. Two axes are stored separately — a

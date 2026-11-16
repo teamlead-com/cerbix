@@ -12,7 +12,8 @@ func TestProbeErrorIsDiagnosticOnlyAndRevisionFenced(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	_, projectID := secretsFixture(t, st, ctx, "probe-error-org", "probe-error-project")
 	monitor, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: projectID, Name: "probe-error", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         projectID, Name: "probe-error", Type: domain.MonitorHTTP,
 		Target: "https://example.com/health", Method: "GET", IntervalSeconds: 60,
 		TimeoutSeconds: 5, FailureThreshold: 1, Enabled: true,
 	})
@@ -43,7 +44,8 @@ func TestProbeErrorClearsOnlyOnLiveAppliedNormalResult(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	_, projectID := secretsFixture(t, st, ctx, "probe-clear-org", "probe-clear-project")
 	monitor, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: projectID, Name: "probe-clear", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         projectID, Name: "probe-clear", Type: domain.MonitorHTTP,
 		Target: "https://example.com/health", Method: "GET", IntervalSeconds: 60,
 		TimeoutSeconds: 5, FailureThreshold: 1, Enabled: true,
 	})

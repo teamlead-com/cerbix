@@ -89,7 +89,8 @@ func TestMonitorConfigPasswordEncrypted(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "db", Type: domain.MonitorPostgres, Target: "db:5432", IntervalSeconds: 60, TimeoutSeconds: 5,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "db", Type: domain.MonitorPostgres, Target: "db:5432", IntervalSeconds: 60, TimeoutSeconds: 5,
 		Config: map[string]string{"username": "cerbix", "password": "topsecret", "database": "app"},
 	})
 	if err != nil {

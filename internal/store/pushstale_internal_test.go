@@ -18,7 +18,8 @@ func TestStalePushMonitors(t *testing.T) {
 
 	mk := func(name string) domain.Monitor {
 		m, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: proj.ID, Name: name, Type: domain.MonitorPush, IntervalSeconds: 60, Enabled: true,
+			RecoveryThreshold: 1,
+			ProjectID:         proj.ID, Name: name, Type: domain.MonitorPush, IntervalSeconds: 60, Enabled: true,
 		})
 		if err != nil {
 			t.Fatalf("create push %s: %v", name, err)
@@ -57,7 +58,8 @@ func TestStalePushMonitors(t *testing.T) {
 
 	// A non-push monitor must never appear.
 	if _, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "http", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "http", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	}); err != nil {
 		t.Fatalf("create http: %v", err)
@@ -122,7 +124,8 @@ func TestPushUpdatePreservesLiveness(t *testing.T) {
 
 	// --- Blocker: editing a LIVE push monitor must not turn it stale. ---
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "cron", Type: domain.MonitorPush, IntervalSeconds: 60, GraceSeconds: 0, Enabled: true, PushToken: "cbxp_live",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "cron", Type: domain.MonitorPush, IntervalSeconds: 60, GraceSeconds: 0, Enabled: true, PushToken: "cbxp_live",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -153,7 +156,8 @@ func TestPushUpdatePreservesLiveness(t *testing.T) {
 
 	// --- Re-arm: disabled→enabled starts a fresh liveness window from the enable moment. ---
 	dorm, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "dormant", Type: domain.MonitorPush, IntervalSeconds: 60, GraceSeconds: 0, Enabled: true, PushToken: "cbxp_dorm",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "dormant", Type: domain.MonitorPush, IntervalSeconds: 60, GraceSeconds: 0, Enabled: true, PushToken: "cbxp_dorm",
 	})
 	if err != nil {
 		t.Fatalf("create dormant: %v", err)
@@ -216,8 +220,8 @@ func TestStalePushGrace(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
-	tolerant, _ := st.CreateMonitor(ctx, domain.Monitor{ProjectID: proj.ID, Name: "tolerant", Type: domain.MonitorPush, IntervalSeconds: 60, GraceSeconds: 3600, Enabled: true})
-	strict, _ := st.CreateMonitor(ctx, domain.Monitor{ProjectID: proj.ID, Name: "strict", Type: domain.MonitorPush, IntervalSeconds: 60, GraceSeconds: 0, Enabled: true})
+	tolerant, _ := st.CreateMonitor(ctx, domain.Monitor{RecoveryThreshold: 1, ProjectID: proj.ID, Name: "tolerant", Type: domain.MonitorPush, IntervalSeconds: 60, GraceSeconds: 3600, Enabled: true})
+	strict, _ := st.CreateMonitor(ctx, domain.Monitor{RecoveryThreshold: 1, ProjectID: proj.ID, Name: "strict", Type: domain.MonitorPush, IntervalSeconds: 60, GraceSeconds: 0, Enabled: true})
 	// Both last reported 120s ago (no heartbeat, past created_at).
 	for _, id := range []string{tolerant.ID, strict.ID} {
 		if _, err := st.pool.Exec(ctx, `UPDATE monitors SET created_at = $1 WHERE id = $2`, time.Now().Add(-120*time.Second), id); err != nil {
@@ -249,7 +253,8 @@ func TestReEnableSupersedesQueuedDown(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "cron", Type: domain.MonitorPush,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "cron", Type: domain.MonitorPush,
 		IntervalSeconds: 60, FailureThreshold: 1, Enabled: true, PushToken: "cbxp_seq",
 	})
 	if err != nil {

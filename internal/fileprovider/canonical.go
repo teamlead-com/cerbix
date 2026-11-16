@@ -20,25 +20,32 @@ import (
 // order-sensitive conditions retain order. The UID is included because identity binds the
 // hash to a specific managed resource.
 type canonicalMonitor struct {
-	UID              string            `json:"uid"`
-	Name             string            `json:"name"`
-	Description      string            `json:"description,omitempty"` // FR-030: a bundle-owned field, so it moves the hash
-	Type             string            `json:"type"`
-	Target           string            `json:"target"`
-	Method           string            `json:"method"`
-	IntervalSeconds  int               `json:"interval_seconds"`
-	TimeoutSeconds   int               `json:"timeout_seconds"`
-	Retries          int               `json:"retries"`
-	FailureThreshold int               `json:"failure_threshold"`
-	ConfirmInterval  int               `json:"confirm_interval_seconds"`
-	Renotify         int               `json:"renotify_seconds"`
-	Grace            int               `json:"grace_seconds"`
-	Region           string            `json:"region"`
-	Enabled          bool              `json:"enabled"`
-	AutoIncident     bool              `json:"auto_incident"`
-	Conditions       []string          `json:"conditions"` // order-preserved
-	Tags             []string          `json:"tags"`       // sorted+deduped
-	Config           map[string]string `json:"config,omitempty"`
+	UID              string `json:"uid"`
+	Name             string `json:"name"`
+	Description      string `json:"description,omitempty"` // FR-030: a bundle-owned field, so it moves the hash
+	Type             string `json:"type"`
+	Target           string `json:"target"`
+	Method           string `json:"method"`
+	IntervalSeconds  int    `json:"interval_seconds"`
+	TimeoutSeconds   int    `json:"timeout_seconds"`
+	Retries          int    `json:"retries"`
+	FailureThreshold int    `json:"failure_threshold"`
+	// RecoveryThreshold is FR-043's, populated ONLY above 1 and omitted otherwise. Serialized like
+	// failure_threshold it would add `"recovery_threshold":1` to every canonical form, and the first
+	// reconcile after the upgrade would plan an update — revision bump, in-flight results refused as
+	// stale — for every file-managed monitor whose YAML did not change. Omitted at 1, a bundle that
+	// leaves the key out and one that declares 1 keep their pre-change spec_hash byte for byte, while
+	// any move between 1 and 2..10 still changes it (func-recovery-threshold.md §4.5, I15).
+	RecoveryThreshold int               `json:"recovery_threshold,omitempty"`
+	ConfirmInterval   int               `json:"confirm_interval_seconds"`
+	Renotify          int               `json:"renotify_seconds"`
+	Grace             int               `json:"grace_seconds"`
+	Region            string            `json:"region"`
+	Enabled           bool              `json:"enabled"`
+	AutoIncident      bool              `json:"auto_incident"`
+	Conditions        []string          `json:"conditions"` // order-preserved
+	Tags              []string          `json:"tags"`       // sorted+deduped
+	Config            map[string]string `json:"config,omitempty"`
 	// NOTE: depends_on is deliberately EXCLUDED from the semantic hash. Dependency edges are
 	// a separate reconcile axis (dependency_update) that does NOT bump execution_revision
 	// (D-0142); the planner compares dependency sets on their own. Folding them into the hash
@@ -50,25 +57,26 @@ type canonicalMonitor struct {
 // the encoding is deterministic across parses of semantically-equal YAML.
 func canonicalHash(uid string, m domain.Monitor) string {
 	cm := canonicalMonitor{
-		UID:              uid,
-		Name:             m.Name,
-		Description:      m.Description,
-		Type:             string(m.Type),
-		Target:           m.Target,
-		Method:           m.Method,
-		IntervalSeconds:  m.IntervalSeconds,
-		TimeoutSeconds:   m.TimeoutSeconds,
-		Retries:          m.Retries,
-		FailureThreshold: m.FailureThreshold,
-		ConfirmInterval:  m.ConfirmIntervalSeconds,
-		Renotify:         m.RenotifySeconds,
-		Grace:            m.GraceSeconds,
-		Region:           m.Region,
-		Enabled:          m.Enabled,
-		AutoIncident:     m.AutoIncident,
-		Conditions:       append([]string(nil), m.Conditions...),
-		Tags:             normStringSet(m.Tags),
-		Config:           m.Config,
+		UID:               uid,
+		Name:              m.Name,
+		Description:       m.Description,
+		Type:              string(m.Type),
+		Target:            m.Target,
+		Method:            m.Method,
+		IntervalSeconds:   m.IntervalSeconds,
+		TimeoutSeconds:    m.TimeoutSeconds,
+		Retries:           m.Retries,
+		FailureThreshold:  m.FailureThreshold,
+		RecoveryThreshold: hashedRecoveryThreshold(m.RecoveryThreshold),
+		ConfirmInterval:   m.ConfirmIntervalSeconds,
+		Renotify:          m.RenotifySeconds,
+		Grace:             m.GraceSeconds,
+		Region:            m.Region,
+		Enabled:           m.Enabled,
+		AutoIncident:      m.AutoIncident,
+		Conditions:        append([]string(nil), m.Conditions...),
+		Tags:              normStringSet(m.Tags),
+		Config:            m.Config,
 	}
 	b, err := json.Marshal(cm)
 	if err != nil {
@@ -79,6 +87,16 @@ func canonicalHash(uid string, m domain.Monitor) string {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// hashedRecoveryThreshold is the canonical form's view of the field: the value above 1, and the zero
+// that `omitempty` drops at 1. Decode has already refused anything outside 1..10, so the zero branch
+// is the default and nothing else (I15).
+func hashedRecoveryThreshold(v int) int {
+	if v > 1 {
+		return v
+	}
+	return 0
 }
 
 // sortedUIDs returns the bundle's monitor UIDs in deterministic order (plan/lock ordering).

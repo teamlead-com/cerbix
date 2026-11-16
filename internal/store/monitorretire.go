@@ -149,6 +149,9 @@ func (s *Store) RetireMonitor(ctx context.Context, projectID, monitorID string, 
 		UPDATE monitors
 		   SET retired_at = now(), enabled = false, updated_at = now(),
 		       status = 'pending', consecutive_failures = 0,
+		       -- FR-043 §4.1, I12: every write that sets status outside recordCheckStatusTx ends
+		       -- the recovery run in the same statement.
+		       consecutive_successes = 0, recovery_started_at = NULL,
 		       state_sequence = state_sequence + 1,
 		       `+revisionFenceSetSQL+`
 		 WHERE id = $1 AND project_id = $2 RETURNING `+monitorColumns,
@@ -221,6 +224,9 @@ func (s *Store) ReactivateMonitor(ctx context.Context, projectID, monitorID stri
 		UPDATE monitors
 		   SET retired_at = NULL, enabled = true, updated_at = now(),
 		       status = 'pending', consecutive_failures = 0,
+		       -- FR-043 §4.1, I12: every write that sets status outside recordCheckStatusTx ends
+		       -- the recovery run in the same statement.
+		       consecutive_successes = 0, recovery_started_at = NULL,
 		       state_sequence = state_sequence + 1,
 		       -- A push monitor's dead-man window restarts from the re-enable moment; a poll
 		       -- monitor's watermark is cleared by the fence below. Both are the same rule as

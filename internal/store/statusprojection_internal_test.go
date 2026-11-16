@@ -53,7 +53,8 @@ func seedProjection(t *testing.T, st *Store, ctx context.Context) projFixture {
 	f.pageProj = projPage.ID
 
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "payments-http", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "payments-http", Type: domain.MonitorHTTP,
 		Target: "https://payments.example.com/", IntervalSeconds: 30, Region: "core", Enabled: true,
 	})
 	if err != nil {

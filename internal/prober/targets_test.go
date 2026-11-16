@@ -43,46 +43,46 @@ func TestProbersRefuseHostileTargetsBeforeDialing(t *testing.T) {
 		probe func() Result
 	}{
 		{"websocket CRLF", func() Result {
-			return websocketProber{dial: dial}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorWebSocket, Target: "ws://h/a\r\nX-Evil: 1"})
+			return websocketProber{dial: dial}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorWebSocket, Target: "ws://h/a\r\nX-Evil: 1"})
 		}},
 		{"websocket no scheme", func() Result {
-			return websocketProber{dial: dial}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorWebSocket, Target: "h.internal/ws"})
+			return websocketProber{dial: dial}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorWebSocket, Target: "h.internal/ws"})
 		}},
 		{"ssh", func() Result {
-			return sshProber{dial: dial}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorSSH, Target: "h\r\n"})
+			return sshProber{dial: dial}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorSSH, Target: "h\r\n"})
 		}},
 		{"redis", func() Result {
-			return redisProber{dial: dial}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorRedis, Target: "h:abc"})
+			return redisProber{dial: dial}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorRedis, Target: "h:abc"})
 		}},
 		{"rabbit amqp", func() Result {
-			return rabbitmqProber{dial: dial, client: client}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorRabbitMQ, Target: "h x"})
+			return rabbitmqProber{dial: dial, client: client}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorRabbitMQ, Target: "h x"})
 		}},
 		{"rabbit management path", func() Result {
-			return rabbitmqProber{dial: dial, client: client}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorRabbitMQ,
+			return rabbitmqProber{dial: dial, client: client}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorRabbitMQ,
 				Target: "rabbit:15672", Config: map[string]string{"mode": "management", "path": "@10.0.0.9:8080/x"}})
 		}},
 		{"promql CRLF", func() Result {
-			return promqlProber{client: client}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorPromQL,
+			return promqlProber{client: client}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorPromQL,
 				Target: "http://10.0.0.9:9090\r\n", Config: map[string]string{"query": "up"}})
 		}},
 		{"promql query in the base", func() Result {
-			return promqlProber{client: client}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorPromQL,
+			return promqlProber{client: client}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorPromQL,
 				Target: "http://10.0.0.9:9090?x=1", Config: map[string]string{"query": "up"}})
 		}},
 		{"promql no scheme", func() Result {
-			return promqlProber{client: client}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorPromQL,
+			return promqlProber{client: client}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorPromQL,
 				Target: "10.0.0.9:9090", Config: map[string]string{"query": "up"}})
 		}},
 		{"rabbit management target CRLF", func() Result {
-			return rabbitmqProber{dial: dial, client: client}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorRabbitMQ,
+			return rabbitmqProber{dial: dial, client: client}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorRabbitMQ,
 				Target: "http://10.0.0.9:15672\r\n", Config: map[string]string{"mode": "management"}})
 		}},
 		{"rabbit management target userinfo", func() Result {
-			return rabbitmqProber{dial: dial, client: client}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorRabbitMQ,
+			return rabbitmqProber{dial: dial, client: client}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorRabbitMQ,
 				Target: "http://u:p@10.0.0.9:15672", Config: map[string]string{"mode": "management"}})
 		}},
 		{"rabbit management target port", func() Result {
-			return rabbitmqProber{dial: dial, client: client}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorRabbitMQ,
+			return rabbitmqProber{dial: dial, client: client}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorRabbitMQ,
 				Target: "HTTP://10.0.0.9:99999", Config: map[string]string{"mode": "management"}})
 		}},
 	}
@@ -127,7 +127,7 @@ func TestWebSocketSelfSignedIsDownByDefault(t *testing.T) {
 	srv := httptest.NewTLSServer(wsHandshakeHandler())
 	defer srv.Close()
 	p := websocketProber{dial: (&net.Dialer{}).DialContext}
-	m := domain.Monitor{Type: domain.MonitorWebSocket, Target: "wss://" + srv.Listener.Addr().String() + "/ws"}
+	m := domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorWebSocket, Target: "wss://" + srv.Listener.Addr().String() + "/ws"}
 	if res := p.Probe(context.Background(), m); res.Connected || !strings.HasPrefix(res.Msg, "tls:") {
 		t.Fatalf("self-signed without tls_skip_verify: %+v, want DOWN with a tls: message", res)
 	}
@@ -167,7 +167,7 @@ func TestWebSocketHandshakeWire(t *testing.T) {
 		}()
 		addr := ln.Addr().String()
 		res := websocketProber{dial: (&net.Dialer{}).DialContext}.Probe(context.Background(),
-			domain.Monitor{Type: domain.MonitorWebSocket, Target: "ws://" + addr + "/chat?x=1"})
+			domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorWebSocket, Target: "ws://" + addr + "/chat?x=1"})
 		_ = ln.Close()
 		if !res.Connected {
 			t.Fatalf("%s: handshake failed: %+v", network, res)
@@ -249,7 +249,7 @@ func TestRabbitMgmtPathReachesTheWireByteForByte(t *testing.T) {
 		{strings.TrimPrefix(srv.URL, "http://"), "/api/aliveness-test/%2F", "/api/aliveness-test/%2F", "/api/aliveness-test/%2F"},
 	} {
 		gotURI, gotEscaped = "", ""
-		res := p.Probe(context.Background(), domain.Monitor{Type: domain.MonitorRabbitMQ, Target: tc.target,
+		res := p.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorRabbitMQ, Target: tc.target,
 			Config: map[string]string{"mode": "management", "path": tc.path}})
 		if !res.Connected {
 			t.Errorf("%s + %s: %+v", tc.target, tc.path, res)
@@ -301,7 +301,7 @@ func TestRabbitMgmtTargetSameVerdictOnWriteAndProbe(t *testing.T) {
 		if tc.tls != "" {
 			cfg["tls"] = tc.tls
 		}
-		m := domain.Monitor{ProjectID: "p", Name: "n", Type: domain.MonitorRabbitMQ, Target: tc.target,
+		m := domain.Monitor{RecoveryThreshold: 1, ProjectID: "p", Name: "n", Type: domain.MonitorRabbitMQ, Target: tc.target,
 			IntervalSeconds: 60, TimeoutSeconds: 10, Config: cfg}
 		writeErr := m.Validate()
 		got, probeErr := rabbitMgmtURL(m.Target, cfg["path"], cfg["tls"] == "true")
@@ -336,7 +336,7 @@ func TestPromQLQueryURLKeepsTheBasePath(t *testing.T) {
 		{srv.URL + "/pre%2Ffix", "/pre%2Ffix/api/v1/query"},
 	} {
 		gotURI, gotEscaped, gotQuery = "", "", ""
-		res := p.Probe(context.Background(), domain.Monitor{Type: domain.MonitorPromQL, Target: tc.target,
+		res := p.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorPromQL, Target: tc.target,
 			Config: map[string]string{"query": `sum(rate(x{a="b c"}[5m]))`}})
 		if !res.Connected || res.Value != 1 {
 			t.Errorf("%s: %+v", tc.target, res)
@@ -359,7 +359,7 @@ func TestPromQLLegacyUserinfoTargetKeepsProbing(t *testing.T) {
 	}))
 	defer srv.Close()
 	target := strings.Replace(srv.URL, "http://", "http://legacy:pw@", 1)
-	res := promqlProber{client: srv.Client()}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorPromQL,
+	res := promqlProber{client: srv.Client()}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorPromQL,
 		Target: target, Config: map[string]string{"query": "up"}})
 	if !res.Connected || gotUser != "legacy" || gotPass != "pw" {
 		t.Fatalf("legacy userinfo target: %+v, basic auth %q/%q", res, gotUser, gotPass)
@@ -387,7 +387,7 @@ func TestHTTPTargetSameVerdictOnWriteAndProbe(t *testing.T) {
 			"http://user:secret@h.example/%zz",
 			"http://user:secret@h.example\x7f/",
 		} {
-			m := domain.Monitor{ProjectID: "p", Name: "n", Type: typ, Target: target, IntervalSeconds: 60, TimeoutSeconds: 10,
+			m := domain.Monitor{RecoveryThreshold: 1, ProjectID: "p", Name: "n", Type: typ, Target: target, IntervalSeconds: 60, TimeoutSeconds: 10,
 				Config: map[string]string{"query": "up"}}
 			if typ == domain.MonitorHTTP {
 				m.Config = nil
@@ -425,7 +425,7 @@ func TestHTTPLegacyUserinfoTargetKeepsProbing(t *testing.T) {
 	}))
 	defer srv.Close()
 	target := strings.Replace(srv.URL, "http://", "http://legacy:pw@", 1) + "/health"
-	res := httpProber{client: srv.Client()}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorHTTP, Target: target})
+	res := httpProber{client: srv.Client()}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorHTTP, Target: target})
 	if !res.Connected || res.Code != http.StatusNoContent || gotUser != "legacy" || gotPass != "pw" {
 		t.Fatalf("legacy userinfo target: %+v, basic auth %q/%q", res, gotUser, gotPass)
 	}
@@ -450,13 +450,13 @@ func TestBasePathEndingInAnEscapedSlashReachesTheWire(t *testing.T) {
 		{"/base//", "/base/api/aliveness-test/%2F", "/base/api/v1/query"},
 	} {
 		gotEscaped = ""
-		res := rabbitmqProber{client: srv.Client()}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorRabbitMQ,
+		res := rabbitmqProber{client: srv.Client()}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorRabbitMQ,
 			Target: srv.URL + tc.base, Config: map[string]string{"mode": "management", "path": "/api/aliveness-test/%2F"}})
 		if !res.Connected || gotEscaped != tc.rabbit {
 			t.Errorf("rabbitmq base %q: the server received %q (%+v), want %q", tc.base, gotEscaped, res, tc.rabbit)
 		}
 		gotEscaped = ""
-		res = promqlProber{client: srv.Client()}.Probe(context.Background(), domain.Monitor{Type: domain.MonitorPromQL,
+		res = promqlProber{client: srv.Client()}.Probe(context.Background(), domain.Monitor{RecoveryThreshold: 1, Type: domain.MonitorPromQL,
 			Target: srv.URL + tc.base, Config: map[string]string{"query": "up"}})
 		if !res.Connected || gotEscaped != tc.prom {
 			t.Errorf("promql base %q: the server received %q (%+v), want %q", tc.base, gotEscaped, res, tc.prom)

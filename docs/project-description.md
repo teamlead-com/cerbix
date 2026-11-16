@@ -76,6 +76,22 @@ Push/heartbeat. Later: DNS, TLS cert expiry, gRPC, WebSocket/SSH/mail, PostgreSQ
 Redis/RabbitMQ/Docker, Prometheus/PromQL, composite/group. Each is a `Prober` plugin;
 assertions use a declarative condition engine.
 
+## Monitor alerting hysteresis
+
+A monitor confirms its verdict in both directions. `failure_threshold` makes it wait for N failed
+checks before `down`; **FR-043** adds `recovery_threshold` (1..10, default 1, exactly 1 for push and
+composite), the number of consecutive successful checks a `down` monitor needs before it is `up`
+again. Until the run completes the monitor stays `down` and shows `recovering N/M`, sends no recovery
+notification, keeps its auto-incident open, sends no "still down" reminder and fires no escalation
+step; a failed check ends the run. Checks are not accelerated on the way up, and the recovery is dated
+at its confirmation. **NFR-036**: the threshold is alerting hysteresis, not measurement — it alters no
+check result, and with the confirm phase off it changes no scheduled check, heartbeat, SLA, burn rate,
+service SLI, budget, gate decision or status-page bar; with the confirm phase on, a monitor held `down`
+gets no accelerated checks. An older binary during a rolling upgrade or after a rollback does not apply
+the threshold and loses no check result (migration 00118). Contract:
+[`func-recovery-threshold.md`](specs/func-recovery-threshold.md) revision 7, D-0281 — **DONE**, implemented in iter-0214 and closed by the owner on 2026-11-16
+([`status.md`](status.md)).
+
 ## SLA / SLI / SLO
 
 SLI = successful/total over rolling windows (24h/7d/30d/90d); SLO is the internal target,

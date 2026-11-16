@@ -374,7 +374,8 @@ func TestChangingACredentialRefOpensAnEpochDescribingTheNewCredential(t *testing
 	_ = seedSecret(t, st, ctx, f.projectID, "db-pass-a")
 
 	mon, cerr := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: f.projectID, Name: "pg", Type: domain.MonitorPostgres,
+		RecoveryThreshold: 1,
+		ProjectID:         f.projectID, Name: "pg", Type: domain.MonitorPostgres,
 		Target: "db.internal:5432", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 		Config: map[string]string{"username": "app", "database": "app", "password_ref": "db-pass-a"},
 	})

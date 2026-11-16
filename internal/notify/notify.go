@@ -57,7 +57,12 @@ func New(store Store, client *http.Client) *Dispatcher {
 // It returns a joined error if any channel fails (or channels can't be listed) so
 // the outbox retries the whole event; nil means every channel was delivered. A
 // monitor with no channels is a successful no-op.
-func (d *Dispatcher) Deliver(ctx context.Context, monitor domain.Monitor, up bool) error {
+//
+// recovery is the event's snapshot of a confirmed down→up (FR-043 §4.6), nil for every other
+// transition and for every event enqueued before the upgrade. A run of more than one success adds its
+// sentence to the text on every channel; the webhook's keys and the email Subject do not change, which
+// is why a recovery keeps coming through here and never through DeliverText.
+func (d *Dispatcher) Deliver(ctx context.Context, monitor domain.Monitor, up bool, recovery *domain.RecoverySnapshot) error {
 	channels, err := d.store.ListEnabledChannelsForMonitor(ctx, monitor.ID)
 	if err != nil {
 		return fmt.Errorf("notify: list channels for %s: %w", monitor.ID, err)
@@ -65,12 +70,12 @@ func (d *Dispatcher) Deliver(ctx context.Context, monitor domain.Monitor, up boo
 	var errs []error
 	for _, ch := range channels {
 		if ch.Type == domain.ChannelEmail {
-			if err := d.sendEmail(ctx, ch, monitor, up); err != nil {
+			if err := d.sendEmail(ctx, ch, monitor, up, recovery); err != nil {
 				errs = append(errs, fmt.Errorf("channel %s: %w", ch.ID, err))
 			}
 			continue
 		}
-		target, body, contentType, err := render(ch, monitor, up)
+		target, body, contentType, err := render(ch, monitor, up, recovery)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("channel %s render: %w", ch.ID, err))
 			continue
@@ -198,15 +203,21 @@ func renderAlertText(ch domain.NotificationChannel, text string) (string, []byte
 	}
 }
 
-// sendEmail delivers a monitor transition email via SMTP.
+// sendEmail delivers a monitor transition email via SMTP. The Subject is today's transition line and
+// stays so; the recovery sentence goes into the body only (FR-043 §4.6).
 func (d *Dispatcher) sendEmail(
-	ctx context.Context, ch domain.NotificationChannel, monitor domain.Monitor, up bool,
+	ctx context.Context, ch domain.NotificationChannel, monitor domain.Monitor, up bool, recovery *domain.RecoverySnapshot,
 ) error {
-	return d.sendMail(ctx, ch, Message(monitor, up))
+	return d.sendMailParts(ctx, ch, Message(monitor, up), transitionText(monitor, up, recovery))
 }
 
 // sendMail delivers a plain-text email (subject == body == text) via SMTP.
 func (d *Dispatcher) sendMail(ctx context.Context, ch domain.NotificationChannel, text string) error {
+	return d.sendMailParts(ctx, ch, text, text)
+}
+
+// sendMailParts delivers a plain-text email whose subject text and body differ.
+func (d *Dispatcher) sendMailParts(ctx context.Context, ch domain.NotificationChannel, subject, text string) error {
 	host := ch.Config["smtp_host"]
 	port := ch.Config["smtp_port"]
 	if port == "" {
@@ -231,7 +242,7 @@ func (d *Dispatcher) sendMail(ctx context.Context, ch domain.NotificationChannel
 	// One builder for every mail (sec-hardening-3 T-3, S18): the subject is the alert's first line,
 	// encoded; the body is the whole alert text; a refused address ends the delivery before any
 	// SMTP session, naming the field and its position.
-	msg, err := mailer.BuildMessage(from, to, text, text)
+	msg, err := mailer.BuildMessage(from, to, subject, text)
 	if err != nil {
 		return err
 	}
@@ -268,9 +279,25 @@ func Message(monitor domain.Monitor, up bool) string {
 	return fmt.Sprintf("🔴 %s is DOWN.", monitor.Name)
 }
 
-// render produces the (url, body, content-type) for a monitor transition.
-func render(ch domain.NotificationChannel, monitor domain.Monitor, up bool) (string, []byte, string, error) {
+// transitionText is the notification text of a transition: Message, plus — for a confirmed recovery
+// run of more than one success — ONE space and the snapshot's sentence (FR-043 §4.6). The sentence is
+// rendered by domain.RecoverySnapshot.Sentence, the same call the auto-incident's resolving update
+// makes, so the two read the same character for character (I14). Without a snapshot, or after a run
+// of one, it is Message exactly (I1).
+func transitionText(monitor domain.Monitor, up bool, recovery *domain.RecoverySnapshot) string {
 	text := Message(monitor, up)
+	if !up {
+		return text // a snapshot belongs to a recovery only; a DOWN text is never extended
+	}
+	if s := recovery.Sentence(); s != "" {
+		text += " " + s
+	}
+	return text
+}
+
+// render produces the (url, body, content-type) for a monitor transition.
+func render(ch domain.NotificationChannel, monitor domain.Monitor, up bool, recovery *domain.RecoverySnapshot) (string, []byte, string, error) {
+	text := transitionText(monitor, up, recovery)
 	switch ch.Type {
 	case domain.ChannelWebhook:
 		body, err := json.Marshal(map[string]any{

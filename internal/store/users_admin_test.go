@@ -129,7 +129,8 @@ func TestInsertHeartbeatForDeletedMonitor(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "gone", Type: domain.MonitorTCP, Target: "localhost:1",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "gone", Type: domain.MonitorTCP, Target: "localhost:1",
 		IntervalSeconds: 30, TimeoutSeconds: 5, Region: domain.DefaultRegion,
 	})
 	if err != nil {
@@ -150,14 +151,16 @@ func TestInsertHeartbeatsBulkSkipsDeletedMonitor(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	live, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "live", Type: domain.MonitorTCP, Target: "localhost:1",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "live", Type: domain.MonitorTCP, Target: "localhost:1",
 		IntervalSeconds: 30, TimeoutSeconds: 5, Region: domain.DefaultRegion,
 	})
 	if err != nil {
 		t.Fatalf("create live: %v", err)
 	}
 	gone, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "gone", Type: domain.MonitorTCP, Target: "localhost:2",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "gone", Type: domain.MonitorTCP, Target: "localhost:2",
 		IntervalSeconds: 30, TimeoutSeconds: 5, Region: domain.DefaultRegion,
 	})
 	if err := st.DeleteMonitor(ctx, gone.ID); err != nil {

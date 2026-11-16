@@ -102,14 +102,18 @@ var monitorFieldClass = map[string]SemanticClass{
 	// Delivery: who is told, not what happened.
 	"FailureThreshold":       SemanticDelivery,
 	"ConfirmIntervalSeconds": SemanticDelivery,
-	"RenotifySeconds":        SemanticDelivery,
-	"AutoIncident":           SemanticDelivery,
-	"EscalationPolicyID":     SemanticDelivery,
-	"DependsOn":              SemanticDelivery,
+	// FR-043: alerting hysteresis, not measurement (NFR-036).
+	"RecoveryThreshold":  SemanticDelivery,
+	"RenotifySeconds":    SemanticDelivery,
+	"AutoIncident":       SemanticDelivery,
+	"EscalationPolicyID": SemanticDelivery,
+	"DependsOn":          SemanticDelivery,
 
 	// Server-owned runtime.
 	"Status":               SemanticRuntime,
 	"ConsecutiveFailures":  SemanticRuntime,
+	"ConsecutiveSuccesses": SemanticRuntime,
+	"RecoveryStartedAt":    SemanticRuntime,
 	"ExecutionRevision":    SemanticRuntime,
 	"StateSequence":        SemanticRuntime,
 	"LastProbeErrorReason": SemanticRuntime,

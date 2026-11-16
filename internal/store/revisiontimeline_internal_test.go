@@ -291,7 +291,8 @@ func TestUpdateMonitorRecordsItsGenerationWithAllFourCadenceFields(t *testing.T)
 	st, ctx := timelineStore(t)
 	proj := seedTimelineProject(t, st, ctx)
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj, Name: "m", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj, Name: "m", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, ConfirmIntervalSeconds: 10, Retries: 1, Enabled: true})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -325,7 +326,8 @@ func TestRetireAndReactivateEachRecordTheirGeneration(t *testing.T) {
 	// Retire and reactivate apply to COMPOSITE monitors only — the store says so, and the first
 	// version of this test used an http monitor and was told off by name.
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj, Name: "m", Type: domain.MonitorComposite,
+		RecoveryThreshold: 1,
+		ProjectID:         proj, Name: "m", Type: domain.MonitorComposite,
 		IntervalSeconds: 60, Region: domain.DefaultRegion, Enabled: true,
 		Config: map[string]string{"children": "", "quorum": "1"}})
 	if err != nil {
@@ -379,7 +381,8 @@ func TestASecretRotationRecordsAGenerationForEveryAffectedMonitor(t *testing.T) 
 	var revBefore []int64
 	for i, name := range []string{"a", "b", "c"} {
 		mon, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: proj, Name: name, Type: domain.MonitorPostgres, Target: "db" + name + ":5432",
+			RecoveryThreshold: 1,
+			ProjectID:         proj, Name: name, Type: domain.MonitorPostgres, Target: "db" + name + ":5432",
 			IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 			Config: map[string]string{"password_ref": "db-password", "database": "d", "username": "u"}})
 		if err != nil {
@@ -415,7 +418,8 @@ func TestTheTimelineRowAndTheBumpShareOneTransaction(t *testing.T) {
 	st, ctx := timelineStore(t)
 	proj := seedTimelineProject(t, st, ctx)
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj, Name: "m", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj, Name: "m", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -486,7 +490,8 @@ func TestTheBackfillCoversEveryMonitorIncludingDisabledOnes(t *testing.T) {
 		enabled bool
 	}{{"live", true}, {"paused", false}} {
 		if _, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: proj, Name: tc.name, Type: domain.MonitorHTTP, Target: "https://" + tc.name,
+			RecoveryThreshold: 1,
+			ProjectID:         proj, Name: tc.name, Type: domain.MonitorHTTP, Target: "https://" + tc.name,
 			IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: tc.enabled}); err != nil {
 			t.Fatalf("create %s: %v", tc.name, err)
 		}
@@ -521,7 +526,8 @@ func TestCreatingAMonitorRecordsItsFirstGeneration(t *testing.T) {
 	st, ctx := timelineStore(t)
 	proj := seedTimelineProject(t, st, ctx)
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj, Name: "fresh", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj, Name: "fresh", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 45, TimeoutSeconds: 7, ConfirmIntervalSeconds: 15, Retries: 2, Enabled: true})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -549,7 +555,8 @@ func TestTheFileApplyCreatePathRecordsItsFirstGenerationToo(t *testing.T) {
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 	created, err := insertMonitorTx(ctx, tx, st, domain.Monitor{
-		ProjectID: proj, Name: "from-file", Type: domain.MonitorHTTP, Target: "https://f",
+		RecoveryThreshold: 1,
+		ProjectID:         proj, Name: "from-file", Type: domain.MonitorHTTP, Target: "https://f",
 		IntervalSeconds: 90, TimeoutSeconds: 8, ConfirmIntervalSeconds: 20, Retries: 1, Enabled: true})
 	if err != nil {
 		t.Fatalf("insertMonitorTx: %v", err)
@@ -583,7 +590,8 @@ func TestTheTimelineWriteRefusesAMonitorFromAnotherProject(t *testing.T) {
 	}
 	mine, theirs := mineProj.ID, theirsProj.ID
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: mine, Name: "m", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         mine, Name: "m", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true})
 	if err != nil {
 		t.Fatalf("create: %v", err)

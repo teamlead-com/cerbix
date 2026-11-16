@@ -5327,12 +5327,15 @@ components:
         timeout_seconds: { type: integer }
         retries: { type: integer }
         failure_threshold: { type: integer, description: 'Consecutive failed checks before "down" (confirmations); default 1.' }
+        recovery_threshold: { type: integer, minimum: 1, maximum: 10, description: 'Consecutive successful checks a "down" monitor needs before it is "up" again (FR-043). 1 = the first success recovers, the behaviour before this field existed. Exactly 1 for push and composite monitors. A "pending" monitor becomes "up" on its first success whatever the value.' }
         confirm_interval_seconds: { type: integer, description: 'Accelerated probe interval while confirming a failure (first fail → verdict). 0 = off; clamped to [5, interval]; effective with failure_threshold > 1.' }
         depends_on:
           type: array
           items: { type: string, format: uuid }
           description: 'Parent monitors (same project). While any transitive parent is down, alerts for this monitor are suppressed; data keeps recording. Must stay acyclic.'
         consecutive_failures: { type: integer, readOnly: true, description: 'Live confirmation counter ("confirming N/M" when > 0 and status is up).' }
+        consecutive_successes: { type: integer, readOnly: true, description: 'Live recovery counter ("recovering N/M" when > 0; the status stays down until it reaches recovery_threshold). 0 outside a run. N may exceed M after the threshold was lowered during a run.' }
+        recovery_started_at: { type: string, format: date-time, nullable: true, readOnly: true, description: 'When the first success of the current recovery run was recorded; null outside a run (set exactly when consecutive_successes > 0).' }
         renotify_seconds: { type: integer, description: 'Re-send the down alert every N seconds while down (0 = off).' }
         grace_seconds: { type: integer, description: 'Push monitors: extra tolerance beyond the interval before "down".' }
         conditions: { type: array, items: { type: string } }
@@ -5440,6 +5443,7 @@ components:
         timeout_seconds: { type: integer, default: 10 }
         retries: { type: integer, default: 0 }
         failure_threshold: { type: integer, default: 1, description: 'Consecutive failed checks before "down".' }
+        recovery_threshold: { type: integer, minimum: 1, maximum: 10, description: 'Consecutive successful checks before a "down" monitor is "up" again. Omitted means 1; an explicit value outside 1..10, 0 included, is a 400 and is never clamped. Push and composite monitors take exactly 1 (a larger value is a 400).' }
         confirm_interval_seconds: { type: integer, default: 10, description: 'Faster probes while confirming a failure. 0 = off; clamped to [5, interval].' }
         depends_on:
           type: array
@@ -5469,6 +5473,7 @@ components:
         timeout_seconds: { type: integer }
         retries: { type: integer }
         failure_threshold: { type: integer }
+        recovery_threshold: { type: integer, minimum: 1, maximum: 10, description: 'Omitted leaves the stored value unchanged. The rules of CreateMonitor.recovery_threshold; raising a push or composite monitor above 1 is a 400. A change does not reset a recovery run in progress: the next success is compared against the new value.' }
         confirm_interval_seconds: { type: integer }
         depends_on:
           type: array

@@ -56,7 +56,8 @@ func confirmsFrom(fs *fakeStore) []store.ExpectationConfirm {
 func TestTheAdvancePersistsTheInstantTheLeaderAlreadyComputed(t *testing.T) {
 	due := time.Now().UTC().Add(-30 * time.Second).Truncate(time.Second)
 	monitor := domain.Monitor{
-		ID: "plain-monitor", Type: domain.MonitorHTTP, Target: "https://example.com",
+		RecoveryThreshold: 1,
+		ID:                "plain-monitor", Type: domain.MonitorHTTP, Target: "https://example.com",
 		Region: domain.DefaultRegion, Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
 		ExecutionRevision: 7,
 	}
@@ -136,7 +137,8 @@ func TestTheAdvancePersistsTheInstantTheLeaderAlreadyComputed(t *testing.T) {
 // disagree about, which is what nine of B1's findings were.
 func TestAMonitorWithNoStandingExpectationStaysBelowTheLedgerCarrier(t *testing.T) {
 	monitor := domain.Monitor{
-		ID: "unscheduled", Type: domain.MonitorHTTP, Target: "https://example.com",
+		RecoveryThreshold: 1,
+		ID:                "unscheduled", Type: domain.MonitorHTTP, Target: "https://example.com",
 		Region: domain.DefaultRegion, Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
 		ExecutionRevision: 3,
 	}
@@ -177,7 +179,8 @@ func TestAMonitorWithNoStandingExpectationStaysBelowTheLedgerCarrier(t *testing.
 // `unknown`, which is honest, and not one measurement is lost.
 func TestALedgerReadFailureCostsNoProbe(t *testing.T) {
 	monitor := domain.Monitor{
-		ID: "still-probed", Type: domain.MonitorHTTP, Target: "https://example.com",
+		RecoveryThreshold: 1,
+		ID:                "still-probed", Type: domain.MonitorHTTP, Target: "https://example.com",
 		Region: domain.DefaultRegion, Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
 		ExecutionRevision: 1,
 	}
@@ -211,7 +214,8 @@ func TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoWithholds(t *testing.T
 	// Rule 3 on the PLAIN branch: a canary with no capable runner in its region.
 	t.Run("rule 3, a policy skip on the plain branch", func(t *testing.T) {
 		canary := domain.Monitor{
-			ID: "canary", Type: domain.MonitorAsyncCanary, Region: domain.DefaultRegion,
+			RecoveryThreshold: 1,
+			ID:                "canary", Type: domain.MonitorAsyncCanary, Region: domain.DefaultRegion,
 			Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5, ExecutionRevision: 2,
 			Config: map[string]string{"workflow": "checkout@v1"},
 		}
@@ -248,7 +252,8 @@ func TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoWithholds(t *testing.T
 		// intervals below the delay floor" — names this shape, and the assertion has to be written
 		// in it.
 		monitor := domain.Monitor{
-			ID: "unresolvable", Type: domain.MonitorPostgres, Target: "db:5432",
+			RecoveryThreshold: 1,
+			ID:                "unresolvable", Type: domain.MonitorPostgres, Target: "db:5432",
 			Region: domain.DefaultRegion, Enabled: true, IntervalSeconds: 5, TimeoutSeconds: 5,
 			ExecutionRevision: 4,
 		}
@@ -309,7 +314,8 @@ func TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoWithholds(t *testing.T
 	// produced once the record it skipped was reconstructed by a later gap.
 	t.Run("rule 2, a failed dispatch withholds rather than recording nothing", func(t *testing.T) {
 		monitor := domain.Monitor{
-			ID: "unpublishable", Type: domain.MonitorHTTP, Target: "https://example.com",
+			RecoveryThreshold: 1,
+			ID:                "unpublishable", Type: domain.MonitorHTTP, Target: "https://example.com",
 			Region: domain.DefaultRegion, Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
 			ExecutionRevision: 1,
 		}
@@ -357,11 +363,13 @@ func TestEveryForwardMovingRuleRecordsItsAdvanceAndRuleTwoWithholds(t *testing.T
 // it".
 func TestTheFlagOnRaisesTheInProcessRegionAndNeverItsPullRegions(t *testing.T) {
 	monitor := domain.Monitor{
-		ID: "credentialed", Type: domain.MonitorPostgres, Target: "db:5432",
+		RecoveryThreshold: 1,
+		ID:                "credentialed", Type: domain.MonitorPostgres, Target: "db:5432",
 		Region: domain.DefaultRegion, Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
 	}
 	pulled := domain.Monitor{
-		ID: "pulled", Type: domain.MonitorPostgres, Target: "db:5432",
+		RecoveryThreshold: 1,
+		ID:                "pulled", Type: domain.MonitorPostgres, Target: "db:5432",
 		Region: "edge", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
 	}
 	fs := &fakeStore{leader: true, monitors: []domain.Monitor{monitor, pulled}}
@@ -624,7 +632,8 @@ func firstLine(s string) string {
 func TestAWindowIsRecordedEvenWhenTheLedgerCarrierIsOff(t *testing.T) {
 	due := time.Now().UTC().Add(-30 * time.Second).Truncate(time.Second)
 	monitor := domain.Monitor{
-		ID: "plain-no-carrier", Type: domain.MonitorHTTP, Target: "https://example.com",
+		RecoveryThreshold: 1,
+		ID:                "plain-no-carrier", Type: domain.MonitorHTTP, Target: "https://example.com",
 		Region: domain.DefaultRegion, Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5,
 		ExecutionRevision: 2,
 	}

@@ -690,7 +690,8 @@ func TestTheIncidentSnapshotNamesTheGoverningDeclaration(t *testing.T) {
 
 	// A second monitor, and a NEXT revision that adds it, effective a minute from now.
 	other, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: f.projectID, Name: "checkout-dns", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         f.projectID, Name: "checkout-dns", Type: domain.MonitorHTTP,
 		Target: "https://dns.example.com/", IntervalSeconds: 30, Region: "core", Enabled: true,
 	})
 	if err != nil {

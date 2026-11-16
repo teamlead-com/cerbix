@@ -14,7 +14,8 @@ func TestIncidentContextAndAppend(t *testing.T) {
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mk := func(name, region string) domain.Monitor {
 		m, err := st.CreateMonitor(ctx, domain.Monitor{
-			ProjectID: proj.ID, Name: name, Type: domain.MonitorHTTP, Target: "https://x",
+			RecoveryThreshold: 1,
+			ProjectID:         proj.ID, Name: name, Type: domain.MonitorHTTP, Target: "https://x",
 			IntervalSeconds: 60, TimeoutSeconds: 5, Region: region,
 		})
 		if err != nil {

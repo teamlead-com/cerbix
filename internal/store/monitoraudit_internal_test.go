@@ -36,7 +36,8 @@ var tokenActor = AuditActor{ViaToken: true, Label: "token:ci-deployer"}
 
 func auditedHTTPMonitor(projID string) domain.Monitor {
 	return domain.Monitor{
-		ProjectID: projID, Name: "audited-http", Type: domain.MonitorHTTP, Target: "https://example.com/health",
+		RecoveryThreshold: 1,
+		ProjectID:         projID, Name: "audited-http", Type: domain.MonitorHTTP, Target: "https://example.com/health",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Region: "core", Enabled: true,
 		Config: map[string]string{"password": "not-for-the-trail"},
 	}
@@ -115,7 +116,8 @@ func TestAMonitorAuditTargetNamesTheDocumentAndNotItsContents(t *testing.T) {
 	// A canary whose document acknowledges no cleanup, with distinctive values in every position a
 	// leak could come from.
 	canary := domain.Monitor{
-		ProjectID: projID, Name: "audited-canary", Type: domain.MonitorAsyncCanary,
+		RecoveryThreshold: 1,
+		ProjectID:         projID, Name: "audited-canary", Type: domain.MonitorAsyncCanary,
 		IntervalSeconds: 300, TimeoutSeconds: 300, Region: "core", Enabled: true,
 		Config: map[string]string{domain.CanaryWorkflowKey: `{"kind":"async_transaction_v1",` +
 			`"submit":{"kind":"http_json","method":"POST","url":"https://leak-url.example/upload","body":{"tenant":"leak-body"}},` +

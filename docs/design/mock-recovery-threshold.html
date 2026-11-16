@@ -1,0 +1,472 @@
+<title>Cerbix Recovery Threshold</title>
+
+<style>
+/* Tokens VERBATIM from frontend/src/style.css (the block every approved mock carries). This change
+   adds NO new colour and no new status. A monitor in a recovery run is still DOWN, so it keeps the
+   --down pill; the run is a qualifier of that status and speaks in the neutral chip the status cell
+   already uses for qualifiers (--inset / --ink-2). The one warning (long soak) borrows the form's
+   existing --degraded notice. Spec: docs/specs/func-recovery-threshold.md (FR-043 / NFR-036), §8. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --focus:#7d79ff;
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+code{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.92em}
+a{color:var(--accent); text-decoration:none}
+
+.page{max-width:1180px; margin:0 auto; padding:28px 22px 80px; display:flex; flex-direction:column; gap:40px}
+.head{display:flex; flex-direction:column; gap:10px; max-width:78ch}
+.head h1{font-size:24px; font-weight:600; letter-spacing:-.01em}
+.head p{color:var(--ink-2)}
+.eyebrow{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+
+/* one annotation grammar for the whole mock: NEW = added by this change */
+.new{display:inline-flex; align-items:center; height:18px; padding:0 7px; border-radius:999px;
+  background:var(--note-bg); border:1px solid var(--note-border); color:var(--note);
+  font-size:10.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; vertical-align:middle}
+.note{border:1px solid var(--note-border); background:var(--note-bg); border-radius:6px; padding:12px 14px; color:var(--ink-2); font-size:13px}
+.note b{color:var(--note); font-weight:600}
+.hl{outline:1.5px dashed var(--note); outline-offset:3px; border-radius:3px}
+
+section{display:flex; flex-direction:column; gap:14px}
+section > header{display:flex; flex-direction:column; gap:4px}
+section > header h2{font-size:16px; font-weight:600}
+section > header .where{font-size:12.5px; color:var(--ink-3)}
+section > header .where code{font-size:12px; color:var(--ink-2)}
+
+.contract{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); border:1px solid var(--border); border-radius:6px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.contract > div{padding:14px 16px; border-right:1px solid var(--border); border-bottom:1px solid var(--border); display:flex; flex-direction:column; gap:4px}
+.contract .v{font-size:15px; font-weight:600}
+.contract .d{font-size:12.5px; color:var(--ink-2)}
+
+/* app surfaces, faithful to the Tailwind classes they mirror */
+.card{border:1px solid var(--border); border-radius:6px; background:var(--surface); box-shadow:var(--shadow)}
+.card-t{padding:13px 16px 0}
+.card-t h3{font-size:13px; font-weight:600}
+.card-h{padding:13px 16px; border-bottom:1px solid var(--border)}
+.card-h h3{font-size:13px; font-weight:600}
+.stateline{display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--ink-3); padding:12px 16px 0}
+.stateline .tagv{border:1px solid var(--border-strong); border-radius:3px; padding:1px 7px; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-2)}
+.card.rejected{opacity:.5}
+.stateline .tagv.rej{border-style:dashed; color:var(--ink-3); text-decoration:line-through}
+.stateline .tagv.rec{border-color:var(--note-border); color:var(--note); background:var(--note-bg)}
+
+/* NewMonitorView.vue — schedule card: grid-cols-3 gap-3, label flex-col gap-[6px] */
+.fgrid{display:grid; grid-template-columns:repeat(3,1fr); gap:12px; padding:14px 16px 16px}
+.fgrid.c2{grid-template-columns:repeat(2,1fr)}
+.fgrid.c1{grid-template-columns:1fr}
+.fld{display:flex; flex-direction:column; gap:6px}
+.fld .l{font-size:12px; font-weight:600; color:var(--ink-2)}
+.fld .box{position:relative; display:block}
+.fld .in{height:38px; width:100%; border:1px solid var(--border); background:var(--surface-2); border-radius:4px; padding:0 44px 0 11px; font:13.5px/38px ui-monospace,Menlo,Consolas,monospace; color:var(--ink)}
+.fld .u{position:absolute; right:11px; top:50%; transform:translateY(-50%); font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; color:var(--ink-3)}
+.fld .h{font-size:11.5px; color:var(--ink-3); line-height:1.45}
+.fld.dim{opacity:.5}
+.span3{grid-column:1 / -1}
+/* the form's existing amber notice (NewMonitorView "region has no live prober") */
+.warnbox{border:1px solid color-mix(in srgb, var(--degraded) 40%, transparent); background:var(--degraded-weak); border-radius:4px; padding:8px 12px; font-size:12.5px; color:var(--ink-2); line-height:1.5}
+.warnbox b{color:var(--degraded); font-weight:600}
+/* the form's existing neutral info box (MonitorDetailView "Managed by file") */
+.infobox{border:1px solid var(--border); background:var(--inset); border-radius:4px; padding:8px 12px; font-size:12.5px; color:var(--ink-2); line-height:1.5}
+.infobox b{color:var(--ink); font-weight:600}
+.depchip{display:inline-flex; align-items:center; gap:6px; border-radius:999px; background:var(--accent-weak); padding:3px 10px; font-size:12px; font-weight:500; color:var(--accent)}
+.depchip i{width:6px; height:6px; border-radius:50%; background:var(--down)}
+
+/* MonitorsView.vue table */
+table{width:100%; border-collapse:collapse; font-size:13px}
+th{font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); text-align:left; padding:10px 16px; border-bottom:1px solid var(--border); font-weight:600}
+td{padding:11px 16px; border-bottom:1px solid var(--border); vertical-align:middle}
+tr:last-child td{border-bottom:0}
+.mname{font-weight:500; color:var(--ink)}
+.type{display:inline-block; padding:1px 6px; border:1px solid var(--border); border-radius:3px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-3)}
+td.m3{font-family:ui-monospace,Menlo,Consolas,monospace; color:var(--ink-3)}
+.cell{display:inline-flex; flex-wrap:wrap; align-items:center; gap:6px}
+
+/* StatusPill.vue — h-6, pl-[7px] pr-[9px], text-xs font-medium, 7px dot */
+.pill{display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 9px 0 7px; border-radius:999px; font-size:12px; font-weight:500; white-space:nowrap}
+.pill i{width:7px; height:7px; border-radius:50%; background:currentColor}
+.pill.up{background:var(--up-weak); color:var(--up)}
+.pill.down{background:var(--down-weak); color:var(--down)}
+.pill.degraded{background:var(--degraded-weak); color:var(--degraded)}
+/* the list's qualifier chip ("⏸ suppressed by …"): h-6 rounded-full bg-inset px-[9px] text-[11px] text-ink-2 */
+.qchip{display:inline-flex; align-items:center; gap:5px; height:24px; padding:0 9px; border-radius:999px; background:var(--inset); font-size:11px; font-weight:500; color:var(--ink-2); white-space:nowrap}
+.qchip .mono{font-size:11px}
+/* the detail header's chips ("Paused", "paging delegated →"): rounded-full px-[9px] py-px text-[11.5px] */
+.dchip{display:inline-flex; align-items:center; gap:5px; padding:1px 9px; border-radius:999px; background:var(--inset); font-size:11.5px; font-weight:500; color:var(--ink-2); white-space:nowrap}
+
+/* MonitorDetailView.vue header */
+.dhead{display:flex; flex-direction:column; gap:7px; padding:16px 18px}
+.dhead + .dhead{border-top:1px solid var(--border)}
+.dhead .row{display:flex; flex-wrap:wrap; align-items:center; gap:10px}
+.dhead h1{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:22px; font-weight:600; letter-spacing:-.01em}
+.dhead .meta{display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; font-size:13px; color:var(--ink-3)}
+.dhead .meta .mono{color:var(--ink-2)}
+.dot3{display:inline-block; width:3px; height:3px; border-radius:50%; background:var(--border-strong)}
+
+/* MonitorDetailView.vue Configuration dl */
+dl.cfg{display:grid; grid-template-columns:auto 1fr; gap:9px 14px; padding:14px 16px; margin:0; font-size:13px}
+dl.cfg dt{color:var(--ink-3)}
+dl.cfg dd{margin:0; text-align:right; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; color:var(--ink-2)}
+dl.cfg .hl{outline-offset:2px}
+
+.two{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+.three{display:grid; grid-template-columns:1.25fr 1fr 1fr; gap:14px}
+@media (max-width:900px){.two,.three,.fgrid{grid-template-columns:1fr} .fgrid.c2{grid-template-columns:1fr}}
+ul.plain{margin:0; padding-left:18px; color:var(--ink-2); font-size:13px; display:flex; flex-direction:column; gap:6px}
+.tbl th, .tbl td{padding:8px 14px}
+.tbl td{font-size:12.5px; color:var(--ink-2)}
+.tbl td.n{font-family:ui-monospace,Menlo,Consolas,monospace; text-align:right; white-space:nowrap}
+.tbl td.none{color:var(--ink-3)}
+.tbl td.warn{color:var(--ink)}
+.tbl tr.edge td{background:var(--accent-weak)}
+</style>
+
+<div class="page">
+
+  <div class="head">
+    <div class="eyebrow">
+      <span class="lbl">Design mock · recovery threshold · FR-043 / NFR-036 · APPROVED by the owner 2026-11-16</span>
+    </div>
+    <h1>A monitor leaves DOWN only after a confirmed run of successes</h1>
+    <p>Mock for <span class="mono">docs/specs/func-recovery-threshold.md</span> §8 (revision 5, approved 2026-11-15). One new number on the form, one warning, one hint, one label for a monitor that is down but has started answering, and one row on the monitor page. Every monitor that exists today has <span class="mono">recovery_threshold = 1</span> and renders exactly as it does now. Two placement questions the spec leaves to the mock were drawn as variants; the owner chose on 2026-11-16 (§4: the chip, variant 2; §5: both labels, variant 1) and the rejected variants are kept, dimmed and marked, as the record of what was compared. The owner also narrowed the dependency hint (§3) — recorded in the spec, §8 and §11.</p>
+  </div>
+
+  <div class="contract">
+    <div><span class="lbl">Field</span><span class="v mono">recovery_threshold</span><span class="d">integer · consecutive successful checks a <span class="mono">down</span> monitor needs before it is declared <span class="mono">up</span></span></div>
+    <div><span class="lbl">Range · default</span><span class="v">1 … 10 · 1</span><span class="d">1 is today's behaviour exactly: the first success recovers</span></div>
+    <div><span class="lbl">Types</span><span class="v">all but push, composite</span><span class="d">push and composite must be 1 (D8); the form neither shows nor sends the field for them</span></div>
+    <div><span class="lbl">Read model</span><span class="v mono">consecutive_successes</span><span class="d">non-zero only while <span class="mono">down</span>; drives "recovering N/M", as fresh as the last page load (D13)</span></div>
+  </div>
+
+  <!-- 1 · form -->
+  <section>
+    <header>
+      <h2>1 · Monitor form, Schedule card <span class="new">new field</span></h2>
+      <div class="where">routes <code>/monitors/new</code>, <code>/monitors/:id/edit</code> · <code>frontend/src/views/NewMonitorView.vue</code>, the <code>schedTitle</code> card. Today it is two rows of three: Interval · Timeout · Retries, then Confirmations · Confirm interval · Re-notify. The new field opens a third row, directly <b>under Confirmations</b>.</div>
+    </header>
+    <div class="card">
+      <div class="card-t"><h3>Schedule</h3></div>
+      <div class="fgrid">
+        <label class="fld"><span class="l">Interval</span><span class="box"><span class="in">60</span><span class="u">sec</span></span></label>
+        <label class="fld"><span class="l">Timeout</span><span class="box"><span class="in">10</span><span class="u">sec</span></span></label>
+        <label class="fld"><span class="l">Retries</span><span class="box"><span class="in">0</span><span class="u">×</span></span></label>
+        <label class="fld"><span class="l">Confirmations</span><span class="box"><span class="in">3</span><span class="u">fail</span></span><span class="h">Consecutive failed checks before "down" (and alerting).</span></label>
+        <label class="fld"><span class="l">Confirm interval</span><span class="box"><span class="in">10</span><span class="u">sec</span></span><span class="h">Faster probes while confirming a failure. 0 = off; min 5s; needs confirmations &gt; 1.</span></label>
+        <label class="fld"><span class="l">Re-notify</span><span class="box"><span class="in">0</span><span class="u">sec</span></span><span class="h">Re-send the alert every N sec while down (0 = off).</span></label>
+        <label class="fld hl"><span class="l">Recovery threshold</span><span class="box"><span class="in">3</span><span class="u">ok</span></span><span class="h">Consecutive successful checks before "up" again. The monitor stays down until this many checks in a row succeed. 1–10.</span></label>
+      </div>
+    </div>
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv">http form</span> the field is present for every type with an active check</div>
+        <div class="fgrid c2">
+          <label class="fld"><span class="l">Confirmations</span><span class="box"><span class="in">3</span><span class="u">fail</span></span></label>
+          <label class="fld"><span class="l">Confirm interval</span><span class="box"><span class="in">10</span><span class="u">sec</span></span></label>
+          <label class="fld hl"><span class="l">Recovery threshold</span><span class="box"><span class="in">3</span><span class="u">ok</span></span></label>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">push form</span> "Heartbeat" card — unchanged, no field</div>
+        <div class="fgrid c2">
+          <label class="fld"><span class="l">Expected every</span><span class="box"><span class="in">300</span><span class="u">sec</span></span><span class="h">Alert if the service does not check in within this period.</span></label>
+          <label class="fld"><span class="l">Grace period</span><span class="box"><span class="in">60</span><span class="u">sec</span></span><span class="h">Extra tolerance beyond the interval before marking down.</span></label>
+        </div>
+        <div class="stateline" style="padding-top:0"><span class="tagv">composite form</span> "Re-evaluate every" only — unchanged, no field</div>
+        <div class="fgrid c1">
+          <label class="fld" style="max-width:220px"><span class="l">Re-evaluate every</span><span class="box"><span class="in">30</span><span class="u">sec</span></span></label>
+        </div>
+      </div>
+    </div>
+    <div class="note"><b>Why under Confirmations and not beside it.</b> Confirmations and Confirm interval are already coupled (the interval is dimmed until Confirmations &gt; 1); wedging a field between them would split that pair. Under it, the two hysteresis counts share a column — the way down above, the way up below — and the units read as a pair: <span class="mono">fail</span> / <span class="mono">ok</span>. <b>Name.</b> The form calls the down-side count "Confirmations" while the monitor page calls it "Failure threshold"; the new field uses the spec's name, "Recovery threshold", on both surfaces, because "Confirmations" for the way up would collide with the confirm phase, which only ever accelerates the way down (D4). <b>What is sent.</b> For <span class="mono">push</span> and <span class="mono">composite</span> the form sends no <span class="mono">recovery_threshold</span> at all, whatever the field held before the type was switched (a hidden 3 would be a 400 under D8). In a multi-region set the regional children receive the form's value and the composite parent receives none.</div>
+  </section>
+
+  <!-- 2 · long soak -->
+  <section>
+    <header>
+      <h2>2 · Long-soak warning <span class="new">new</span></h2>
+      <div class="where">shown under the field when <code>interval_seconds × (recovery_threshold − 1) ≥ 600</code>. It states the delay, not a refusal: the value is valid and saves. Checks are not accelerated during a run (D4), so the delay is exactly that product.</div>
+    </header>
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv">below the boundary</span> 60 s × (3 − 1) = 120 s — no warning</div>
+        <div class="fgrid c1">
+          <label class="fld"><span class="l">Recovery threshold</span><span class="box" style="max-width:220px"><span class="in">3</span><span class="u">ok</span></span><span class="h">Consecutive successful checks before "up" again. The monitor stays down until this many checks in a row succeed. 1–10.</span></label>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">at the boundary</span> 300 s × (3 − 1) = 600 s — warning</div>
+        <div class="fgrid c1">
+          <label class="fld"><span class="l">Recovery threshold</span><span class="box" style="max-width:220px"><span class="in">3</span><span class="u">ok</span></span><span class="h">Consecutive successful checks before "up" again. The monitor stays down until this many checks in a row succeed. 1–10.</span></label>
+          <div class="warnbox hl" id="soak-example"></div>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="overflow-x:auto">
+      <table class="tbl">
+        <thead><tr><th>Interval</th><th>Threshold</th><th style="text-align:right">Interval × (M − 1)</th><th>What the field shows</th></tr></thead>
+        <tbody id="soak-table"></tbody>
+      </table>
+    </div>
+    <div class="note"><b>Every row above is derived, not typed.</b> One function in the script builds the warning text and every cell of the table from the two inputs, the way the form will: <span class="mono">soak = interval × (M − 1)</span>, warn when <span class="mono">soak ≥ 600</span>, durations written in the largest whole units (<span class="mono">h</span>, <span class="mono">min</span>, <span class="mono">s</span>). The highlighted rows sit on the boundary. Note the second row: a 60 s monitor can never reach the warning, because the threshold stops at 10 (9 × 60 s = 9 min). "About" is honest: the first success lands somewhere in its own interval and the result still has to be ingested.</div>
+  </section>
+
+  <!-- 3 · dependency hint -->
+  <section>
+    <header>
+      <h2>3 · Dependency hint <span class="new">new</span></h2>
+      <div class="where">shown under the field when the monitor has a parent (<code>depends_on</code> non-empty <b>and</b> <code>recovery_threshold &gt; 1</code> — owner's decision 2026-11-16, spec §8; the "Depends on" picker in the alerting card further down the same form). It explains spec §4.4: a parent at a lower threshold leaves <span class="mono">down</span> first, and with it the suppression of this monitor's alerts.</div>
+    </header>
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv">schedule card</span> threshold 3, one parent</div>
+        <div class="fgrid c1">
+          <label class="fld"><span class="l">Recovery threshold</span><span class="box" style="max-width:220px"><span class="in">3</span><span class="u">ok</span></span><span class="h">Consecutive successful checks before "up" again. The monitor stays down until this many checks in a row succeed. 1–10.</span></label>
+          <div class="infobox hl"><b>This monitor depends on other monitors.</b> A parent with a lower recovery threshold recovers first — and from that moment stops suppressing this monitor's alerts, even while this monitor is still down.</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">alerting card · existing</span> where the parent is chosen</div>
+        <div class="fgrid c1">
+          <div class="fld"><span class="l">Depends on <span class="mono" style="color:var(--ink-3);font-weight:400">1</span></span>
+            <div><span class="depchip"><i></i>orders-db <span style="opacity:.7">✕</span></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note"><b>Rules (approved 2026-11-16).</b> Shown when <span class="mono">depends_on</span> is non-empty <b>and</b> the field is above 1. At 1 no parent can have a lower threshold, so the sentence could never apply and would only be noise on every dependent monitor that exists today; it appears as the field goes from 1 to 2 and disappears when it goes back. The hint does not compare thresholds per parent: the form's dependency picker lists names and statuses only, and the rule is one sentence that holds for every parent. Both the warning and the hint can be shown together; the warning comes first because it is about this monitor alone. Neither appears for <span class="mono">push</span> or <span class="mono">composite</span>, where the field is absent.</div>
+  </section>
+
+  <!-- 4 · list -->
+  <section>
+    <header>
+      <h2>4 · Monitor list — "recovering N/M" <span class="new">decision D-A</span></h2>
+      <div class="where">route <code>/monitors</code> · <code>frontend/src/views/MonitorsView.vue</code>, the Status cell. Shown whenever <code>status === "down" &amp;&amp; consecutive_successes &gt; 0</code> — <b>not</b> gated on <code>&lt; recovery_threshold</code>, so a threshold lowered during a run (D10) reads <span class="mono">3/2</span> until the next check. Only the Monitor and Status columns differ; Type, Target and Interval are unchanged and omitted here.</div>
+    </header>
+    <div class="two">
+      <div class="card rejected" style="overflow-x:auto">
+        <div class="stateline"><span class="tagv rej">variant 1 · rejected</span> the label replaces the pill text, exactly as <code>confirmingLabel</code> does — but the pill stays red</div>
+        <table>
+          <thead><tr><th>Monitor</th><th>Interval</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr><td><span class="mname">api-gateway</span></td><td class="m3">60s</td><td><span class="cell"><span class="pill down hl"><i></i>Recovering 2/3…</span></span></td></tr>
+            <tr><td><span class="mname">checkout-api</span></td><td class="m3">60s</td><td><span class="cell"><span class="pill down hl"><i></i>Recovering 3/2…</span></span></td></tr>
+            <tr><td><span class="mname">search-indexer</span></td><td class="m3">120s</td><td><span class="cell"><span class="pill down hl"><i></i>Recovering 1/3…</span><span class="qchip">⏸ suppressed by api-gateway</span></span></td></tr>
+            <tr><td><span class="mname">worker-health</span></td><td class="m3">30s</td><td><span class="cell"><span class="pill down"><i></i>Down</span></span></td></tr>
+            <tr><td><span class="mname">orders-db</span></td><td class="m3">30s</td><td><span class="cell"><span class="pill degraded"><i></i>Confirming 1/3…</span></span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card" style="overflow-x:auto">
+        <div class="stateline"><span class="tagv rec">variant 2 · approved 2026-11-16</span> the pill keeps saying Down; the run is a qualifier chip beside it</div>
+        <table>
+          <thead><tr><th>Monitor</th><th>Interval</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr><td><span class="mname">api-gateway</span></td><td class="m3">60s</td><td><span class="cell"><span class="pill down"><i></i>Down</span><span class="qchip hl" title="2 of 3 consecutive successful checks. The monitor stays down until 3 in a row succeed. As of page load.">recovering <span class="mono">2/3</span></span></span></td></tr>
+            <tr><td><span class="mname">checkout-api</span></td><td class="m3">60s</td><td><span class="cell"><span class="pill down"><i></i>Down</span><span class="qchip hl" title="3 consecutive successful checks; the threshold was lowered to 2 during the run, so the next successful check confirms the recovery. As of page load.">recovering <span class="mono">3/2</span></span></span></td></tr>
+            <tr><td><span class="mname">search-indexer</span></td><td class="m3">120s</td><td><span class="cell"><span class="pill down"><i></i>Down</span><span class="qchip hl" title="1 of 3 consecutive successful checks. The monitor stays down until 3 in a row succeed. As of page load.">recovering <span class="mono">1/3</span></span><span class="qchip">⏸ suppressed by api-gateway</span></span></td></tr>
+            <tr><td><span class="mname">worker-health</span></td><td class="m3">30s</td><td><span class="cell"><span class="pill down"><i></i>Down</span></span></td></tr>
+            <tr><td><span class="mname">orders-db</span></td><td class="m3">30s</td><td><span class="cell"><span class="pill degraded"><i></i>Confirming 1/3…</span></span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="note"><b>Rows.</b> <span class="mono">api-gateway</span> — a run in progress. <span class="mono">checkout-api</span> — the threshold was lowered from 4 to 2 during a run of 3; the monitor is still <span class="mono">down</span> until its next check (D10), and the label says so rather than hiding the run. <span class="mono">search-indexer</span> — a run and a dependency suppression at once. <span class="mono">worker-health</span> — down, no run: unchanged. <span class="mono">orders-db</span> — today's "Confirming N/M…", unchanged in both variants. <b>Tooltip</b> (variant 2, hover the chip): "2 of 3 consecutive successful checks. The monitor stays down until 3 in a row succeed. As of page load." — and for N ≥ M: "3 consecutive successful checks; the threshold was lowered to 2 during the run, so the next successful check confirms the recovery. As of page load."</div>
+    <div class="note"><b>Approved by the owner 2026-11-16: variant 2, the chip.</b> (1) The monitor <i>is</i> down — notifications, the auto-incident, composites and dependency suppression all still treat it as down — and the pill is the one word on the row that says so. Today's "Confirming" may replace its pill's word because it changes the colour too: amber says "not settled", and the word it hides ("Operational") would over-claim. A red pill reading "Recovering" hides the right word and carries two opposite messages; anyone scanning the column for "Down" misses it. (2) The Status cell already has a chip row for qualifiers of a down monitor — "⏸ suppressed by …", "quorum M/N" — in this exact shape; the run is one more qualifier and composes with them (row 3). (3) The monitor page already follows the same rule in code: "a delegated monitor keeps its real pill — DOWN reads as DOWN — and gains a chip" (FR-021 §16.1). <b>Wording</b>: lower case, "recovering 2/3", like its neighbours "suppressed by …" and "quorum 2/3"; no ellipsis (the run waits on the next scheduled check, not on something in progress on screen); no green and no "OK", which would announce a recovery that has not been confirmed. <b>Cost</b>: the cell then uses two mechanisms — confirming overrides the pill, recovering adds a chip. That asymmetry is real, not accidental: one sits on an <span class="mono">up</span> monitor whose pill word would over-claim, the other on a <span class="mono">down</span> monitor whose pill word is exactly right.</div>
+  </section>
+
+  <!-- 5 · detail header -->
+  <section>
+    <header>
+      <h2>5 · Monitor page header — one label or both <span class="new">decision D-B</span></h2>
+      <div class="where">route <code>/monitors/:id</code> · <code>frontend/src/views/MonitorDetailView.vue</code>. Today the header renders <code>&lt;StatusPill :status="statusPill()" /&gt;</code> with no label, so a monitor that reads "Confirming 1/3…" in the list reads "Operational" here. Both variants use the D-A recommendation for the recovering chip.</div>
+    </header>
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">variant 1 · approved 2026-11-16</span> both labels — the header's status reads exactly like the list row</div>
+        <div class="dhead">
+          <div class="row"><h1>api-gateway</h1><span class="type">http</span><span class="pill down"><i></i>Down</span><span class="dchip hl" title="2 of 3 consecutive successful checks. The monitor stays down until 3 in a row succeed. As of page load.">recovering <span class="mono">2/3</span></span></div>
+          <div class="meta"><span class="mono">GET https://api.example.internal/healthz</span><span class="dot3"></span><span>every <span class="mono">60s</span></span><span class="dot3"></span><span>timeout <span class="mono">10s</span></span><span class="dot3"></span><span>retries <span class="mono">0</span></span><span class="dot3"></span><span>checked <span class="mono">41s ago</span></span></div>
+        </div>
+        <div class="dhead">
+          <div class="row"><h1>orders-db</h1><span class="type">postgres</span><span class="pill degraded hl"><i></i>Confirming 1/3…</span></div>
+          <div class="meta"><span class="mono">orders-1.db.internal:5432</span><span class="dot3"></span><span>every <span class="mono">30s</span></span><span class="dot3"></span><span>timeout <span class="mono">5s</span></span><span class="dot3"></span><span>retries <span class="mono">0</span></span><span class="dot3"></span><span>checked <span class="mono">12s ago</span></span></div>
+        </div>
+      </div>
+      <div class="card rejected">
+        <div class="stateline"><span class="tagv rej">variant 2 · rejected</span> only "recovering" — confirming stays list-only</div>
+        <div class="dhead">
+          <div class="row"><h1>api-gateway</h1><span class="type">http</span><span class="pill down"><i></i>Down</span><span class="dchip hl">recovering <span class="mono">2/3</span></span></div>
+          <div class="meta"><span class="mono">GET https://api.example.internal/healthz</span><span class="dot3"></span><span>every <span class="mono">60s</span></span><span class="dot3"></span><span>timeout <span class="mono">10s</span></span><span class="dot3"></span><span>retries <span class="mono">0</span></span><span class="dot3"></span><span>checked <span class="mono">41s ago</span></span></div>
+        </div>
+        <div class="dhead">
+          <div class="row"><h1>orders-db</h1><span class="type">postgres</span><span class="pill up"><i></i>Operational</span></div>
+          <div class="meta"><span class="mono">orders-1.db.internal:5432</span><span class="dot3"></span><span>every <span class="mono">30s</span></span><span class="dot3"></span><span>timeout <span class="mono">5s</span></span><span class="dot3"></span><span>retries <span class="mono">0</span></span><span class="dot3"></span><span>checked <span class="mono">12s ago</span></span></div>
+        </div>
+      </div>
+    </div>
+    <div class="note"><b>Approved by the owner 2026-11-16: variant 1, both.</b> The monitor page is where a notification link and a click from the list both land; it should not say "Operational" one click after the list said "Confirming 1/3…", and variant 2 keeps exactly that mismatch for the confirming case while fixing it for the new one. The cost is small and removes code rather than adding it: <span class="mono">confirmingLabel</span> and the new recovering label move out of <span class="mono">MonitorsView.vue</span> into one shared helper that the list cell and the page header both render, so the two surfaces cannot drift again. Placement follows the header's existing order: pill first, then its qualifier chips ("recovering …" here, beside "Paused", "Retired", "paging delegated →").</div>
+  </section>
+
+  <!-- 6 · configuration -->
+  <section>
+    <header>
+      <h2>6 · Monitor page, Configuration card <span class="new">new row</span></h2>
+      <div class="where"><code>MonitorDetailView.vue</code>, the <code>Configuration</code> <code>&lt;dl&gt;</code>. One row directly after "Failure threshold", same format ("N checks"). Absent for <span class="mono">push</span> (the whole block is behind <code>!isPush</code>) and for <span class="mono">composite</span> (which today does show Failure threshold, so the new row needs its own <code>!isComposite</code>).</div>
+    </header>
+    <div class="three">
+      <div class="card">
+        <div class="card-h"><h3>Configuration</h3></div>
+        <div class="stateline" style="padding-top:10px"><span class="tagv">http</span></div>
+        <dl class="cfg">
+          <dt>Target</dt><dd>https://api.example.internal/healthz</dd>
+          <dt>Type</dt><dd>http</dd>
+          <dt>Method</dt><dd>GET</dd>
+          <dt>Interval</dt><dd>60s</dd>
+          <dt>Timeout</dt><dd>10s</dd>
+          <dt>Retries</dt><dd>0</dd>
+          <dt>Failure threshold</dt><dd>3 checks</dd>
+          <dt class="hl">Recovery threshold</dt><dd class="hl">3 checks</dd>
+          <dt>Confirm interval</dt><dd>10s</dd>
+          <dt>Auto-incident</dt><dd>on</dd>
+          <dt>Region</dt><dd>core</dd>
+        </dl>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>Configuration</h3></div>
+        <div class="stateline" style="padding-top:10px"><span class="tagv">push</span> no row</div>
+        <dl class="cfg">
+          <dt>Target</dt><dd>—</dd>
+          <dt>Type</dt><dd>push</dd>
+          <dt>Grace period</dt><dd>60s</dd>
+          <dt>Auto-incident</dt><dd>on</dd>
+        </dl>
+      </div>
+      <div class="card">
+        <div class="card-h"><h3>Configuration</h3></div>
+        <div class="stateline" style="padding-top:10px"><span class="tagv">composite</span> no row</div>
+        <dl class="cfg">
+          <dt>Target</dt><dd>—</dd>
+          <dt>Type</dt><dd>composite</dd>
+          <dt>Interval</dt><dd>30s</dd>
+          <dt>Failure threshold</dt><dd>1 checks</dd>
+          <dt>Auto-incident</dt><dd>on</dd>
+          <dt>Region</dt><dd>core</dd>
+        </dl>
+      </div>
+    </div>
+    <div class="note"><b>Shown at 1 too.</b> The row is present for every monitor of a type that has the field, including the default 1 — the same as "Failure threshold", which is always listed. A value of 1 is a statement ("the first success recovers"), not an absence.</div>
+  </section>
+
+  <!-- 7 · freshness -->
+  <section>
+    <header>
+      <h2>7 · How fresh the label is (D13)</h2>
+      <div class="where">the same limit "Confirming N/M…" has today, stated so it is not mistaken for a live counter.</div>
+    </header>
+    <ul class="plain">
+      <li><b>As of the last load.</b> The run advances without a status change, and nothing is published without a status change, so neither the list nor the page header moves the count by itself. The tooltip ends "As of page load." — the only place the mock spends words on it; a visible timestamp would imply a freshness the page does not have.</li>
+      <li><b>A live transition clears it</b> (owner's decision 2026-11-16, stage 2, covered by a frontend unit test: applying a live status event sets <span class="mono">consecutive_successes</span> to 0, and a move into <span class="mono">up</span> sets <span class="mono">consecutive_failures</span> to 0 as well). The monitor page applies live <span class="mono">status</span> events to the loaded monitor. Every transition resets the run (into <span class="mono">up</span> on confirmation, into <span class="mono">down</span> with the counter at 0), so the page must zero <span class="mono">consecutive_successes</span> — and <span class="mono">consecutive_failures</span> on a move into <span class="mono">up</span> — when it applies one. Otherwise a monitor loaded mid-run that then goes up and down again would show the stale "recovering 2/3" from the first run.</li>
+      <li><b>What the label never does.</b> It never turns green, never appears on an <span class="mono">up</span> or <span class="mono">pending</span> monitor, and never hides the Down pill. When the run completes the monitor is <span class="mono">up</span> and the label is gone with the pill change.</li>
+    </ul>
+  </section>
+
+  <!-- 8 · not changed -->
+  <section>
+    <header>
+      <h2>8 · What this mock does not change</h2>
+      <div class="where">named, so the absence reads as a decision.</div>
+    </header>
+    <ul class="plain">
+      <li><b>Dashboard panels</b> (<span class="mono">MonitorCard.vue</span>) do not show "Confirming" today and do not gain "recovering". §8 names the list and the monitor page only.</li>
+      <li><b>Status pages.</b> A monitor component stays <span class="mono">major_outage</span> until the recovery is confirmed; its 90-day bar already shows the successes, because it is computed from checks (§4.4). No public wording changes.</li>
+      <li><b>Service pages.</b> A service is measured from checks and can be green while its member monitor is still red — by design (§4.4). No label is added there.</li>
+      <li><b>Test connection.</b> The probe-only test body refuses <span class="mono">recovery_threshold</span> as an unknown field (§4.5); the form's "Test" action never sends it.</li>
+      <li><b>Instance defaults</b> (Settings → Monitor defaults) gain no recovery threshold (D12).</li>
+    </ul>
+  </section>
+
+</div>
+
+<script>
+/* One function produces the warning on the form AND every row of the table, so the two cannot
+   disagree. soak = interval × (M − 1); the form warns at soak ≥ 600 s (spec §3 D4, §8). */
+const SOAK_WARN_AT = 600;
+function dur(s) {
+  if (s < 60) return s + " s";
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  return [h && h + " h", m && m + " min", r && r + " s"].filter(Boolean).join(" ");
+}
+function soakWarning(interval, m) {
+  const soak = interval * (m - 1);
+  if (soak < SOAK_WARN_AT) return null;
+  const more = m - 1;
+  return "Recovery will be announced about " + dur(soak) + " after the first successful check (" +
+    more + " more check" + (more === 1 ? "" : "s") + " × " + dur(interval) + "). " +
+    "Checks are not sped up during recovery.";
+}
+document.getElementById("soak-example").innerHTML = "<b>Slow recovery.</b> " + soakWarning(300, 3);
+
+const ROWS = [[60, 1], [60, 3], [60, 10], [120, 5], [120, 6], [300, 2], [300, 3], [90, 8], [900, 2], [3600, 3]];
+document.getElementById("soak-table").innerHTML = ROWS.map(([iv, m]) => {
+  const soak = iv * (m - 1), w = soakWarning(iv, m);
+  const edge = soak === SOAK_WARN_AT ? ' class="edge"' : "";
+  const cell = w ? '<td class="warn"><b style="color:var(--degraded)">Slow recovery.</b> ' + w + "</td>"
+                 : '<td class="none">no warning' + (m === 1 ? " — no run at all; the first success recovers" : "") + "</td>";
+  return "<tr" + edge + '><td class="n" style="text-align:left">' + iv + ' s</td><td class="n" style="text-align:left">' + m +
+    '</td><td class="n">' + soak + " s" + (soak ? " = " + dur(soak) : "") + "</td>" + cell + "</tr>";
+}).join("");
+</script>

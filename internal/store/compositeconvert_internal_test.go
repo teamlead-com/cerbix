@@ -12,7 +12,8 @@ import (
 func newChild(t *testing.T, st *Store, ctx context.Context, projectID, name, region string) domain.Monitor {
 	t.Helper()
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: projectID, Name: name, Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         projectID, Name: name, Type: domain.MonitorHTTP,
 		Target: "https://" + name + ".example.com/", IntervalSeconds: 60, Region: region, Enabled: true,
 	})
 	if err != nil {
@@ -28,7 +29,8 @@ func newComposite(t *testing.T, st *Store, ctx context.Context, projectID, name,
 		cfg["quorum"] = quorum
 	}
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: projectID, Name: name, Type: domain.MonitorComposite,
+		RecoveryThreshold: 1,
+		ProjectID:         projectID, Name: name, Type: domain.MonitorComposite,
 		IntervalSeconds: 60, Region: domain.DefaultRegion, Enabled: true, Config: cfg,
 	})
 	if err != nil {
@@ -138,7 +140,7 @@ func TestCompositeQuorumTranslation(t *testing.T) {
 		if c.quorum != "" {
 			cfg["quorum"] = c.quorum
 		}
-		got, err := compositePolicies(domain.Monitor{Config: cfg}, c.members, c.regions)
+		got, err := compositePolicies(domain.Monitor{RecoveryThreshold: 1, Config: cfg}, c.members, c.regions)
 		if c.wantErr != nil {
 			if !errors.Is(err, c.wantErr) {
 				t.Errorf("mode=%s quorum=%s: err = %v, want %v", c.mode, c.quorum, err, c.wantErr)

@@ -393,6 +393,12 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		    -- resumes once the monitor is confirmed down again (dead-man or a real
 		    -- failure); a recovery (pending to up) resolves the stale incident instead.
 		    AND m.status = 'down'
+		    -- FR-043 D2, D9: no step and no repeat_last while a recovery run is in progress —
+		    -- waking the next line while the first line's fix is being confirmed is the page
+		    -- nobody wants. A CONDITION, not a re-dating: due times stay absolute offsets from the
+		    -- incident's base, so every step that fell due during a run that then breaks fires
+		    -- on the first pass after it. The service incident query below is not paused.
+		    AND m.consecutive_successes = 0
 		    -- Dependency suppression (D-0100): the ladder pauses while a
 		    -- (transitive) parent is down — the parent's own alerting owns the
 		    -- page. It resumes on the next tick after the parent recovers if this

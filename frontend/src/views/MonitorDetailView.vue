@@ -6,6 +6,7 @@ import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
 import SinceChip from "@/components/SinceChip.vue";
 import StatusPill from "@/components/StatusPill.vue";
+import { confirmingLabel, hasRecoveryThreshold, recoveringLabel, recoveringTooltip } from "@/lib/monitorRun";
 import { useLive } from "@/stores/live";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
@@ -877,11 +878,21 @@ onMounted(() => {
 // switcher changes only the second.
 watch(() => [id.value, ws.projectId, ws.transitionPending, ws.transitionError], load);
 
-// Reflect live status changes for this monitor immediately.
+// Reflect live status changes for this monitor immediately. A status event carries the status and
+// nothing else, but every transition ends the recovery run (FR-043 §8; into up on confirmation, into
+// down with the counter at 0), and a move into up also ends the failures being confirmed. Zero them
+// here, or a label from before the transition survives it (owner's decision 2026-11-16).
 watch(
   () => live.statuses[id.value],
   (s) => {
-    if (s && monitor.value) monitor.value = { ...monitor.value, status: s.status as Monitor["status"] };
+    if (!s || !monitor.value) return;
+    const status = s.status as Monitor["status"];
+    monitor.value = {
+      ...monitor.value,
+      status,
+      consecutive_successes: 0,
+      ...(status === "up" ? { consecutive_failures: 0 } : {}),
+    };
   },
 );
 </script>
@@ -903,7 +914,11 @@ watch(
           <div class="flex flex-wrap items-center gap-[10px]">
             <h1 class="font-mono text-[22px] font-semibold tracking-tight">{{ monitor.name }}</h1>
             <span class="rounded-xs border border-border px-[6px] py-px font-mono text-[10.5px] uppercase tracking-[0.04em] text-ink-3">{{ monitor.type }}</span>
-            <StatusPill :status="statusPill()" />
+            <!-- FR-043 §8 (mock §5, variant 1): the header's status reads exactly like the list row —
+                 "Confirming N/M…" on the degraded pill, and the Down pill kept with a "recovering N/M"
+                 chip beside it. Both as of the last load (D13). -->
+            <StatusPill :status="confirmingLabel(monitor) ? 'degraded' : statusPill()" :label="confirmingLabel(monitor)" />
+            <span v-if="recoveringLabel(monitor)" class="whitespace-nowrap rounded-full bg-inset px-[9px] py-px text-[11.5px] font-medium tabular-nums text-ink-2" :title="recoveringTooltip(monitor)" data-testid="monitor-recovering">{{ recoveringLabel(monitor) }}</span>
             <!-- Retired is its OWN badge, not "Paused": conflating an afternoon's pause with
                  "superseded forever" is the distinction §15.5 exists to keep. -->
             <span v-if="retired" class="rounded-full border border-border px-[9px] py-px text-[11.5px] font-medium text-ink-3" data-testid="monitor-retired">Retired</span>
@@ -1490,6 +1505,11 @@ watch(
                 <dt class="text-ink-3">Timeout</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.timeout_seconds }}s</dd>
                 <dt class="text-ink-3">Retries</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.retries }}</dd>
                 <dt class="text-ink-3">Failure threshold</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.failure_threshold || 1 }} checks</dd>
+                <!-- FR-043: push and composite carry no recovery threshold (D8). Composite does list a
+                     Failure threshold, so this row has its own condition. Shown at 1 too. -->
+                <template v-if="hasRecoveryThreshold(monitor.type)">
+                  <dt class="text-ink-3">Recovery threshold</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.recovery_threshold || 1 }} checks</dd>
+                </template>
                 <template v-if="monitor.confirm_interval_seconds">
                   <dt class="text-ink-3">Confirm interval</dt><dd class="m-0 text-right font-mono text-[12.5px] text-ink-2">{{ monitor.confirm_interval_seconds }}s</dd>
                 </template>

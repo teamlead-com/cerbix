@@ -121,7 +121,8 @@ func TestAPartialUpdateHonoursTheSecretsSwitch(t *testing.T) {
 	}
 	actor := store.AuditActor{ViaToken: true, Label: "fixture"}
 	withRef, err := w.st.CreateMonitorByPrincipal(w.ctx, domain.Monitor{
-		ProjectID: w.project, Name: "e2e-ref", Type: domain.MonitorPostgres, Target: "db.example:5432",
+		RecoveryThreshold: 1,
+		ProjectID:         w.project, Name: "e2e-ref", Type: domain.MonitorPostgres, Target: "db.example:5432",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: false,
 		Config: map[string]string{"username": "u", "database": "d", "password_ref": "db-password"},
 	}, actor)
@@ -129,7 +130,8 @@ func TestAPartialUpdateHonoursTheSecretsSwitch(t *testing.T) {
 		t.Fatal(err)
 	}
 	plain, err := w.st.CreateMonitorByPrincipal(w.ctx, domain.Monitor{
-		ProjectID: w.project, Name: "e2e-plain", Type: domain.MonitorTCP, Target: "db.example:5432",
+		RecoveryThreshold: 1,
+		ProjectID:         w.project, Name: "e2e-plain", Type: domain.MonitorTCP, Target: "db.example:5432",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: false,
 	}, actor)
 	if err != nil {

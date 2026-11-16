@@ -35,7 +35,8 @@ func armedService(t *testing.T, st *Store, ctx context.Context) armFixture {
 		t.Fatalf("project: %v", err)
 	}
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "checkout-http", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "checkout-http", Type: domain.MonitorHTTP,
 		Target: "https://checkout.example.com/", IntervalSeconds: 30, Region: "core", Enabled: true,
 	})
 	if err != nil {
@@ -305,7 +306,8 @@ func TestDelegationUsesTheEffectiveRevision(t *testing.T) {
 
 	// A second monitor, added to the SLI by a declaration that is not yet effective.
 	newMon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: f.projectID, Name: "checkout-db", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         f.projectID, Name: "checkout-db", Type: domain.MonitorHTTP,
 		Target: "https://db.example.com/", IntervalSeconds: 30, Region: "core", Enabled: true,
 	})
 	if err != nil {
@@ -1128,7 +1130,8 @@ func TestDeliveryReportsTheSameReasonTheBadgeShows(t *testing.T) {
 	// And a monitor no service claims at all is a different answer from a service that exists and is
 	// dis-armed: the two send an operator to different places.
 	other, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: f.projectID, Name: "unclaimed", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         f.projectID, Name: "unclaimed", Type: domain.MonitorHTTP,
 		Target: "https://unclaimed.example.com/", IntervalSeconds: 30, Region: "core", Enabled: true,
 	})
 	if err != nil {

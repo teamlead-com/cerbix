@@ -11,7 +11,7 @@ import (
 // one past it with a Latin and a multibyte sample alike: a 200-rune Cyrillic sentence is 400 bytes and
 // must be accepted, or the count is by bytes and the promise is false for half the alphabets.
 func validMonitorWithDescription(d string) Monitor {
-	return Monitor{ProjectID: "p1", Name: "m", Type: MonitorHTTP, Target: "https://example.com", Description: d,
+	return Monitor{RecoveryThreshold: 1, ProjectID: "p1", Name: "m", Type: MonitorHTTP, Target: "https://example.com", Description: d,
 		IntervalSeconds: 60, TimeoutSeconds: 5, Region: "core"}
 }
 

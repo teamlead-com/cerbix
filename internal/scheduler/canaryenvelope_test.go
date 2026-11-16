@@ -56,7 +56,8 @@ func TestACanaryWithADeclaredBindingIsNominatedForItsEnvelope(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			canary := domain.Monitor{
-				ID: "canary-1", Type: domain.MonitorAsyncCanary, Region: "core",
+				RecoveryThreshold: 1,
+				ID:                "canary-1", Type: domain.MonitorAsyncCanary, Region: "core",
 				Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5, Config: tc.config,
 			}
 			fs := &fakeStore{leader: true, monitors: []domain.Monitor{canary}}
@@ -150,7 +151,8 @@ func TestACanaryBindingIsPublishedOnTheGenerationItsAgentAnnounced(t *testing.T)
 		t.Fatalf("canonical workflow: %v", err)
 	}
 	canary := domain.Monitor{
-		ID: "canary-pub", Name: "canary-pub", Slug: "canary-pub",
+		RecoveryThreshold: 1,
+		ID:                "canary-pub", Name: "canary-pub", Slug: "canary-pub",
 		ProjectID: "11111111-1111-4111-8111-111111111111",
 		Type:      domain.MonitorAsyncCanary, Region: "core",
 		Enabled: true, IntervalSeconds: 120, TimeoutSeconds: 60,

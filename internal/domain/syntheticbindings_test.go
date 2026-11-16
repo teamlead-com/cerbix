@@ -146,7 +146,7 @@ func TestScenarioSecretRefKeyRoundTrip(t *testing.T) {
 // write surface had accepted. The rule is now decided once, at the write boundary.
 func TestScenarioBindingIsRefusedOnEveryNonSyntheticType(t *testing.T) {
 	for _, typ := range []MonitorType{MonitorHTTP, MonitorTCP, MonitorPostgres, MonitorPromQL} {
-		m := Monitor{Name: "api", ProjectID: "p", Type: typ, Target: "https://x",
+		m := Monitor{RecoveryThreshold: 1, Name: "api", ProjectID: "p", Type: typ, Target: "https://x",
 			IntervalSeconds: 60, TimeoutSeconds: 10,
 			Config: map[string]string{ScenarioSecretRefKey("login"): "login-token"}}
 		err := m.Validate()

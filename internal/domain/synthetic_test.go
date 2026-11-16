@@ -28,10 +28,10 @@ func TestParseScenarioValidate(t *testing.T) {
 	}
 
 	// Monitor.Validate rejects a synthetic with no scenario and accepts a valid one.
-	if err := (Monitor{Name: "s", ProjectID: "p", Type: MonitorSynthetic, IntervalSeconds: 60, TimeoutSeconds: 5}).Validate(); err == nil {
+	if err := (Monitor{RecoveryThreshold: 1, Name: "s", ProjectID: "p", Type: MonitorSynthetic, IntervalSeconds: 60, TimeoutSeconds: 5}).Validate(); err == nil {
 		t.Fatal("synthetic without scenario should be invalid")
 	}
-	if err := (Monitor{Name: "s", ProjectID: "p", Type: MonitorSynthetic, IntervalSeconds: 60, TimeoutSeconds: 5, Config: map[string]string{SyntheticScenarioKey: ok}}).Validate(); err != nil {
+	if err := (Monitor{RecoveryThreshold: 1, Name: "s", ProjectID: "p", Type: MonitorSynthetic, IntervalSeconds: 60, TimeoutSeconds: 5, Config: map[string]string{SyntheticScenarioKey: ok}}).Validate(); err != nil {
 		t.Fatalf("valid synthetic rejected: %v", err)
 	}
 }

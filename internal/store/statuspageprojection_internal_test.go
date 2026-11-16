@@ -350,7 +350,8 @@ func TestProjectWideMaintenanceDoesNotCrossProjects(t *testing.T) {
 func pageDeclaredService(t *testing.T, st *Store, ctx context.Context, projectID, slug, monitorName string) string {
 	t.Helper()
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: projectID, Name: monitorName, Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         projectID, Name: monitorName, Type: domain.MonitorHTTP,
 		Target: "https://" + slug + ".example.com/", IntervalSeconds: 60, Region: "core", Enabled: true,
 	})
 	if err != nil {

@@ -120,6 +120,18 @@ type Monitor struct {
 	// ConsecutiveFailures is the live confirmation counter (server-owned, set by
 	// RecordCheckStatus); surfaced read-only so the UI can show "confirming N/M".
 	ConsecutiveFailures int `json:"consecutive_failures,omitempty"`
+	// RecoveryThreshold is the number of consecutive successful checks a DOWN monitor must see
+	// before it is declared up (FR-043). 1..10, exactly 1 for push and composite (D3, D8). Nothing
+	// downstream of the transport decoders defaults it: an in-process Monitor{} carries 0 and is
+	// refused by Validate and by the database CHECK (func-recovery-threshold.md §4.5).
+	RecoveryThreshold int `json:"recovery_threshold"`
+	// ConsecutiveSuccesses is the live recovery run (server-owned, set by RecordCheckStatus):
+	// non-zero only while the monitor is down. Surfaced read-only so the UI can show
+	// "recovering N/M".
+	ConsecutiveSuccesses int `json:"consecutive_successes"`
+	// RecoveryStartedAt is the database clock of the run's first success (D6); nil exactly when
+	// ConsecutiveSuccesses is 0. Information only, never a system timestamp.
+	RecoveryStartedAt *time.Time `json:"recovery_started_at"`
 	// ExecutionRevision is the monitor's config generation (server-owned). The scheduler
 	// snapshots it into each job; the prober echoes it into the result so RecordScheduledResult
 	// can reject a result produced under a stale configuration. Read-only to clients.
@@ -198,6 +210,22 @@ func (m Monitor) InConfirmPhase() bool {
 // person writing it. Set by the owner (200) with the approved mock, D-0234.
 const MaxMonitorDescriptionRunes = 200
 
+// MaxRecoveryThreshold bounds Monitor.RecoveryThreshold (FR-043 D3).
+const MaxRecoveryThreshold = 10
+
+// validateRecoveryThreshold is the ONE place the FR-043 rule lives (§4.5): 1..10 on every type,
+// and exactly 1 for push and composite (D8) — stricter than failure_threshold on purpose, which
+// Normalize forces for push. Nothing clamps: 0 is refused, not defaulted.
+func (m Monitor) validateRecoveryThreshold() error {
+	if m.RecoveryThreshold < 1 || m.RecoveryThreshold > MaxRecoveryThreshold {
+		return fmt.Errorf("monitor: recovery_threshold must be between 1 and %d, got %d", MaxRecoveryThreshold, m.RecoveryThreshold)
+	}
+	if (m.Type == MonitorPush || m.Type == MonitorComposite) && m.RecoveryThreshold != 1 {
+		return fmt.Errorf("monitor: recovery_threshold must be 1 for %s monitors, got %d", m.Type, m.RecoveryThreshold)
+	}
+	return nil
+}
+
 // Validate enforces monitor invariants (domain-owned).
 func (m Monitor) Validate() error {
 	if strings.TrimSpace(m.Name) == "" {
@@ -211,6 +239,9 @@ func (m Monitor) Validate() error {
 	}
 	if !m.Type.Valid() {
 		return fmt.Errorf("monitor: unknown type %q", m.Type)
+	}
+	if err := m.validateRecoveryThreshold(); err != nil {
+		return err
 	}
 	if m.Type.NeedsTarget() {
 		if strings.TrimSpace(m.Target) == "" {

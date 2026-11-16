@@ -46,7 +46,7 @@ func newMaintFixture(t *testing.T) maintFixture {
 		t.Fatalf("project q: %v", err)
 	}
 	mk := func(project, name string) string {
-		m, err := st.CreateMonitor(ctx, domain.Monitor{ProjectID: project, Name: name, Type: domain.MonitorHTTP,
+		m, err := st.CreateMonitor(ctx, domain.Monitor{RecoveryThreshold: 1, ProjectID: project, Name: name, Type: domain.MonitorHTTP,
 			Target: "https://x", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true})
 		if err != nil {
 			t.Fatalf("monitor %s: %v", name, err)

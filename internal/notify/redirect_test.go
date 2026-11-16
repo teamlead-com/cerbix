@@ -67,7 +67,7 @@ func TestDeliveryFollowsNoRedirect(t *testing.T) {
 						ch.Config = map[string]string{"url": p.a.URL + "/hook/TOKEN"}
 					}
 					err := New(&fakeStore{channels: []domain.NotificationChannel{ch}}, client()).
-						Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false)
+						Deliver(context.Background(), domain.Monitor{ID: "m1", Name: "API"}, false, nil)
 					if got := p.hits.Load(); got != 0 {
 						t.Errorf("the Location host received %d request(s)", got)
 					}

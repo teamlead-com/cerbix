@@ -87,7 +87,8 @@ func TestACreateRefusesABindingOutsideThePagesOrg(t *testing.T) {
 	// The MONITOR half of the same resolver keeps the rule too — it had the scope only by way of
 	// the API's own check, and now the store states it as well.
 	alienMon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj2.ID, Name: "alien-mon", Slug: "alien-mon", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj2.ID, Name: "alien-mon", Slug: "alien-mon", Type: domain.MonitorHTTP,
 		Target: "https://alien.example.com", IntervalSeconds: 60, TimeoutSeconds: 5, Region: domain.DefaultRegion,
 	})
 	if err != nil {
@@ -191,7 +192,8 @@ func TestACreateWithBothBindingsRefusesAMismatchedPair(t *testing.T) {
 	// The DORMANT half in another project: the active binding is the service, so the monitor is
 	// what `source_project` cannot also describe.
 	strayMon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: f.otherProj, Name: "search-http", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         f.otherProj, Name: "search-http", Type: domain.MonitorHTTP,
 		Target: "https://search.example.com/", IntervalSeconds: 30, Region: "core", Enabled: true,
 	})
 	if err != nil {

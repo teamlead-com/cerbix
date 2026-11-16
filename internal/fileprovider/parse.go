@@ -21,7 +21,10 @@ const (
 	fmtDefaultTimeoutSeconds   = 10
 	fmtDefaultRetries          = 0
 	fmtDefaultFailureThreshold = 1
-	fmtDefaultRegion           = "core"
+	// fmtDefaultRecoveryThreshold is what an absent `recovery_threshold` means in every format:
+	// 1 confirms a recovery on its first success, the behaviour every bundle had before FR-043.
+	fmtDefaultRecoveryThreshold = 1
+	fmtDefaultRegion            = "core"
 )
 
 // rawBundle is the strict wire shape of one ProjectBundle file.
@@ -44,24 +47,28 @@ type rawMonitor struct {
 	Name string `yaml:"name"`
 	// Description is FR-030's optional field, bounded like everywhere else; a bundle without the key
 	// declares "no description", and the bundle owns the field like every other (D-0234 D5).
-	Description      string            `yaml:"description"`
-	Type             string            `yaml:"type"`
-	Target           string            `yaml:"target"`
-	Method           string            `yaml:"method"`
-	Interval         string            `yaml:"interval"`
-	Timeout          string            `yaml:"timeout"`
-	Retries          *int              `yaml:"retries"`
-	FailureThreshold *int              `yaml:"failure_threshold"`
-	ConfirmInterval  string            `yaml:"confirm_interval"`
-	Renotify         string            `yaml:"renotify"`
-	Grace            string            `yaml:"grace"`
-	Conditions       []string          `yaml:"conditions"`
-	Tags             []string          `yaml:"tags"`
-	Region           string            `yaml:"region"`
-	Enabled          *bool             `yaml:"enabled"`
-	AutoIncident     *bool             `yaml:"auto_incident"`
-	DependsOn        []string          `yaml:"depends_on"`
-	Settings         map[string]string `yaml:"settings"`
+	Description      string `yaml:"description"`
+	Type             string `yaml:"type"`
+	Target           string `yaml:"target"`
+	Method           string `yaml:"method"`
+	Interval         string `yaml:"interval"`
+	Timeout          string `yaml:"timeout"`
+	Retries          *int   `yaml:"retries"`
+	FailureThreshold *int   `yaml:"failure_threshold"`
+	// RecoveryThreshold is FR-043's consecutive successes needed to confirm a recovery. A pointer,
+	// because absent and an explicit 0 must stay apart: absent is the contract default 1, and 0 is
+	// copied through for `Monitor.Validate` to refuse (func-recovery-threshold.md §4.5, I10).
+	RecoveryThreshold *int              `yaml:"recovery_threshold"`
+	ConfirmInterval   string            `yaml:"confirm_interval"`
+	Renotify          string            `yaml:"renotify"`
+	Grace             string            `yaml:"grace"`
+	Conditions        []string          `yaml:"conditions"`
+	Tags              []string          `yaml:"tags"`
+	Region            string            `yaml:"region"`
+	Enabled           *bool             `yaml:"enabled"`
+	AutoIncident      *bool             `yaml:"auto_incident"`
+	DependsOn         []string          `yaml:"depends_on"`
+	Settings          map[string]string `yaml:"settings"`
 	// Workflow is the NESTED typed block an async_canary declares (FR-029). It is a schema and not
 	// an opaque map: the decoder's KnownFields(true) refuses an unknown field inside it, which is
 	// the whole reason this type can live in a bundle at all where `synthetic` cannot (D9/D12).
@@ -539,6 +546,11 @@ func applyCommonMonitorFields(uid string, rm rawMonitor, m *domain.Monitor) erro
 	}
 	m.Retries = intOr(rm.Retries, fmtDefaultRetries)
 	m.FailureThreshold = intOr(rm.FailureThreshold, fmtDefaultFailureThreshold)
+	// This line is the boundary FR-043 gives one owner (§4.5 "Absent is not zero"): absent → 1, an
+	// explicit value verbatim, 0 and 11 included. Nothing here clamps and nothing here applies the
+	// range or the push rule (D3, D8) — `Monitor.Validate` refuses them below, as a bundle error,
+	// and a check restated here would be a second copy of the rule to drift from the first.
+	m.RecoveryThreshold = intOr(rm.RecoveryThreshold, fmtDefaultRecoveryThreshold)
 	return nil
 }
 
@@ -548,7 +560,7 @@ func applyCommonMonitorFields(uid string, rm rawMonitor, m *domain.Monitor) erro
 var commonMonitorFields = []string{
 	"Name", "Description", "Conditions", "Tags", "Region", "Enabled", "AutoIncident", "DependsOn",
 	"IntervalSeconds", "TimeoutSeconds", "ConfirmIntervalSeconds", "RenotifySeconds",
-	"GraceSeconds", "Retries", "FailureThreshold",
+	"GraceSeconds", "Retries", "FailureThreshold", "RecoveryThreshold",
 }
 
 // durSeconds parses a duration string to whole seconds; empty → def. Fractional-second and

@@ -2247,7 +2247,7 @@ func (s *Scheduler) checkStalePush(ctx context.Context, now time.Time, nextRun m
 		}
 		if o.Applied && o.Prev != o.Cur && s.reconciler != nil {
 			hb := domain.Heartbeat{MonitorID: m.ID, Up: false, Ts: now, Msg: "push timeout: no heartbeat within interval"}
-			s.reconciler.Reconcile(ctx, hb, o.Prev, o.Cur, o.Suppressed)
+			s.reconciler.Reconcile(ctx, hb, o.Prev, o.Cur, o.Suppressed, o.Recovery)
 		}
 		nextRun[m.ID] = now.Add(m.Interval())
 	}

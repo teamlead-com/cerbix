@@ -18,7 +18,8 @@ func TestEvaluateBurnAlerts(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "h", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "h", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
 	if err != nil {
@@ -89,7 +90,8 @@ func TestEvaluateRegionWorkerAlerts(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	if _, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "h", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "h", Type: domain.MonitorHTTP, Target: "https://x",
 		Region: "geo1", IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	}); err != nil {
 		t.Fatalf("create monitor: %v", err)
@@ -198,7 +200,8 @@ func TestBurnRulesMultiWindow(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 	mon, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "mw", Type: domain.MonitorHTTP, Target: "https://x",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "mw", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
 	if err != nil {
@@ -269,7 +272,8 @@ func TestBurnRulesMultiWindow(t *testing.T) {
 
 	// Enabling with nil rules on a fresh target seeds the SRE defaults.
 	mon2, _ := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj.ID, Name: "mw2", Type: domain.MonitorHTTP, Target: "https://y",
+		RecoveryThreshold: 1,
+		ProjectID:         proj.ID, Name: "mw2", Type: domain.MonitorHTTP, Target: "https://y",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
 	tgt2, err := st.UpsertMonitorSLATarget(ctx, mon2.ID, "30d", 99.9, true, nil)

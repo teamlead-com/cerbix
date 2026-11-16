@@ -388,7 +388,8 @@ func TestMonitorTargetWithUserinfoIsRefused(t *testing.T) {
 func TestSyntheticScenarioIsWriterOnly(t *testing.T) {
 	fs := seededStore()
 	fs.monitors["m-syn"] = domain.Monitor{
-		ID: "m-syn", ProjectID: "p1", Name: "journey", Type: domain.MonitorSynthetic,
+		RecoveryThreshold: 1,
+		ID:                "m-syn", ProjectID: "p1", Name: "journey", Type: domain.MonitorSynthetic,
 		IntervalSeconds: 60, TimeoutSeconds: 30, Enabled: true,
 		Config: map[string]string{"scenario": `{"steps":[{"url":"https://x","headers":{"authorization":"Bearer s3cr3t-bearer"}}]}`},
 	}

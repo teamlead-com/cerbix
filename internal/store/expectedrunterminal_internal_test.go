@@ -154,7 +154,8 @@ func TestAnOrphanTerminalCreatesItsOwnRowWithTheConservativeThreshold(t *testing
 	st, ctx := ledgerStore(t)
 	proj := seedLedgerProject(t, st, ctx, "orphan")
 	m, err := st.CreateMonitor(ctx, domain.Monitor{
-		ProjectID: proj, Name: "orphaned", Type: domain.MonitorHTTP,
+		RecoveryThreshold: 1,
+		ProjectID:         proj, Name: "orphaned", Type: domain.MonitorHTTP,
 		Target: "https://example.com/orphan", Method: "GET",
 		IntervalSeconds: 60, ConfirmIntervalSeconds: 10, FailureThreshold: 3,
 		TimeoutSeconds: 5, Enabled: true,

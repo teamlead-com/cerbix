@@ -38,7 +38,8 @@ func newLongWindowFixture(t *testing.T) longWindowFixture {
 func (f longWindowFixture) monitor(t *testing.T, name string) string {
 	t.Helper()
 	m, err := f.st.CreateMonitor(f.ctx, domain.Monitor{
-		ProjectID: f.project, Name: name, Type: domain.MonitorHTTP, Target: "https://" + name,
+		RecoveryThreshold: 1,
+		ProjectID:         f.project, Name: name, Type: domain.MonitorHTTP, Target: "https://" + name,
 		IntervalSeconds: 60, TimeoutSeconds: 10, Enabled: true,
 	})
 	if err != nil {

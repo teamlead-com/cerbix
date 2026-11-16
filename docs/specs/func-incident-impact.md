@@ -1,7 +1,8 @@
 # func-incident-impact — an incident's impact is declared by its Service, derived by the machine, and only rises (FR-042 / NFR-035)
 
-> **STATUS: revision 4 — DRAFT, reviewed (APPROVED by the confirming pass, 2026-11-16), awaiting the
-> owner's approval.** Revision 4 (2026-11-16) answers the second external
+> **STATUS: revision 4 — APPROVED by the owner on 2026-11-16; not implemented.** The author's calls
+> of §3 (D8–D11, D13–D15, D19, D20) are approved with it. Next: the SPA mock of §8 for the owner's
+> approval, then the implementation. Revision 4 (2026-11-16) answers the second external
 > review (CHANGES REQUIRED, P0 0 / P1 3 / P2 2 / P3 2, all in text revision 3 added — §11): the rise
 > step looks before it locks and its concurrency is described as `REPEATABLE READ` actually behaves
 > (§4.3); the system door takes only monitor auto-incidents and validation is reconciled with an
@@ -663,7 +664,7 @@ None for the owner: D6, D7 and D12 were decided on 2026-11-16, with D16–D18.
 
 The author's calls — D8, D9, D10, D11, D13, D14, D15, D19, D20 — have each been agreed by the
 reviewer (D9–D14 in the first pass, D10 on the condition D17 states; D8, D15, D19, D20 in the
-second). They stay marked AUTHOR'S CALL until the owner approves the revision.
+second). The owner approved revision 4, and them with it, on 2026-11-16; the label records who proposed each.
 
 Interplay with FR-043 (recovery threshold), checked by the first pass and recorded so it is not
 re-derived: a monitor held `down` by a recovery run keeps its auto-incident open longer, at the

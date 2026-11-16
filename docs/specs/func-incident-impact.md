@@ -1,6 +1,14 @@
 # func-incident-impact — an incident's impact is declared by its Service, derived by the machine, and only rises (FR-042 / NFR-035)
 
-> **STATUS: revision 3 — DRAFT, not approved.** Revision 3 (2026-11-16) answers the first external
+> **STATUS: revision 4 — DRAFT, not approved.** Revision 4 (2026-11-16) answers the second external
+> review (CHANGES REQUIRED, P0 0 / P1 3 / P2 2 / P3 2, all in text revision 3 added — §11): the rise
+> step looks before it locks and its concurrency is described as `REPEATABLE READ` actually behaves
+> (§4.3); the system door takes only monitor auto-incidents and validation is reconciled with an
+> impact the store resolves (§4.2); `acknowledge()` in the SPA must be changed to keep the basis
+> (§4.6); the project write, its audit target and the basis encoding and CHECK are exact (§4.4,
+> §4.6, §5). No decision changed.
+>
+> Revision 3 (2026-11-16) answered the first external
 > review of revision 2 (CHANGES REQUIRED, P0 2 / P1 7 / P2 7 / P3 3 — dispositions in §11) and records
 > the owner's decisions of 2026-11-16: D6, D7 and D12 are now OWNER decisions, and D16–D18 are new
 > ones. What changed in substance: `impact_basis` has a shape per source, a service-name snapshot and
@@ -283,11 +291,28 @@ Opened automatically: service UNKNOWN confirmed over <n> evaluation(s).
 it from `projects` when the incident is `source = 'auto'` with a monitor anchor — so the value and
 the row that records it cannot disagree with a concurrent project PATCH, the reconciler makes no
 extra read per down transition, and `ingest.ReconcileStore` does not grow. The reconciler stops
-passing `domain.ImpactMajor`.
+passing `domain.ImpactMajor`, which has two consequences the builder must meet:
 
-**Manual and Alertmanager.** Both go through the one creating store function with an explicit basis
-source; a caller that supplies none is refused there, so a fifth path cannot be added without
-stating what it is.
+- **Validation.** `createIncident` calls `Incident.Validate()` before it opens the transaction, and
+  `Validate` refuses an empty impact (`internal/domain/incident.go`). A monitor auto-incident now
+  arrives without one. It must be accepted, and **every other** incident must still be refused
+  without a valid impact — by a rule in `Validate` (empty allowed only for `source = auto` with a
+  monitor anchor, the way `IncidentUpdate.Validate` allows an empty status), or by validating after
+  the default is resolved inside the transaction. The builder chooses; §7 tests both sides.
+- **The system door takes one kind of incident.** `CreateIncidentBySystem` accepts a
+  monitor-anchored `auto` incident with an **empty** impact, and refuses everything else: an impact
+  supplied by the caller (it would be silently overridden or silently win, and neither is a
+  default), a missing monitor anchor, another source. Production has one caller, the reconciler; the
+  door's present defensive branch for a service-anchored incident goes, because such an incident
+  could not be given a `service_mapping` basis there — `OpenServiceIncidentTx` is the only way to
+  open one. The store's test fixtures that use this door for anything else (the door has 62 call sites in test files
+  today) move to `CreateIncidentByPrincipal` or
+  `OpenServiceIncidentTx`; a fixture that needs a monitor incident of a particular impact sets the
+  project default.
+
+**Manual and Alertmanager.** Both go through `CreateIncidentByPrincipal`, which gains an explicit
+basis source, `manual` or `alertmanager`; a call that supplies neither is refused, so a fifth path
+cannot be added without stating what it is.
 
 ### 4.3 Rising
 
@@ -296,36 +321,57 @@ pageable (D13) runs one **step** in the evaluator's transaction — placed befor
 branching, so it is NOT limited to the onset branch (where a degraded→down change reaches
 `OpenServiceIncidentTx` and its `ON CONFLICT … DO NOTHING`) nor to the D-0187 `reannounce` branch
 (which re-sends the same state). The step is a sibling of `resolveServiceIncidentTx`
-(`internal/store/serviceincidents.go`) and follows its order, for its reasons (D-0177):
+(`internal/store/serviceincidents.go`) and follows its order, for its reasons (D-0177) — with one
+difference that matters: the resolve runs once per incident, this runs on **every** evaluation
+while the incident is open, and almost always has nothing to do. So it looks before it locks:
 
-1. `SELECT id, status, impact, impact_basis FROM incidents WHERE service_id = $1 AND source = 'auto'
-   AND status <> 'resolved' FOR UPDATE`. No row: nothing to raise — a withheld onset with no open
-   incident opens nothing (FR-022 invariant 5 unchanged).
-2. Stop, writing nothing, when `impact_basis` is NULL (D12), when its `source` is not
+0. Read the service's open auto-incident **without a lock**: `SELECT id, impact, impact_basis FROM
+   incidents WHERE service_id = $1 AND source = 'auto' AND status <> 'resolved'`. Stop, writing
+   nothing, when there is no row (a withheld onset with no open incident opens nothing — FR-022
+   invariant 5 unchanged), when `impact_basis` is NULL (D12), when its `source` is not
    `service_mapping`, or when `rank(basis.mapping[state]) <= rank(impact)`. The mapping is the
-   **frozen** one on the incident; the service's live mapping is not read (I4).
-3. Read the clock **after** the lock: `SELECT statement_timestamp()`. The evaluator's own `asOf` is
+   **frozen** one on the incident; the service's live mapping is not read (I4). This read is safe
+   to trust for "nothing to do" because impact never falls (D2), the frozen mapping never changes
+   (D8) and `resolved` is terminal: a stale answer can only say "raise" where the lock then says
+   "already raised", never the reverse.
+1. Only when a rise is due: `SELECT id, status, impact FROM incidents WHERE id = $1 AND status <>
+   'resolved' FOR UPDATE`, and compare the ranks again on what it returns.
+2. Read the clock **after** the lock: `SELECT statement_timestamp()`. The evaluator's own `asOf` is
    taken when its snapshot opens and is earlier than anything this step waited for.
-4. `UPDATE incidents SET impact = <to>, impact_basis = jsonb_set(impact_basis, '{state}', …),
+3. `UPDATE incidents SET impact = <to>, impact_basis = jsonb_set(impact_basis, '{state}', …),
    updated_at = <clock>`. `updated_at` is not optional: the public page's "Updated …" line and
    card order, and the feeds' `<updated>`, read it.
-5. Insert the timeline note with the incident's **current** status (from step 1 — a rise does not
+4. Insert the timeline note with the incident's **current** status (from step 1 — a rise does not
    move the lifecycle), `author = 'system'`, `created_at = <clock>`.
-6. `nextIncidentEventSeqTx`, then `enqueueOutboxAtTx(…, <clock>)` with an `incident_event` of type
+5. `nextIncidentEventSeqTx`, then `enqueueOutboxAtTx(…, <clock>)` with an `incident_event` of type
    `incident.updated` (`domain.EventIncidentUpdated`) carrying the updated incident, the note, the
    next `Seq`, and `impact_raised: { "from": …, "to": … }` — an additive, optional field of
    `domain.IncidentEvent`.
 
 Rank: `none < minor < major < critical`. Nothing else writes `impact` after insert (I3).
 
-**Idempotency is the rank comparison, under the lock** — not a marker lookup. The
-`⚡ Context:` / `⏸ Suppressed:` guard (`AppendIncidentContext`, `NOT EXISTS … body LIKE marker%`)
-allows one such note per incident for its whole life, and an incident may rise more than once:
-with `page_on = {degraded, down}`, `page_on_unknown` and the default mapping, `unknown` (none) →
-`degraded` (minor) → `down` (major) is two rises. A re-evaluation of the same state finds
-`rank(mapped) <= rank(impact)` at step 2 and writes nothing; two evaluators cannot both pass step 2,
-because the second one waits at step 1 and then reads the raised row (or fails serialization and is
-retried, as the evaluator's `REPEATABLE READ` transaction already is).
+**Idempotency is the rank comparison** — not a marker lookup. The `⚡ Context:` / `⏸ Suppressed:`
+guard (`AppendIncidentContext`, `NOT EXISTS … body LIKE marker%`) allows one such note per incident
+for its whole life, and an incident may rise more than once: with `page_on = {degraded, down}`,
+`page_on_unknown` and the default mapping, `unknown` (none) → `degraded` (minor) → `down` (major)
+is two rises. A re-evaluation of the same state stops at step 0 and writes nothing.
+
+**Concurrency, as the evaluator's isolation level makes it.** The evaluator runs one
+`REPEATABLE READ` transaction per slice of up to 50 services (`beginAlertSnapshot`,
+`serviceAlertSliceLimit`, `internal/store/servicealerteval.go`). In that level a `FOR UPDATE` that
+waited for another transaction's committed change to the row does **not** read the new version: it
+fails with SQLSTATE 40001. The leader does not retry it — `session.EvaluateServiceAlerts` returns
+the error, the scheduler logs `service_alert_eval_failed`, counts an arm error and evaluates again
+on its next `serviceAlertEvery` tick (`internal/scheduler/scheduler.go`). So:
+
+- an operator who acknowledges or annotates the incident in the instant a rise is being written
+  costs that slice one pass; the rise lands on the next tick, over a snapshot that already holds
+  the operator's change, and its note carries the status the operator left;
+- this is why step 0 does not lock. A lock on every tick would make every acknowledge during an
+  outage a 40001 for a slice of fifty services, for an incident that had nothing to raise —
+  the reason `alertPolicyMatchesTx` (`internal/store/fileapply_alerting.go`) looks before it locks;
+- two evaluators cannot both raise: the second fails at step 1 the same way, and on its next pass
+  step 0 finds the ranks equal. A deposed leader's transaction is rolled back with its session.
 
 The note. Marker `⬆ Impact raised:`, distinct from the existing `🕸 Impact:`
 (`internal/domain/serviceimpact.go`); the SPA marker table (`frontend/src/lib/incident.ts`, where
@@ -385,12 +431,19 @@ field:
 - **A project that has file-managed monitors or services is patched like any other** — not 409.
   `DeleteProject` refuses such a project because deletion would orphan what a bundle owns; this
   field is owned by no bundle (D14), and a 409 here would leave those projects no way to set it.
+- **The write** — one transaction: `SELECT … FROM projects WHERE id = $1 FOR UPDATE` for the slug
+  and the stored value, then, only when the value differs, `UPDATE projects SET
+  default_incident_impact = $2, updated_at = now()` — `projects` has no `updated_at` trigger, the
+  statement sets it, as the SLA-target write does (`internal/store/sla.go`). `domain.Project` and
+  the store's project column list gain the field, which is what puts it in every response above.
 - **No-op** — an empty object, or the value already stored: 200 with the project, no write, no
   `updated_at` change, no audit row.
 - **Audit** — in the same transaction as the write, through `insertProjectAudit`
   (`internal/store/incidentaudit.go`), not the best-effort `h.audit`. Action
   `project.default_incident_impact`, beside the existing `project.sla_target`,
-  `project.sla_target_clear` and `project.delete`; target `<project slug> <old>→<new>`.
+  `project.sla_target_clear` and `project.delete`. Target `<project slug> <old>→<new>`, passed
+  through `incidentAuditTarget`, so a token caller — the route is open to a token holding
+  `project:manage`, and its `actor_user_id` is NULL — is named: `… · actor=<token label>`.
 
 The project default is not in Monitoring-as-Code (D14).
 
@@ -426,12 +479,27 @@ D16.
 ### 4.6 Surfaces
 
 **The basis (D15).** `GET /api/v1/incidents/{incidentID}` returns `impact_basis` on
-`authedIncidentView` / the `AuthedIncident` schema: nullable, the two shapes of D8 as a `oneOf` on
-`source`. Nothing else returns it — not the incident list, not `POST …/acknowledge` (which answers
-the base `Incident`; `IncidentDetailView.vue` merges that answer over what it loaded, so the basis
-it already holds stays, as `acknowledged_by_name` does), not the public status page, not the feeds,
-not a webhook payload. If the basis cannot be read the incident still renders and the response says
-so (`impact_basis_unavailable`), as `impacts_unavailable` does for impact links.
+`authedIncidentView` / the `AuthedIncident` schema, the two shapes of D8 as a `oneOf` on `source`.
+It is read by its own store call, scoped by project at the store boundary as
+`ListIncidentImpacts(ctx, projectID, incidentID)` is (`WHERE id = $1 AND project_id = $2`) — the
+handler's access check is not the only fence. Two fields, encoded so that three states stay apart:
+
+| State | `impact_basis` | `impact_basis_unavailable` |
+| --- | --- | --- |
+| recorded | the object | absent |
+| not recorded (D12) | `null` — always serialized, never omitted | absent |
+| could not be read | `null` | `true` (`omitempty`) |
+
+The incident still renders when the read fails, as it does for impact links
+(`impacts_unavailable`).
+
+Nothing else returns the basis — not the incident list, not `POST …/acknowledge` (which answers
+the base `Incident`), not the public status page, not the feeds, not a webhook payload. The
+acknowledge response needs a change in the SPA: `acknowledge()` in `IncidentDetailView.vue`
+**replaces** the loaded incident with the response and carries over only `impacts` and
+`impacts_unavailable`, so today it would drop the basis and the page would print "basis not
+recorded" after a click. It must carry `impact_basis` and `impact_basis_unavailable` over as well.
+(That it also drops `acknowledged_by_name` is an existing defect, noted and not this spec's.)
 
 The incident page shows one line under the impact, by case:
 
@@ -461,6 +529,10 @@ operator side alike, so that no surface reads "None", "None impact" or "none imp
 The wording is "Impact not specified" as a phrase and "Not specified" as a badge; the mock fixes
 each place.
 
+This is about the SPA. Subscriber mail (`Impact: none`, `internal/subscribe`) and the feeds
+(`status: … · impact: none`, `internal/api/handlers_feed.go`) print the stored word and keep
+doing so: §4.5 requires every non-rise mail to stay byte-identical, and a feed is read by programs.
+
 **The public page otherwise.** It reads incidents at request time (behind the 5 s shared cache,
 `internal/api/statuspagecache.go`) and computes worst impact in `overallStatusPresentation`; a rise
 needs nothing more there. The feeds (`internal/api/handlers_feed.go`) print `status · impact` from
@@ -481,9 +553,13 @@ the new impact and, by D15, no basis.
   00091 already left `renotify_seconds` out of it.
 - `projects.default_incident_impact text NOT NULL DEFAULT 'major'` with the impact CHECK.
 - `incidents.impact_basis jsonb NULL` — `NULL` for every incident that predates the migration
-  (rendered "basis not recorded"); never backfilled with a guess. CHECK, when not NULL: an object
-  whose `source` is one of the four; for `service_mapping` the keys `mapping`, `state` and `service`
-  are present; for the other three sources they are absent.
+  (rendered "basis not recorded"); never backfilled with a guess. CHECK, when not NULL — closed,
+  so a shape nobody specified cannot be stored (all of it is plain jsonb operators, no subquery):
+  an object whose `source` is one of the four; for `service_mapping` the top-level keys are exactly
+  {source, mapping, state, service}, `mapping` satisfies the same three-key check as
+  `services.impact_by_state`, `state` is one of {degraded, down, unknown}, and `service` is an
+  object with exactly the string keys `name` and `slug`; for the other three sources the only key
+  is `source`.
 - Down migration: drops the three columns; no data elsewhere depends on them.
 - None of this touches `heartbeats`; the three tables are ordinary tables in both storage modes.
 - **An older binary on this schema** writes none of the new columns and names its columns
@@ -519,10 +595,11 @@ the new impact and, by D15, no basis.
   else: not the incident list, the acknowledge response, the public status page, the feeds, or a
   webhook payload (D15).
 - **I12** — A rise stamps the incident's `updated_at`, its note's `created_at` and its outbox row
-  with one instant read after the incident row is locked; the note carries the incident's status at
-  that instant and does not change it.
-- **I13** — No surface renders impact `none` as "None", "None impact" or "none impact"; it reads
-  "Impact not specified" / "Not specified" (§4.6).
+  with one instant read after the incident row is locked; the note carries the incident's status as
+  locked and does not change it. An evaluation that has nothing to raise takes no lock on the
+  incident (§4.3 step 0).
+- **I13** — No **SPA** surface renders impact `none` as "None", "None impact" or "none impact"; it
+  reads "Impact not specified" / "Not specified" (§4.6). Mail and feeds keep the stored word.
 - **I14** — Every incident created after FR-042 has an `impact_basis` of the shape its source
   requires (D8); the stored `service` snapshot keeps the basis line readable after the service is
   deleted.
@@ -535,20 +612,20 @@ tables — and are covered in both modes by the ordinary suite (`make race-both`
 | Layer | Cases | Invariants |
 | --- | --- | --- |
 | Domain | mapping validation; resolution of omitted keys per door (§4.1); equality of `NULL` and explicit defaults; the basis shapes | I1, I14 |
-| Store — open | per state × mapping; basis shape for each of the four creating paths, and the refusal of a create with no basis source; the opening note names the state; the project default read in the creating transaction against a concurrent project PATCH | I1, I5, I14 |
+| Store — open | per state × mapping; basis shape for each of the four creating paths, and the refusal of a create with no basis source; the opening note names the state; the project default read in the creating transaction against a concurrent project PATCH; the system door refuses a supplied impact, a missing monitor anchor and another source; an empty impact is refused on a manual and on an Alertmanager incident | I1, I5, I14 |
 | Store — rise | degraded→down; down→degraded (no fall); unknown→down; **two rises in one incident** (unknown→degraded→down: two notes, two events); repeated same state (neither); degraded→down while the onset is WITHHELD by the arming check; NULL basis; a basis whose source is not `service_mapping`; no open incident | I2, I6 |
-| Store — rise, clock and lock | a rise queued behind a manual writer holding the incident row: `updated_at`, note `created_at` and the outbox row are after the wait and equal; the note's status is the status the manual writer left | I12 |
+| Store — rise, clock and lock | (a) the step called directly in a `READ COMMITTED` transaction behind a manual writer that **commits** a status change (the shape of `TestAServiceIncidentResolvesAfterTheWaitItActuallyDid`): `updated_at`, note `created_at` and the outbox row are after the wait and equal, and the note's status is the one the writer left; (b) the same interleave through `evaluateServiceAlertsOn` (`REPEATABLE READ`): the pass fails with 40001 and writes nothing, the next pass raises and its note carries the writer's status; (c) an evaluation with nothing to raise, while another transaction holds the incident row locked, completes without waiting | I12 |
 | Store — frozen mapping | mapping edited while an incident is open, then a worse state: the rise uses the frozen mapping | I4 |
 | Store — I10 | count revisions, epochs and `alert_config_generation` around a mapping write | I10 |
-| Store — never raised | a manual incident and an Alertmanager incident anchored in a project whose service goes from degraded to down: impact and timeline unchanged | I7 |
+| Store — never raised | one service goes from degraded to down with three incidents open in its project — its own auto-incident, a manual one and an Alertmanager one: the service incident rises, the other two keep impact and timeline. The rise in the same test is what makes it fail before the code exists | I7 |
 | Store — I3 | a scan of the store package's SQL for statements that write `incidents.impact`, compared against an asserted list — the creating inserts and the rise step — so a new writer fails the test | I3 |
-| API | alerting PATCH: absent field, full mapping, partial mapping → 400, unknown key → 400, `null` → 400, file-managed → 409, the embedded `alerting` of the service GET; project PATCH: 404 before 403, a `project_admin` of that project allowed, a file-managed project → 200, no-op → no audit row, audit row in the transaction; every route that mutates an existing incident refuses or ignores `impact` | I3, D18 |
-| API — basis confinement | detail returns the basis in each shape and NULL; the list, the acknowledge response, the public status-page JSON, each feed format and a captured webhook payload do not contain the key | I11 |
+| API | alerting PATCH: absent field, full mapping, partial mapping → 400, unknown key → 400, `null` → 400, file-managed → 409, the embedded `alerting` of the service GET; project PATCH: 404 before 403, a `project_admin` of that project allowed, a file-managed project → 200, no-op → no audit row, audit row in the transaction, with `· actor=<label>` for a token caller; `updated_at` moves on a change and not on a no-op; every route that mutates an existing incident refuses or ignores `impact` | I3, D18 |
+| API — basis confinement | detail returns the basis in each shape and NULL; the list, the acknowledge response, the public status-page JSON, each feed format and a captured webhook payload do not contain the key; the three encodings of §4.6 (object, `null`, `null` with `impact_basis_unavailable`); the store read refuses an incident id under another project | I11 |
 | API — contract | `patchServiceAlertingRequest` and the project PATCH body registered in `internal/api/requestcontract_test.go`; `frontend/src/api/schema.d.ts` regenerated and unchanged by a second generation | — |
 | Subscribe (`internal/subscribe`) | rise to minor, major → no mail; rise to critical → the §4.5 mail; opened / updated / resolved without `impact_raised` → today's mail, byte for byte | I8 |
 | MaC | hash stability with and without the new keys; **re-applying a bundle whose only change is `impact_by_state`** updates the row and writes the audit segment (the pre-filter must not drop it); omitted block and omitted key resolve as §4.1; the UI PATCH on that service → 409 | I10 |
 | NFR-035 regression | two services identical but for the mapping (defaults against `down → critical`), driven through the same outage: SLI, budget, burn, coverage, gate decision, delegation, suppression and escalation outputs are equal; plus a source scan asserting that the only readers of `incidents.impact` outside rendering, audit and the rise step are the ones this spec names | I9 |
-| SPA unit | every surface of §4.6 for `none`; the six basis lines; the `impact_raised` marker; the degraded > down warning; the acknowledge merge keeps the basis | I13 |
+| SPA unit | every surface of §4.6 for `none`; the six basis lines; the `impact_raised` marker; the degraded > down warning; `acknowledge()` keeps `impact_basis` and `impact_basis_unavailable` | I13 |
 | E2E, dev stack | a service with `down → critical`, forced down: the public page shows "Critical impact", the incident page shows the basis line | — |
 
 ## 8. SPA (mock required before code)
@@ -583,9 +660,9 @@ tables — and are covered in both modes by the ordinary suite (`make race-both`
 
 None for the owner: D6, D7 and D12 were decided on 2026-11-16, with D16–D18.
 
-For the second review pass: the author's calls still open are D8 (shape), D9, D10, D11, D13, D14,
-D15, D19 and D20. The first pass agreed with D8, D9, D11, D13 and D14, and with D10 on the condition
-D17 now states.
+The author's calls — D8, D9, D10, D11, D13, D14, D15, D19, D20 — have each been agreed by the
+reviewer (D9–D14 in the first pass, D10 on the condition D17 states; D8, D15, D19, D20 in the
+second). They stay marked AUTHOR'S CALL until the owner approves the revision.
 
 Interplay with FR-043 (recovery threshold), checked by the first pass and recorded so it is not
 re-derived: a monitor held `down` by a recovery run keeps its auto-incident open longer, at the
@@ -628,3 +705,20 @@ older binary's writes are not refused by the new schema.
 
 The reviewer's remark on D3 + D10 — nobody can raise a manual incident either — is D17 and a line
 in §9.
+
+**External review 2 of revision 3 (2026-11-16, read at `9400298`, checked against `31815ae` after
+FR-043 merged): CHANGES REQUIRED, P0 0 / P1 3 / P2 2 / P3 2.** Of the first pass's 19 findings it
+found 15 closed and 4 closed in design but wrong in a sentence revision 3 added; those four are
+the first four rows below. It agreed with D8, D15, D19 and D20, confirmed the outbox roles of D16,
+the surface list of §4.6 as complete, the MaC column lists, the mail template against `render`, and
+that §8 is enough for a mock. Every finding was checked against the code on `main`.
+
+| Finding | Disposition |
+| --- | --- |
+| R3-P1-1 — the rise step locked on every evaluation, and §4.3 described a `REPEATABLE READ` lock wait as "reads the raised row" or "is retried" — it fails with 40001 and the leader does not retry | **Confirmed** (`beginAlertSnapshot`; the scheduler's `service_alert_eval_failed` path has no retry). Step 0 reads without a lock; the concurrency paragraph is rewritten; the clock test is split in three. §4.3, I12, §7 |
+| R3-P1-2 — the reconciler dropping its impact fails `Incident.Validate()` before the transaction opens; the system door's contract for other callers is undefined | **Confirmed** (`createIncident` validates first). §4.2: the validation requirement, and the system door narrowed to monitor auto-incidents with an empty impact; fixtures move |
+| R3-P1-3 — §4.6 said `acknowledge()` merges and keeps extra fields; it replaces, keeping only the impact links | **Confirmed** (`IncidentDetailView.vue`). The sentence is replaced by the required change. §4.6, §7 |
+| R3-P2-1 — the project audit target drops a token caller's label; no `FOR UPDATE`, no `updated_at` | **Confirmed.** §4.4: the write, `incidentAuditTarget`, `updated_at` |
+| R3-P2-2 — the basis read is not project-scoped at the store; the two null states are not encoded; the CHECK is open | **Accepted.** §4.6 (signature and the three encodings), §5 (closed CHECK) |
+| R3-P3-1 — I13's "no surface" covers mail and feeds, which print the raw word and must | **Fixed.** I13 says SPA; §4.6 says why mail and feeds stay |
+| R3-P3-2 — the never-raised test is green before the code exists | **Fixed.** §7: a service incident rises in the same test |

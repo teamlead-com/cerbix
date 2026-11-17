@@ -173,22 +173,43 @@ func (s *Store) acknowledgeIncident(ctx context.Context, id, by string, actor Au
 	return inc, nil
 }
 
-// CreateIncident inserts an incident together with its opening timeline update in
-// one transaction, so every incident has a timeline from the start.
+// ErrWrongIncidentDoor: a create reached a door that does not take that kind of incident.
+var ErrWrongIncidentDoor = errors.New("store: wrong incident door")
+
 // CreateIncidentByPrincipal is the door a person or a token comes through: the actor is a REQUIRED
-// parameter, so forgetting it is a compile error rather than an unaudited write (D3).
-func (s *Store) CreateIncidentByPrincipal(ctx context.Context, inc domain.Incident, openingBody, author string, actor AuditActor) (domain.Incident, error) {
-	return s.createIncident(ctx, inc, openingBody, author, &actor)
+// parameter, so forgetting it is a compile error rather than an unaudited write (D3). It takes the
+// two incidents whose impact a PERSON (or an alerting source acting through a token) chose, and the
+// caller states which: `basis` must be manual or alertmanager, so a fifth path cannot be added
+// without stating what it is, and the impact must be present — the project default is never applied
+// on this door (FR-042 §4.2). A service anchor still passes through (the confirming pass, §11).
+// The incident and its opening timeline update commit in one transaction.
+func (s *Store) CreateIncidentByPrincipal(ctx context.Context, inc domain.Incident, basis domain.ImpactBasisSource,
+	openingBody, author string, actor AuditActor) (domain.Incident, error) {
+	if basis != domain.ImpactBasisManual && basis != domain.ImpactBasisAlertmanager {
+		return domain.Incident{}, fmt.Errorf("%w: the principal door takes a manual or alertmanager basis, not %q",
+			ErrWrongIncidentDoor, basis)
+	}
+	if inc.Impact == "" {
+		return domain.Incident{}, fmt.Errorf("%w: a %s incident states its impact", ErrWrongIncidentDoor, basis)
+	}
+	return s.createIncident(ctx, inc, basis, openingBody, author, &actor)
 }
 
 // CreateIncidentBySystem is the door the reconciler comes through. It takes no actor and writes no
 // audit row — a machine incident's record is its own timeline, and auditing a flapping service would
-// bury the log under its own heartbeat (D1, owner 2026-09-01).
+// bury the log under its own heartbeat (D1, owner 2026-09-01). It takes ONE kind of incident: a
+// monitor-anchored `auto` incident with no impact, which opens at its project's default impact,
+// read in the inserting statement. A service auto-incident opens only through OpenServiceIncidentTx.
 func (s *Store) CreateIncidentBySystem(ctx context.Context, inc domain.Incident, openingBody, author string) (domain.Incident, error) {
-	return s.createIncident(ctx, inc, openingBody, author, nil)
+	if inc.Source != domain.SourceAuto || inc.MonitorID == "" || inc.ServiceID != "" || inc.Impact != "" {
+		return domain.Incident{}, fmt.Errorf("%w: the system door takes a monitor-anchored auto incident with no impact",
+			ErrWrongIncidentDoor)
+	}
+	return s.createIncident(ctx, inc, domain.ImpactBasisProjectDefault, openingBody, author, nil)
 }
 
-func (s *Store) createIncident(ctx context.Context, inc domain.Incident, openingBody, author string, actor *AuditActor) (domain.Incident, error) {
+func (s *Store) createIncident(ctx context.Context, inc domain.Incident, basis domain.ImpactBasisSource,
+	openingBody, author string, actor *AuditActor) (domain.Incident, error) {
 	if err := inc.Validate(); err != nil {
 		return domain.Incident{}, fmt.Errorf("store: invalid incident: %w", err)
 	}
@@ -210,6 +231,13 @@ func (s *Store) createIncident(ctx context.Context, inc domain.Incident, opening
 	if inc.ExternalKey != "" {
 		externalKey = &inc.ExternalKey
 	}
+	// The impact is NULL for the system door, and the project's default fills it in the same statement
+	// (FR-042 §4.2): no extra round trip, and the value read is the one this transaction sees.
+	var impact *string
+	if inc.Impact != "" {
+		v := string(inc.Impact)
+		impact = &v
+	}
 	row := tx.QueryRow(ctx,
 		// An incident CREATED as resolved is stamped at creation. D-0020 promises `resolved_at` the
 		// first time an incident reaches Resolved, and creation is one of those times: the API and
@@ -218,13 +246,19 @@ func (s *Store) createIncident(ctx context.Context, inc domain.Incident, opening
 		// status-page lists at once — the active one filters `status <> 'resolved'`, the recent one
 		// `resolved_at IS NOT NULL` — so the operator writes it down and it appears nowhere.
 		`INSERT INTO incidents (project_id, monitor_id, service_id, title, status, impact, source, external_key,
-		                        resolved_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,
-		         CASE WHEN $5 = 'resolved' THEN statement_timestamp() ELSE NULL END)
+		                        resolved_at, impact_basis)
+		 SELECT p.id, $2, $3, $4, $5, COALESCE($6::text, p.default_incident_impact), $7, $8,
+		        CASE WHEN $5 = 'resolved' THEN statement_timestamp() ELSE NULL END,
+		        jsonb_build_object('source', $9::text)
+		   FROM projects p
+		  WHERE p.id = $1
 		 RETURNING `+incidentColumns,
-		inc.ProjectID, monitorID, serviceID, inc.Title, inc.Status, inc.Impact, inc.Source, externalKey)
+		inc.ProjectID, monitorID, serviceID, inc.Title, inc.Status, impact, inc.Source, externalKey, string(basis))
 	created, err := scanIncident(row)
 	if err != nil {
+		if noRows(err) {
+			return domain.Incident{}, fmt.Errorf("store: create incident: project %s: %w", inc.ProjectID, ErrNotFound)
+		}
 		// A partial unique index rejected a second OPEN incident for the same subject — a concurrent
 		// down transition, or a duplicate Alertmanager delivery of one fingerprint, raced us. Benign
 		// in both cases: exactly one is open, which is what the caller wanted.
@@ -245,10 +279,11 @@ func (s *Store) createIncident(ctx context.Context, inc domain.Incident, opening
 		created.ID, created.Status, openingBody, author); err != nil {
 		return domain.Incident{}, fmt.Errorf("store: create opening update: %w", err)
 	}
-	// A SERVICE-anchored incident freezes its ladder here too. No production caller creates one
-	// through this door today — the evaluator uses `OpenServiceIncidentTx` — but an incident that
-	// reached the table by a route that skipped the snapshot would silently never escalate, and
-	// "the other door forgot" is the exact shape of three defects this iteration already fixed.
+	// A SERVICE-anchored incident freezes its ladder here too. Only the principal door can reach this
+	// branch now: a manual service-anchored incident keeps its ladder, the system door refuses a
+	// service anchor, and a service auto-incident opens only through `OpenServiceIncidentTx`. An
+	// incident that reached the table by a route that skipped the snapshot would silently never
+	// escalate, and "the other door forgot" is the exact shape of three defects already fixed.
 	if created.ServiceID != "" {
 		if err := snapshotEscalationPolicyTx(ctx, tx, created.ID, created.ProjectID, created.ServiceID); err != nil {
 			return domain.Incident{}, err

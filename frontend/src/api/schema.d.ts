@@ -768,7 +768,10 @@ export interface paths {
             };
         };
         put?: never;
-        /** Create a project (org admin) */
+        /**
+         * Create a project (org admin)
+         * @description A new project starts with `default_incident_impact` at `major`; the field is not accepted here — set it with `PATCH /api/v1/projects/{projectID}`.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -1226,7 +1229,40 @@ export interface paths {
         };
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Set the project's default incident impact (`project:manage`)
+         * @description Sets the impact this project's monitor auto-incidents open with. Refusals run 404 (unknown or invisible project), 403 (no `project:manage`), then 400. A project with file-managed objects is patched like any other. The write is audited in its own transaction as `project.default_incident_impact`.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PatchProject"];
+                };
+            };
+            responses: {
+                /** @description The project, with the default as stored. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Project"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
+            };
+        };
         trace?: never;
     };
     "/api/v1/regions": {
@@ -4416,7 +4452,7 @@ export interface paths {
         };
         /**
          * Get an incident (with its impact links)
-         * @description The AUTHENTICATED detail carries `impacts` — the structured incident-service links of the phase-3 impact graph (spec 14.3-14.4). The incident LIST carries no impacts, and no public or internal status-page projection does either: impacts are an authenticated-detail enrichment, never a field of the shared incident model.
+         * @description The AUTHENTICATED detail carries `impacts` — the structured incident-service links of the phase-3 impact graph (spec 14.3-14.4). The incident LIST carries no impacts, and no public or internal status-page projection does either: impacts are an authenticated-detail enrichment, never a field of the shared incident model. The same holds for `impact_basis` (FR-042 D15): this detail is the ONLY surface that carries it — not the list, the acknowledge response, the public page, the feeds or the webhooks.
          */
         get: {
             parameters: {
@@ -7981,6 +8017,10 @@ export interface components {
             computed_at: string;
         };
         AuthedIncident: components["schemas"]["Incident"] & {
+            /** @description The mapping in force when the incident's impact was classified (FR-042 D15). Always serialized, in one of three encodings: an object (`source` says why the impact is what it is); `null` with no `impact_basis_unavailable` when the basis was never recorded (an incident older than the feature); `null` with `impact_basis_unavailable: true` when the read degraded. */
+            impact_basis: components["schemas"]["ImpactBasis"] | null;
+            /** @description Present and true when the basis read degraded. */
+            impact_basis_unavailable?: boolean;
             /** @description The incident's impact links. An EMPTY array means "no links"; `null` with `impacts_unavailable: true` means the links could not be read — a failed read never borrows the honest empty answer. */
             impacts: components["schemas"]["ServiceImpactLink"][] | null;
             /** @description Present and true when the impact read degraded. */
@@ -8235,8 +8275,9 @@ export interface components {
             live: components["schemas"]["ServiceSignalState"];
             burn: components["schemas"]["ServiceSignalState"];
         };
-        /** @description The paging DECLARATION of FR-021 §16.6a, and only the declaration. Latch, lease, generation and episode state have no field here by construction, so no future edit can leak one by forgetting to redact it. */
+        /** @description The paging DECLARATION of FR-021 §16.6a, and only the declaration. Latch, lease, generation and episode state have no field here by construction, so no future edit can leak one by forgetting to redact it. `impact_by_state` is always resolved (three keys; the defaults degraded=minor, down=major, unknown=none for a service that never set one). It is not a paging field: changing it bumps no generation and opens no epoch (D7, D9). */
         ServiceAlerting: {
+            impact_by_state: components["schemas"]["ImpactByState"];
             /**
              * @description While true, the service's SLI members stop DELIVERING their own alerts — they keep probing, flipping, recording and opening incidents. Suppression additionally requires ARMED coverage, so this switch alone silences nothing.
              * @default false
@@ -8260,7 +8301,7 @@ export interface components {
              */
             renotify_seconds: number;
         };
-        /** @description Every field is OPTIONAL and an omitted one is UNCHANGED. `false` is a real edit, not absence. Server-owned fields — `alert_config_generation` and every latch, lease and episode column — are absent here and rejected by the decoder. */
+        /** @description Every field is OPTIONAL and an omitted one is UNCHANGED. `false` is a real edit, not absence. Server-owned fields — `alert_config_generation` and every latch, lease and episode column — are absent here and rejected by the decoder. `impact_by_state` (FR-042, D18): absent leaves the mapping untouched; present, it must state all three keys, each a valid impact — `null`, a missing or unknown key, or an invalid impact is a 400 before anything is written. A file-managed service answers 409 `managed_by_file`. */
         PatchServiceAlertingRequest: {
             owns_paging?: boolean;
             /** @description `[]` explicitly pages for no state; omitting the field leaves it unchanged. */
@@ -8269,6 +8310,7 @@ export interface components {
             confirm_evaluations?: number;
             /** @description 0 disables the repeat; otherwise 60..86400 seconds. */
             renotify_seconds?: number;
+            impact_by_state?: components["schemas"]["ImpactByState"];
         };
         /** @description A burn rule as a CLIENT may state it: the four declared fields and nothing else. The `firing` latch of `BurnRule` is deliberately missing — it is server-owned (§16.4b) and a body carrying it is a 400. Two rules with the same canonical key (severity, both windows, threshold) are also a 400: one latch cannot answer for two rules. */
         BurnRuleDeclaration: {
@@ -8576,10 +8618,16 @@ export interface components {
             org_id?: string;
             slug?: string;
             name?: string;
+            /** @description The impact this project's monitor auto-incidents open with. A new project starts at `major`; set it with `PATCH /api/v1/projects/{projectID}`. Not declarable in Monitoring-as-Code. */
+            default_incident_impact?: components["schemas"]["IncidentImpact"];
             /** Format: date-time */
             created_at?: string;
             /** Format: date-time */
             updated_at?: string;
+        };
+        /** @description Absent changes nothing and answers 200 with the project; a value equal to the stored one is a no-op that writes no audit row. */
+        PatchProject: {
+            default_incident_impact?: components["schemas"]["IncidentImpact"];
         };
         CreateProject: {
             slug: string;
@@ -9984,6 +10032,31 @@ export interface components {
         IncidentStatus: "investigating" | "identified" | "monitoring" | "resolved";
         /** @enum {string} */
         IncidentImpact: "none" | "minor" | "major" | "critical";
+        /** @description Which impact an auto-opened service incident gets for each paging state (FR-042). All three keys are always stated. */
+        ImpactByState: {
+            degraded: components["schemas"]["IncidentImpact"];
+            down: components["schemas"]["IncidentImpact"];
+            unknown: components["schemas"]["IncidentImpact"];
+        };
+        /** @description The impact came from the service's mapping. The mapping and the service are as of the opening; the state is the state that set the CURRENT impact (a rise rewrites it). */
+        ImpactBasisServiceMapping: {
+            /** @enum {string} */
+            source: "service_mapping";
+            mapping: components["schemas"]["ImpactByState"];
+            /** @enum {string} */
+            state: "degraded" | "down" | "unknown";
+            service: {
+                name: string;
+                slug: string;
+            };
+        };
+        /** @description The impact came from the project default, a person, or Alertmanager; nothing else is recorded. */
+        ImpactBasisOther: {
+            /** @enum {string} */
+            source: "project_default" | "manual" | "alertmanager";
+        };
+        /** @description The mapping in force when the incident was classified. Authenticated incident detail only (FR-042 D15). */
+        ImpactBasis: components["schemas"]["ImpactBasisServiceMapping"] | components["schemas"]["ImpactBasisOther"];
         CreateIncident: {
             title: string;
             status?: components["schemas"]["IncidentStatus"];

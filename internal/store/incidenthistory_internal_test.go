@@ -46,13 +46,10 @@ func newHistoryFixture(t *testing.T) historyFixture {
 // resolved creates an incident in project and marks it resolved at `at`. It returns its id.
 func (f historyFixture) resolved(t *testing.T, project, title string, at time.Time) string {
 	t.Helper()
-	inc, err := f.st.CreateIncidentBySystem(f.ctx, domain.Incident{
+	inc := openManualFixture(t, f.st, f.ctx, domain.Incident{
 		ProjectID: project, Title: title, Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMinor, Source: domain.SourceManual,
-	}, "", "test")
-	if err != nil {
-		t.Fatalf("create %q: %v", title, err)
-	}
+	})
 	if _, err := f.st.pool.Exec(f.ctx,
 		`UPDATE incidents SET status = 'resolved', resolved_at = $2::timestamptz,
 		        started_at = $2::timestamptz - interval '5 minutes' WHERE id = $1`,
@@ -64,13 +61,10 @@ func (f historyFixture) resolved(t *testing.T, project, title string, at time.Ti
 
 func (f historyFixture) open(t *testing.T, title string) string {
 	t.Helper()
-	inc, err := f.st.CreateIncidentBySystem(f.ctx, domain.Incident{
+	inc := openManualFixture(t, f.st, f.ctx, domain.Incident{
 		ProjectID: f.project, Title: title, Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMinor, Source: domain.SourceManual,
-	}, "", "test")
-	if err != nil {
-		t.Fatalf("create %q: %v", title, err)
-	}
+	})
 	return inc.ID
 }
 

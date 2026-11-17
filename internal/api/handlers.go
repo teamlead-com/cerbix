@@ -267,6 +267,45 @@ func (h *Handler) getProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, proj)
 }
 
+// patchProjectRequest is the project PATCH body. A nil field (absent or null, R6) changes nothing.
+type patchProjectRequest struct {
+	DefaultIncidentImpact *string `json:"default_incident_impact"`
+}
+
+// patchProject sets the impact the project's monitor auto-incidents open with (FR-042 §4.4).
+// Refusal order: 404 (unknown or invisible) -> 403 (no project:manage) -> 400. A file-managed
+// project is patched like any other. The audit row is the store's, written in its transaction.
+func (h *Handler) patchProject(w http.ResponseWriter, r *http.Request) {
+	p, _ := h.principal(r)
+	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionProjectManage)
+	if !ok {
+		return
+	}
+	var req patchProjectRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.DefaultIncidentImpact == nil {
+		writeJSON(w, http.StatusOK, proj)
+		return
+	}
+	impact := domain.IncidentImpact(*req.DefaultIncidentImpact)
+	if !impact.Valid() {
+		writeError(w, http.StatusBadRequest, "default_incident_impact must be one of none, minor, major, critical")
+		return
+	}
+	updated, err := h.store.SetProjectDefaultIncidentImpact(r.Context(), proj.ID, impact, auditActor(p))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		h.serverError(w, "set_project_default_incident_impact", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
 // deleteProject permanently removes a project the caller org-administers (FR-018).
 // Irreversible: the DB cascade wipes the project's monitors + history, incidents, SLA,
 // escalation/on-call, channels, and project-scoped tokens/webhooks/status-pages. Refused

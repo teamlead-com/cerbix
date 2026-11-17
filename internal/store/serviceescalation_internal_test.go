@@ -52,13 +52,7 @@ func escalatingService(t *testing.T, st *Store, ctx context.Context) (ladderFixt
 		`UPDATE services SET escalation_policy_id = $2 WHERE id = $1`, f.serviceID, policy.ID); err != nil {
 		t.Fatalf("attach policy: %v", err)
 	}
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
-		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "Checkout — service down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
-	}, "opened automatically", "system")
-	if err != nil {
-		t.Fatalf("service incident: %v", err)
-	}
+	inc := openServiceFixture(t, st, ctx, f.projectID, f.serviceID, "Checkout — service down", domain.ImpactMajor)
 	return ladderFixture{armFixture: f, policyID: policy.ID, channelID: ch.ID}, inc
 }
 
@@ -396,12 +390,7 @@ func TestTheServiceGraphDoesNotPauseAServiceLadder(t *testing.T) {
 		[]string{upstream.ID}, 0, GraphActor{Label: "t"}); err != nil {
 		t.Fatalf("edge: %v", err)
 	}
-	if _, err := st.CreateIncidentBySystem(ctx, domain.Incident{
-		ProjectID: f.projectID, ServiceID: upstream.ID, Title: "Payments — service down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
-	}, "opened automatically", "system"); err != nil {
-		t.Fatalf("upstream incident: %v", err)
-	}
+	openServiceFixture(t, st, ctx, f.projectID, upstream.ID, "Payments — service down", domain.ImpactMajor)
 
 	if n, err := st.AdvanceEscalations(ctx); err != nil || n.ServiceSteps != 1 {
 		t.Fatalf("fired=%d err=%v, want 1 — an upstream service's incident must change NOTHING about "+
@@ -552,7 +541,7 @@ func TestAttachingAPolicyDoesNotPageAnAlreadyOpenIncident(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 2,
+	inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", domain.ServiceAlertDown, domain.DefaultImpactMapping(), 2,
 		governingRevision(t, st, ctx, f.serviceID))
 	if err != nil || !created {
 		t.Fatalf("open: %v (created=%v)", err, created)
@@ -598,7 +587,7 @@ func TestAttachingAPolicyDoesNotPageAnAlreadyOpenIncident(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if _, _, err := st.OpenServiceIncidentTx(ctx, tx2, f.serviceID, f.projectID, "checkout down again", 2,
+	if _, _, err := st.OpenServiceIncidentTx(ctx, tx2, f.serviceID, f.projectID, "checkout down again", domain.ServiceAlertDown, domain.DefaultImpactMapping(), 2,
 		governingRevision(t, st, ctx, f.serviceID)); err != nil {
 		t.Fatalf("second open: %v", err)
 	}

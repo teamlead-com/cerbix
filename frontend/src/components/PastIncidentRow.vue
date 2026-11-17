@@ -3,7 +3,7 @@
 // incident history render the SAME row (func-status-pages-incidents.md §13.5, approved mock), so
 // the markup has one owner. Moved verbatim from PublicStatusView.vue in iter-0203.
 import type { components } from "@/api/schema";
-import { impactBadge, incidentDuration, relTime, statusBadge } from "@/lib/incident";
+import { impactPhrase, incidentDuration, relTime, statusBadge } from "@/lib/incident";
 import { renderSections } from "@/lib/postmortem";
 
 type IncidentDetail = components["schemas"]["IncidentDetail"];
@@ -40,8 +40,8 @@ const emit = defineEmits<{ toggle: [] }>();
             {{ incidentDuration(inc.started_at, inc.resolved_at) }}</template
           >
           ·
-          {{ impactBadge(inc.impact).label.toLowerCase() }}
-          impact<template v-if="inc.postmortem">
+          {{ impactPhrase(inc.impact).toLowerCase()
+          }}<template v-if="inc.postmortem">
             · <span class="text-accent">postmortem</span></template
           >
         </div>

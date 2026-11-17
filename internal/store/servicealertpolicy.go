@@ -65,10 +65,13 @@ func (s *Store) ServiceAlertPolicy(
 ) (domain.ServiceAlertPolicy, error) {
 	var p domain.ServiceAlertPolicy
 	var pageOn []string
+	var rawImpact []byte
 	err := s.pool.QueryRow(ctx, `
-		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds
+		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds,
+		       impact_by_state
 		  FROM services WHERE id = $1 AND project_id = $2`, serviceID, projectID).
-		Scan(&p.OwnsPaging, &pageOn, &p.PageOnUnknown, &p.ConfirmEvaluations, &p.RenotifySeconds)
+		Scan(&p.OwnsPaging, &pageOn, &p.PageOnUnknown, &p.ConfirmEvaluations, &p.RenotifySeconds,
+			&rawImpact)
 	if noRows(err) || isInvalidTextRepresentation(err) {
 		return domain.ServiceAlertPolicy{}, ErrNotFound
 	}
@@ -77,6 +80,9 @@ func (s *Store) ServiceAlertPolicy(
 	}
 	for _, state := range pageOn {
 		p.PageOn = append(p.PageOn, domain.ServiceAlertState(state))
+	}
+	if p.ImpactByState, err = impactMappingFromColumn(rawImpact); err != nil {
+		return domain.ServiceAlertPolicy{}, err
 	}
 	return p.Canonical(), nil
 }
@@ -96,6 +102,8 @@ type ServiceAlertPolicyPatch struct {
 	PageOnUnknown      *bool
 	ConfirmEvaluations *int
 	RenotifySeconds    *int
+	// ImpactByState is the whole mapping or nothing: a partial one fails Validate (FR-042 D7).
+	ImpactByState *domain.ImpactMapping
 }
 
 // FullServiceAlertPolicyPatch is every field set, for callers that genuinely declare the whole
@@ -105,7 +113,7 @@ func FullServiceAlertPolicyPatch(p domain.ServiceAlertPolicy) ServiceAlertPolicy
 	return ServiceAlertPolicyPatch{
 		OwnsPaging: &p.OwnsPaging, PageOn: &states,
 		PageOnUnknown: &p.PageOnUnknown, ConfirmEvaluations: &p.ConfirmEvaluations,
-		RenotifySeconds: &p.RenotifySeconds,
+		RenotifySeconds: &p.RenotifySeconds, ImpactByState: &p.ImpactByState,
 	}
 }
 
@@ -127,6 +135,9 @@ func (p ServiceAlertPolicyPatch) Merged(base domain.ServiceAlertPolicy) domain.S
 	}
 	if p.RenotifySeconds != nil {
 		base.RenotifySeconds = *p.RenotifySeconds
+	}
+	if p.ImpactByState != nil {
+		base.ImpactByState = *p.ImpactByState
 	}
 	return base
 }
@@ -164,12 +175,14 @@ func (s *Store) UpdateServiceAlertPolicy(
 	var before domain.ServiceAlertPolicy
 	var pageOn []string
 	var slug string
+	var rawImpact []byte
 	var asOf time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds, slug
+		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds,
+		       impact_by_state, slug
 		  FROM services WHERE id = $1 AND project_id = $2 FOR UPDATE`, serviceID, projectID).
 		Scan(&before.OwnsPaging, &pageOn, &before.PageOnUnknown, &before.ConfirmEvaluations,
-			&before.RenotifySeconds, &slug)
+			&before.RenotifySeconds, &rawImpact, &slug)
 	if noRows(err) || isInvalidTextRepresentation(err) {
 		// Wrong tenant, unknown id, or an id that is not even a uuid: one answer for all three, so
 		// existence never leaks across a tenant boundary.
@@ -187,6 +200,9 @@ func (s *Store) UpdateServiceAlertPolicy(
 	}
 	for _, state := range pageOn {
 		before.PageOn = append(before.PageOn, domain.ServiceAlertState(state))
+	}
+	if before.ImpactByState, err = impactMappingFromColumn(rawImpact); err != nil {
+		return domain.ServiceAlertPolicy{}, err
 	}
 	// The stored value is canonicalized for the comparison as well, so a re-spelling of the same
 	// declaration is not read as a policy change that closes a firing announcement.
@@ -252,14 +268,19 @@ func (s *Store) UpdateServiceAlertPolicy(
 		}
 	}
 
-	// ── The write. FIVE columns, and never `alert_config_generation`: the trigger owns it. ───
+	// ── The write. SIX columns, and never `alert_config_generation`: the trigger owns it (and does
+	// not watch `impact_by_state`: a mapping decides an incident's severity, not who is paged). ───
+	impactColumn, err := impactMappingColumn(next.ImpactByState)
+	if err != nil {
+		return domain.ServiceAlertPolicy{}, err
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE services
 		   SET owns_paging = $3, page_on = $4, page_on_unknown = $5, confirm_evaluations = $6,
-		       renotify_seconds = $7, updated_at = now()
+		       renotify_seconds = $7, impact_by_state = $8::jsonb, updated_at = now()
 		 WHERE id = $1 AND project_id = $2`,
 		serviceID, projectID, next.OwnsPaging, pageOnText(next.PageOn), next.PageOnUnknown,
-		next.ConfirmEvaluations, next.RenotifySeconds); err != nil {
+		next.ConfirmEvaluations, next.RenotifySeconds, impactColumn); err != nil {
 		return domain.ServiceAlertPolicy{}, fmt.Errorf("store: write alert policy: %w", err)
 	}
 
@@ -494,6 +515,11 @@ func alertPolicyDiff(before, next domain.ServiceAlertPolicy) string {
 	if before.RenotifySeconds != next.RenotifySeconds {
 		parts = append(parts, "renotify_seconds:"+strconv.Itoa(before.RenotifySeconds)+"→"+
 			strconv.Itoa(next.RenotifySeconds))
+	}
+	// Last (R10), so existing audit targets keep their order. Resolved forms, so NULL and the
+	// explicit defaults are one policy and contribute nothing.
+	if before.Impacts() != next.Impacts() {
+		parts = append(parts, "impact_by_state:"+before.Impacts().String()+"→"+next.Impacts().String())
 	}
 	return strings.Join(parts, " ")
 }

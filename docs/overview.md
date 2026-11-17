@@ -183,6 +183,28 @@ composite parent's heartbeats follow its children's statuses. Checks are not acc
 up, so a recovery is announced about `interval × (M − 1)` after the first success, and is dated at
 its confirmation (D-0281; the operator consequences are in the runbook).
 
+**Incident impact (FR-042 / NFR-035, iter-0215).** An automatic incident's impact is derived, not
+hard-coded, and no person can change it once the incident exists (there is no impact-edit endpoint).
+A **service** declares `impact_by_state` in its alerting policy, beside `page_on` (default
+`degraded → minor`, `down → major`, `unknown → none`; `none` reads "Impact not specified" in the SPA).
+Its auto-incident opens at `mapping[state]` for the confirmed state, and the mapping in force is
+frozen on the incident as `impact_basis` together with the state and the service's name and slug, so
+the incident page can say "declared by service <name> for state <state>" after the service is
+deleted. While the incident is open, every confirmed pageable state — announced or withheld — runs a
+rise step in the evaluator's transaction: it reads without a lock, and only when the frozen mapping
+ranks the state above the current impact does it lock the row, compare again, read the clock and
+write the new impact, a public `⬆ Impact raised: <from> → <to> — …` note and an `incident.updated`
+event with `impact_raised`. Impact never falls; an incident with no basis (opened before migration
+00119, or by an older binary) never rises. A **monitor** auto-incident opens at its project's
+`default_incident_impact` (default `major`, set by `PATCH /api/v1/projects/{projectID}` or Settings →
+Project → Incidents, not declarable in Monitoring-as-Code). Manual and alert-receiver incidents keep
+their creation-time impact. Status-page subscribers are mailed an impact rise only when it reaches
+`critical`; webhooks receive every rise. The basis is returned only by the authenticated incident
+detail, never by the list, the public page, the feeds or a webhook. Impact is a classification, not a
+control: no SLO, budget, burn, gate, coverage, delegation, suppression or escalation computation reads
+it, and a mapping change opens no definition revision, evaluation epoch or `alert_config_generation`
+bump (D-0282; upgrade and rollback notes in the runbook).
+
 **Services (FR-021, phase 1).** A `Service` is the unit whose reliability is *explicitly
 declared*, and it sits BESIDE monitors rather than above them: a monitor may contribute to
 several services' reliability inputs, or to none. Two axes are stored separately — a

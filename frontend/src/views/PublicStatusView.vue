@@ -13,7 +13,7 @@ import {
   withheldText,
 } from "@/lib/statuspage";
 import { useBranding } from "@/stores/branding";
-import { impactBadge, relTime, statusBadge } from "@/lib/incident";
+import { impactBadge, impactPhrase, relTime, statusBadge } from "@/lib/incident";
 import { utcClockLabel, utcDayLabel } from "@/lib/wallclock";
 import { isoInstant, utcDayBefore, utcDayKey } from "@/lib/datekeys";
 
@@ -596,7 +596,7 @@ onMounted(async () => {
               class="mb-2 mt-4 text-[12px] font-semibold text-ink-2"
               data-testid="impact-group-heading"
             >
-              {{ impactBadge(group.impact).label }} impact
+              {{ impactPhrase(group.impact) }}
             </h3>
             <div
               class="overflow-hidden rounded-lg border border-border bg-surface shadow-card"

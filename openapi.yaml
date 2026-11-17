@@ -386,6 +386,9 @@ paths:
     post:
       tags: [projects]
       summary: Create a project (org admin)
+      description: >
+        A new project starts with `default_incident_impact` at `major`; the field is not
+        accepted here — set it with `PATCH /api/v1/projects/{projectID}`.
       requestBody:
         required: true
         content:
@@ -568,6 +571,29 @@ paths:
               schema: { $ref: '#/components/schemas/Project' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [projects]
+      summary: Set the project's default incident impact (`project:manage`)
+      description: >
+        Sets the impact this project's monitor auto-incidents open with. Refusals run 404
+        (unknown or invisible project), 403 (no `project:manage`), then 400. A project with
+        file-managed objects is patched like any other. The write is audited in its own
+        transaction as `project.default_incident_impact`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PatchProject' }
+      responses:
+        '200':
+          description: The project, with the default as stored.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
     delete:
       tags: [projects]
       summary: Delete a project (org admin)
@@ -2556,6 +2582,9 @@ paths:
         the phase-3 impact graph (spec 14.3-14.4). The incident LIST carries no impacts, and
         no public or internal status-page projection does either: impacts are an
         authenticated-detail enrichment, never a field of the shared incident model.
+        The same holds for `impact_basis` (FR-042 D15): this detail is the ONLY surface that
+        carries it — not the list, the acknowledge response, the public page, the feeds or
+        the webhooks.
       responses:
         '200':
           description: OK
@@ -4391,8 +4420,21 @@ components:
       allOf:
         - { $ref: '#/components/schemas/Incident' }
         - type: object
-          required: [impacts]
+          required: [impacts, impact_basis]
           properties:
+            impact_basis:
+              allOf:
+                - { $ref: '#/components/schemas/ImpactBasis' }
+              nullable: true
+              description: >
+                The mapping in force when the incident's impact was classified (FR-042 D15).
+                Always serialized, in one of three encodings: an object (`source` says why the
+                impact is what it is); `null` with no `impact_basis_unavailable` when the basis
+                was never recorded (an incident older than the feature); `null` with
+                `impact_basis_unavailable: true` when the read degraded.
+            impact_basis_unavailable:
+              type: boolean
+              description: Present and true when the basis read degraded.
             impacts:
               type: array
               nullable: true
@@ -4746,10 +4788,13 @@ components:
       description: >
         The paging DECLARATION of FR-021 §16.6a, and only the declaration. Latch, lease,
         generation and episode state have no field here by construction, so no future edit can
-        leak one by forgetting to redact it.
-      required: [owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds]
+        leak one by forgetting to redact it. `impact_by_state` is always resolved (three keys; the
+        defaults degraded=minor, down=major, unknown=none for a service that never set one). It is
+        not a paging field: changing it bumps no generation and opens no epoch (D7, D9).
+      required: [owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds, impact_by_state]
       additionalProperties: false
       properties:
+        impact_by_state: { $ref: '#/components/schemas/ImpactByState' }
         owns_paging:
           type: boolean
           default: false
@@ -4789,7 +4834,10 @@ components:
       description: >
         Every field is OPTIONAL and an omitted one is UNCHANGED. `false` is a real edit, not
         absence. Server-owned fields — `alert_config_generation` and every latch, lease and
-        episode column — are absent here and rejected by the decoder.
+        episode column — are absent here and rejected by the decoder. `impact_by_state` (FR-042,
+        D18): absent leaves the mapping untouched; present, it must state all three keys, each a
+        valid impact — `null`, a missing or unknown key, or an invalid impact is a 400 before
+        anything is written. A file-managed service answers 409 `managed_by_file`.
       additionalProperties: false
       properties:
         owns_paging: { type: boolean }
@@ -4802,6 +4850,7 @@ components:
         renotify_seconds:
           type: integer
           description: '0 disables the repeat; otherwise 60..86400 seconds.'
+        impact_by_state: { $ref: '#/components/schemas/ImpactByState' }
 
     BurnRuleDeclaration:
       type: object
@@ -5207,8 +5256,22 @@ components:
         org_id: { type: string, format: uuid }
         slug: { type: string }
         name: { type: string }
+        default_incident_impact:
+          allOf: [ { $ref: '#/components/schemas/IncidentImpact' } ]
+          description: >
+            The impact this project's monitor auto-incidents open with. A new project starts
+            at `major`; set it with `PATCH /api/v1/projects/{projectID}`. Not declarable in
+            Monitoring-as-Code.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    PatchProject:
+      type: object
+      additionalProperties: false
+      description: >
+        Absent changes nothing and answers 200 with the project; a value equal to
+        the stored one is a no-op that writes no audit row.
+      properties:
+        default_incident_impact: { $ref: '#/components/schemas/IncidentImpact' }
     CreateProject:
       type: object
       required: [slug, name]
@@ -6428,6 +6491,47 @@ components:
     IncidentImpact:
       type: string
       enum: [none, minor, major, critical]
+    ImpactByState:
+      type: object
+      description: >
+        Which impact an auto-opened service incident gets for each paging state (FR-042).
+        All three keys are always stated.
+      required: [degraded, down, unknown]
+      additionalProperties: false
+      properties:
+        degraded: { $ref: '#/components/schemas/IncidentImpact' }
+        down: { $ref: '#/components/schemas/IncidentImpact' }
+        unknown: { $ref: '#/components/schemas/IncidentImpact' }
+    ImpactBasisServiceMapping:
+      type: object
+      description: The impact came from the service's mapping. The mapping and the service are as of the opening; the state is the state that set the CURRENT impact (a rise rewrites it).
+      required: [source, mapping, state, service]
+      additionalProperties: false
+      properties:
+        source: { type: string, enum: [service_mapping] }
+        mapping: { $ref: '#/components/schemas/ImpactByState' }
+        state: { type: string, enum: [degraded, down, unknown] }
+        service:
+          type: object
+          required: [name, slug]
+          additionalProperties: false
+          properties:
+            name: { type: string }
+            slug: { type: string }
+    ImpactBasisOther:
+      type: object
+      description: The impact came from the project default, a person, or Alertmanager; nothing else is recorded.
+      required: [source]
+      additionalProperties: false
+      properties:
+        source: { type: string, enum: [project_default, manual, alertmanager] }
+    ImpactBasis:
+      description: >
+        The mapping in force when the incident was classified. Authenticated incident detail
+        only (FR-042 D15).
+      oneOf:
+        - { $ref: '#/components/schemas/ImpactBasisServiceMapping' }
+        - { $ref: '#/components/schemas/ImpactBasisOther' }
     CreateIncident:
       type: object
       required: [title]

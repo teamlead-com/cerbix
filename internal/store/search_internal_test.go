@@ -15,10 +15,10 @@ func TestSearch(t *testing.T) {
 		ProjectID:         proj.ID, Name: "api-gateway", Type: domain.MonitorHTTP, Target: "https://x",
 		IntervalSeconds: 60, TimeoutSeconds: 5, Enabled: true,
 	})
-	inc, _ := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "gateway latency spike", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening", "author")
+	})
 
 	byType := func(hits []domain.SearchHit) map[string]domain.SearchHit {
 		m := map[string]domain.SearchHit{}

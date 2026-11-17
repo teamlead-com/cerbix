@@ -297,13 +297,10 @@ func TestFindOpenIncidentByExternalKey(t *testing.T) {
 	if _, err := st.FindOpenIncidentByExternalKey(ctx, proj.ID, "fp-1"); err != ErrNotFound {
 		t.Fatalf("no incident yet → ErrNotFound, got %v", err)
 	}
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "latency", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceAPI, ExternalKey: "fp-1",
-	}, "opened", "alertmanager")
-	if err != nil {
-		t.Fatalf("create incident: %v", err)
-	}
+	})
 	got, err := st.FindOpenIncidentByExternalKey(ctx, proj.ID, "fp-1")
 	if err != nil || got.ID != inc.ID || got.ExternalKey != "fp-1" {
 		t.Fatalf("find open: %v %+v", err, got)

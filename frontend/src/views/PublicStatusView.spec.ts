@@ -455,7 +455,8 @@ describe("PublicStatusView service-first active incidents", () => {
       "Critical impact",
       "Major impact",
       "Minor impact",
-      "None impact",
+      // FR-042 (I13, mock §4 row 2): the phrase, never "None impact".
+      "Impact not specified",
     ]);
     expect(
       wrapper
@@ -600,6 +601,57 @@ describe("PublicStatusView past incidents and the incident history link", () => 
     expect(wrapper.find('[data-testid="past-incidents-history-link"]').attributes("href")).toBe(
       "/status/public-status/history?token=tok+1",
     );
+    wrapper.unmount();
+  });
+});
+
+// FR-042 / NFR-035 (spec §4.6, I13; mock §4 rows 1–4 and §5): impact `none` is an ordinary value of
+// automatic incidents, so every place the public page prints it reads as words.
+describe("PublicStatusView impact none in words", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-21T20:00:00Z"));
+    apiMock.GET.mockReset();
+    routeMock.query = {};
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    document.body.innerHTML = "";
+  });
+
+  it("the count pill, the card badge and the past-row tail say 'not specified'", async () => {
+    const render = renderFixture([incident(1, "none"), incident(2, "critical")]);
+    render.recent_incidents = [
+      incident(20, "none", {
+        id: "recent-none",
+        title: "Past unrated",
+        status: "resolved",
+        resolved_at: "2026-09-20T12:00:00Z",
+        affected_component_ids: [],
+      }),
+      incident(21, "minor", {
+        id: "recent-minor",
+        title: "Past minor",
+        status: "resolved",
+        resolved_at: "2026-09-20T12:00:00Z",
+        affected_component_ids: [],
+      }),
+    ];
+    const wrapper = await mountView(render);
+
+    expect(wrapper.findAll('[data-testid="impact-count"]').map((p) => p.text())).toEqual([
+      "Critical 1",
+      "Not specified 1",
+    ]);
+    expect(wrapper.findAll('[data-testid="impact-badge"]').map((b) => b.text()).sort()).toEqual([
+      "Critical",
+      "Not specified",
+    ]);
+    const tails = wrapper.findAll('[data-testid="past-incident-row"]').map((r) => r.text().replace(/\s+/g, " "));
+    expect(tails.find((t) => t.includes("Past unrated"))).toContain("· impact not specified");
+    expect(tails.find((t) => t.includes("Past minor"))).toContain("· minor impact");
+    // I13: no SPA surface renders none as "None", "None impact" or "none impact".
+    expect(wrapper.text()).not.toMatch(/\bnone impact\b|\bNone\b/i);
     wrapper.unmount();
   });
 });

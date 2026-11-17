@@ -68,3 +68,30 @@ describe("NewIncidentView breadcrumb scope", () => {
     expect(breadcrumbs.text()).not.toContain("Project B");
   });
 });
+
+// FR-042 / NFR-035 (I13, mock §4 row 8): the impact option reads the badge word, so what the author
+// picks is what the incident will show. Order and default (Minor) are unchanged.
+describe("NewIncidentView impact selector", () => {
+  beforeEach(() => {
+    apiMock.GET.mockReset();
+    apiMock.GET.mockResolvedValue({ data: [] });
+    workspaceMock.projectId = "project-a";
+  });
+
+  it("offers Not specified · Minor · Major · Critical, Minor selected", async () => {
+    const wrapper = mount(NewIncidentView, {
+      global: { stubs: { RouterLink: { props: ["to"], template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    const impact = wrapper
+      .findAll("select")
+      .find((s) => s.findAll("option").some((o) => o.attributes("value") === "critical"))!;
+    expect(impact.findAll("option").map((o) => [o.attributes("value"), o.text()])).toEqual([
+      ["none", "Not specified"],
+      ["minor", "Minor"],
+      ["major", "Major"],
+      ["critical", "Critical"],
+    ]);
+    expect((impact.element as HTMLSelectElement).value).toBe("minor");
+  });
+});

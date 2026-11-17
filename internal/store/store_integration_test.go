@@ -709,10 +709,10 @@ func TestIncidentLifecyclePersistence(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "api down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "we are investigating", "author1")
+	}, domain.ImpactBasisManual, "we are investigating", "author1", store.AuditActor{ViaToken: true, Label: "token:fixture"})
 	if err != nil {
 		t.Fatalf("create incident: %v", err)
 	}
@@ -829,14 +829,14 @@ func TestStatusPageAndComponentPersistence(t *testing.T) {
 	}
 
 	// Open-incident query excludes resolved ones.
-	openInc, _ := st.CreateIncidentBySystem(ctx, domain.Incident{
+	openInc, _ := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening", "a")
-	_, _ = st.CreateIncidentBySystem(ctx, domain.Incident{
+	}, domain.ImpactBasisManual, "opening", "a", store.AuditActor{ViaToken: true, Label: "token:fixture"})
+	_, _ = st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "old", Status: domain.IncidentResolved,
 		Impact: domain.ImpactMinor, Source: domain.SourceManual,
-	}, "opening", "a")
+	}, domain.ImpactBasisManual, "opening", "a", store.AuditActor{ViaToken: true, Label: "token:fixture"})
 	open, err := st.ListOpenIncidentsByProject(ctx, proj.ID)
 	if err != nil || len(open) != 1 || open[0].ID != openInc.ID {
 		t.Fatalf("open incidents = %+v (err %v), want 1 unresolved", open, err)
@@ -967,7 +967,7 @@ func TestMonitorStatusTransitionAndAutoIncident(t *testing.T) {
 	// An auto-incident links to the monitor and is found while open.
 	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: mon.ID, Title: "api-health is down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+		Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 	}, "auto-opened", "auto")
 	if err != nil || inc.MonitorID != mon.ID {
 		t.Fatalf("create auto incident: %+v (err %v)", inc, err)

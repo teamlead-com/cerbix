@@ -12,6 +12,7 @@ import ProjectMembersPanel from "@/components/settings/ProjectMembersPanel.vue";
 import OrgDangerZonePanel from "@/components/settings/OrgDangerZonePanel.vue";
 import SecretsPanel from "@/components/settings/SecretsPanel.vue";
 import ProjectGatePolicy from "@/components/settings/ProjectGatePolicy.vue";
+import ProjectIncidentSettings from "@/components/settings/ProjectIncidentSettings.vue";
 import UsersPanel from "@/components/settings/UsersPanel.vue";
 import {
   TOKEN_ACTIONS_WARNING_LEAD,
@@ -47,6 +48,7 @@ type Tab =
   | "incoming"
   | "secrets"
   | "gatepolicy"
+  | "incidents"
   | "projectmembers"
   | "authentication"
   | "branding"
@@ -77,6 +79,9 @@ const tabs = computed<{ key: Tab; label: string; scope: string }[]>(() => [
   { key: "incoming", label: "Incoming alerts", scope: "project" },
   { key: "secrets", label: "Secrets", scope: "project" },
   { key: "gatepolicy", label: "Release gate", scope: "project" },
+  // FR-042 (D19, mock §2 D-8): shown to everyone who sees the project's settings; the panel itself
+  // is read-only without project:manage, the way the release-gate tab shows a policy to a reader.
+  { key: "incidents", label: "Incidents", scope: "project" },
   ...(canManageProject.value
     ? ([{ key: "projectmembers", label: "Members", scope: "project" }] as { key: Tab; label: string; scope: string }[])
     : []),
@@ -1061,6 +1066,13 @@ watch(tab, loadActive);
       <template v-else-if="tab === 'gatepolicy'">
         <ProjectGatePolicy :project-id="ws.projectId" :can-manage="session.canProjectAdmin(ws.orgId, ws.projectId)" />
       </template>
+
+      <!-- ── Incidents (FR-042): the impact of this project's monitor auto-incidents ── -->
+      <ProjectIncidentSettings
+        v-else-if="tab === 'incidents'"
+        :project-id="ws.projectId"
+        :can-manage="session.canProjectAdmin(ws.orgId, ws.projectId)"
+      />
 
       <!-- ── Incoming alerts (Alertmanager receiver) ── -->
       <template v-else-if="tab === 'incoming' && !activeError">

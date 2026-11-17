@@ -227,6 +227,24 @@ contract: [`docs/specs/func-service-incidents.md`](specs/func-service-incidents.
 D-0171) and [`docs/specs/func-service-escalation.md`](specs/func-service-escalation.md) (FR-023,
 NFR-018, D-0173) — **DONE**.
 
+## Incident impact
+
+An incident's impact is declared, derived and only rises (**FR-042**). A Service states in its alerting
+policy what each paging state means — `impact_by_state`, default `degraded → minor`, `down → major`,
+`unknown → none` — and its automatic incident opens at the impact of the state that opened it, records
+the mapping it was classified under (`impact_basis`, shown on the incident page and nowhere public),
+and rises while open to the impact of any worse confirmed pageable state, with a public `⬆ Impact
+raised:` note; it never falls, and an edit of the mapping touches no open incident. No person edits an
+automatic incident's impact. A monitor's automatic incident opens at its project's
+`default_incident_impact` (default `major`); manual and alert-receiver incidents keep the impact they
+were created with. Status-page subscribers are mailed a rise only when it reaches `critical`. `none`
+reads "Impact not specified" everywhere in the SPA. **NFR-035**: impact is a classification, not a
+control — no SLO, budget, burn, gate, coverage, delegation, suppression or escalation computation
+reads it, and a mapping change opens no definition revision or evaluation epoch. Incidents open at
+the upgrade keep their impact and never rise (migration 00119). Contract:
+[`func-incident-impact.md`](specs/func-incident-impact.md) revision 4, D-0282 — **DONE**, implemented in
+iter-0215 ([`status.md`](status.md)).
+
 ## Reliability gate
 
 A deploy pipeline asks cerbix whether a release may go out and gets an answer it can branch on

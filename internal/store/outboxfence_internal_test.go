@@ -178,12 +178,10 @@ func TestMonitorAnchoredOpenEnqueuesFencedCorrelation(t *testing.T) {
 		t.Fatalf("correlation enqueued as status=%s fenced=%v — the producer was demoted", status, fenced)
 	}
 
-	if _, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: f.projectID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMinor, Source: domain.SourceManual,
-	}, "body", "t"); err != nil {
-		t.Fatalf("manual incident: %v", err)
-	}
+	})
 	var n int
 	if err := st.pool.QueryRow(ctx,
 		`SELECT count(*) FROM outbox_events WHERE topic = $1`, domain.TopicIncidentCorrelation).Scan(&n); err != nil {

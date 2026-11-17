@@ -248,3 +248,82 @@ func TestServiceAlertingDeclaresTheRenotifyCadence(t *testing.T) {
 			"bounds", be.Error())
 	}
 }
+
+// FR-042 §4.4 — the service's impact mapping in the `alerting:` block.
+func TestImpactByStateParses(t *testing.T) {
+	p := alertingOf(t, alertingYAML(`    alerting:
+      impact_by_state:
+        degraded: minor
+        down: critical
+        unknown: none
+`))
+	want := domain.ImpactMapping{Degraded: domain.ImpactMinor, Down: domain.ImpactCritical, Unknown: domain.ImpactNone}
+	if p == nil || p.ImpactByState != want {
+		t.Fatalf("impact_by_state = %+v, want %+v", p, want)
+	}
+}
+
+func TestImpactByStateOmissionResolvesToTheDefaults(t *testing.T) {
+	def := domain.DefaultImpactMapping()
+	for name, block := range map[string]string{
+		"no alerting block":    "",
+		"alerting without key": "    alerting:\n      owns_paging: true\n",
+		"one key stated":       "    alerting:\n      impact_by_state:\n        down: major\n",
+	} {
+		if got := alertingOf(t, alertingYAML(block)).ImpactByState; got != def {
+			t.Errorf("%s: %+v, want %+v", name, got, def)
+		}
+	}
+	p := alertingOf(t, alertingYAML("    alerting:\n      impact_by_state:\n        down: critical\n"))
+	want := domain.ImpactMapping{Degraded: domain.ImpactMinor, Down: domain.ImpactCritical, Unknown: domain.ImpactNone}
+	if p.ImpactByState != want {
+		t.Errorf("down only: %+v, want %+v", p.ImpactByState, want)
+	}
+	// An explicit YAML null reads as omitted.
+	if got := alertingOf(t, alertingYAML("    alerting:\n      impact_by_state:\n        down:\n")).ImpactByState; got.Down != domain.ImpactMajor {
+		t.Errorf("down: null -> %q, want major", got.Down)
+	}
+}
+
+func TestUnknownImpactByStateKeyIsRejected(t *testing.T) {
+	decodeErr(t, alertingYAML("    alerting:\n      impact_by_state:\n        severe: major\n"))
+}
+
+func TestInvalidImpactIsRefusedAtParseTime(t *testing.T) {
+	be := decodeErr(t, alertingYAML("    alerting:\n      impact_by_state:\n        down: severe\n"))
+	if be.Reason != ReasonDomainInvalid {
+		t.Fatalf("reason = %s, want %s (%s)", be.Reason, ReasonDomainInvalid, be.Msg)
+	}
+	if !strings.Contains(be.Error(), "checkout") {
+		t.Fatalf("error %q does not name the service", be.Error())
+	}
+}
+
+// An explicitly present blank value is refused, not silently resolved to the default (§4.1: only an
+// ABSENT key means its default).
+func TestAnExplicitlyEmptyImpactIsRefused(t *testing.T) {
+	for name, block := range map[string]string{
+		"all empty":    "        degraded: \"\"\n        down: \"\"\n        unknown: \"\"\n",
+		"single empty": "        degraded: minor\n        down: \"  \"\n        unknown: none\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			be := decodeErr(t, alertingYAML("    alerting:\n      impact_by_state:\n"+block))
+			if be.Reason != ReasonDomainInvalid {
+				t.Fatalf("reason = %s, want %s (%s)", be.Reason, ReasonDomainInvalid, be.Msg)
+			}
+			if !strings.Contains(be.Error(), "checkout") {
+				t.Fatalf("error %q does not name the service", be.Error())
+			}
+		})
+	}
+}
+
+// I10 — the mapping is not part of the declaration hash.
+func TestImpactByStateIsOutsideTheCanonicalHash(t *testing.T) {
+	none := hashOf(t, alertingYAML(""))
+	defaults := hashOf(t, alertingYAML("    alerting:\n      impact_by_state:\n        degraded: minor\n        down: major\n        unknown: none\n"))
+	custom := hashOf(t, alertingYAML("    alerting:\n      impact_by_state:\n        degraded: critical\n        down: critical\n        unknown: major\n"))
+	if none != defaults || none != custom {
+		t.Fatalf("hash moved with the mapping: %s / %s / %s", none, defaults, custom)
+	}
+}

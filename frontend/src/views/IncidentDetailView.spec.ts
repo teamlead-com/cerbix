@@ -314,3 +314,175 @@ describe("IncidentDetailView status picker", () => {
     expect(wrapper.find('[data-testid="update-status-resolved"]').exists()).toBe(false);
   });
 });
+
+// FR-042 / NFR-035, mock §3 and spec §4.6: the basis line, in its six forms, under the meta row.
+describe("IncidentDetailView impact basis", () => {
+  // A link stub that SAYS where it goes, so "a link only while service_id is set" is checkable.
+  const LinkStub = {
+    props: ["to"],
+    template: `<a data-testid="link" :data-to="JSON.stringify(to)"><slot /></a>`,
+  };
+  const MAPPING = { degraded: "minor", down: "major", unknown: "none" };
+
+  function mountDetail(detail: Record<string, unknown>, updates: unknown[] = []) {
+    apiMock.GET.mockReset();
+    apiMock.POST.mockReset();
+    apiMock.GET.mockImplementation((path: string) => {
+      if (path.endsWith("/updates")) return Promise.resolve({ data: updates });
+      if (path.endsWith("/postmortem")) return Promise.resolve({ error: { error: "not found" } });
+      if (path.includes("/services/") || path.includes("/monitors/")) return Promise.resolve({ data: undefined });
+      return Promise.resolve({ data: detail });
+    });
+    // The acknowledge response is the BASE incident: no basis, no unavailable flag (D15, I11).
+    apiMock.POST.mockImplementation(() =>
+      Promise.resolve({ data: { ...BASE_INCIDENT, ...pickBase(detail), acknowledged_at: "2026-08-17T10:20:00Z" } }),
+    );
+    return mount(IncidentDetailView, { global: { stubs: { RouterLink: LinkStub } } });
+  }
+  function pickBase(detail: Record<string, unknown>) {
+    const { impact_basis: _b, impact_basis_unavailable: _u, impacts: _i, impacts_unavailable: _iu, ...base } = detail;
+    return base;
+  }
+  const basis = (w: ReturnType<typeof mountDetail>) => w.get('[data-testid="incident-impact-basis"]');
+
+  it("service_mapping, service exists: the name links to the service, the state and frozen mapping follow", async () => {
+    const w = mountDetail({
+      ...BASE_INCIDENT,
+      monitor_id: undefined,
+      service_id: "svc1",
+      impact_basis: { source: "service_mapping", mapping: MAPPING, state: "down", service: { name: "Checkout", slug: "checkout" } },
+    });
+    await flushPromises();
+    const line = basis(w);
+    // The mapping is its own block line under the sentence (D-11); the sentence is what precedes it.
+    expect(line.text()).toMatch(/^Major impact — declared by service Checkout for state down/);
+    // The mapping is a block line visually, but copy/paste and screen readers read textContent:
+    // the state and the mapping must not run together as "downmapping".
+    expect(line.element.textContent).toMatch(/for state down\s+mapping frozen at open:/);
+    const link = line.get('[data-testid="link"]');
+    expect(link.text()).toBe("Checkout");
+    expect(JSON.parse(link.attributes("data-to")!)).toEqual({ name: "service", params: { id: "svc1" } });
+    expect(line.get('[data-testid="incident-impact-basis-mapping"]').text()).toBe(
+      "mapping frozen at open: down → major · degraded → minor · unknown → not specified",
+    );
+  });
+
+  it("service_mapping, service deleted: the snapshot name as text, then a muted (deleted)", async () => {
+    const w = mountDetail({
+      ...BASE_INCIDENT,
+      impact: "minor",
+      monitor_id: undefined,
+      service_id: undefined,
+      impact_basis: {
+        source: "service_mapping",
+        mapping: { degraded: "minor", down: "critical", unknown: "none" },
+        state: "degraded",
+        service: { name: "Legacy search", slug: "legacy-search" },
+      },
+    });
+    await flushPromises();
+    const line = basis(w);
+    expect(line.find('[data-testid="link"]').exists()).toBe(false);
+    expect(line.text()).toContain("Minor impact — declared by service Legacy search (deleted) for state degraded");
+    expect(line.get('[data-testid="incident-impact-basis-deleted"]').text()).toBe("(deleted)");
+  });
+
+  it("service_mapping with impact none starts with the phrase, never a bare None", async () => {
+    const w = mountDetail({
+      ...BASE_INCIDENT,
+      impact: "none",
+      service_id: "svc1",
+      impact_basis: { source: "service_mapping", mapping: MAPPING, state: "unknown", service: { name: "Checkout", slug: "checkout" } },
+    });
+    await flushPromises();
+    expect(basis(w).text()).toMatch(/^Impact not specified — declared by service Checkout for state unknown/);
+  });
+
+  it("project_default links 'project default' to Settings → Incidents", async () => {
+    const w = mountDetail({ ...BASE_INCIDENT, impact_basis: { source: "project_default" } });
+    await flushPromises();
+    expect(basis(w).text()).toBe("Major impact — project default for monitor incidents");
+    const link = basis(w).get('[data-testid="link"]');
+    expect(link.text()).toBe("project default");
+    expect(JSON.parse(link.attributes("data-to")!)).toEqual({ name: "settings", query: { tab: "incidents" } });
+  });
+
+  it("manual and alertmanager name their source", async () => {
+    let w = mountDetail({ ...BASE_INCIDENT, impact: "minor", source: "manual", impact_basis: { source: "manual" } });
+    await flushPromises();
+    expect(basis(w).text()).toBe("Minor impact — set by the author when the incident was created");
+    w.unmount();
+
+    w = mountDetail({ ...BASE_INCIDENT, impact: "critical", source: "api", impact_basis: { source: "alertmanager" } });
+    await flushPromises();
+    expect(basis(w).text()).toBe("Critical impact — from the alert's severity label");
+  });
+
+  it("null says the basis was never recorded", async () => {
+    const w = mountDetail({ ...BASE_INCIDENT, impact_basis: null });
+    await flushPromises();
+    expect(basis(w).text()).toBe("Major impact — basis not recorded (opened before impact classification)");
+    expect(basis(w).classes()).not.toContain("border-dashed");
+  });
+
+  it("null with impact_basis_unavailable says the read failed, in a dashed outline", async () => {
+    const w = mountDetail({ ...BASE_INCIDENT, impact_basis: null, impact_basis_unavailable: true });
+    await flushPromises();
+    expect(basis(w).text()).toBe("Major impact — basis unavailable");
+    expect(basis(w).classes()).toContain("border-dashed");
+  });
+
+  it("sits under the meta row, above the impact-link chips", async () => {
+    const w = mountDetail({ ...BASE_INCIDENT, impact_basis: { source: "project_default" }, impacts: [LINK] });
+    await flushPromises();
+    const html = w.html();
+    expect(html.indexOf("started")).toBeLessThan(html.indexOf('data-testid="incident-impact-basis"'));
+    expect(html.indexOf('data-testid="incident-impact-basis"')).toBeLessThan(html.indexOf('data-testid="incident-impacts"'));
+  });
+
+  it("acknowledge() keeps impact_basis — the line does not change after a click (§4.6)", async () => {
+    const w = mountDetail({
+      ...BASE_INCIDENT,
+      service_id: "svc1",
+      impact_basis: { source: "service_mapping", mapping: MAPPING, state: "down", service: { name: "Checkout", slug: "checkout" } },
+    });
+    await flushPromises();
+    const before = basis(w).text();
+    await w.findAll("button").find((b) => b.text() === "Acknowledge")!.trigger("click");
+    await flushPromises();
+    expect(apiMock.POST).toHaveBeenCalledTimes(1);
+    expect(w.text()).toContain("acknowledged");
+    expect(basis(w).text()).toBe(before);
+  });
+
+  it("acknowledge() keeps impact_basis_unavailable", async () => {
+    const w = mountDetail({ ...BASE_INCIDENT, impact_basis: null, impact_basis_unavailable: true });
+    await flushPromises();
+    await w.findAll("button").find((b) => b.text() === "Acknowledge")!.trigger("click");
+    await flushPromises();
+    expect(basis(w).text()).toBe("Major impact — basis unavailable");
+  });
+
+  it("prints impact none as 'Not specified' on the badge", async () => {
+    const w = mountDetail({ ...BASE_INCIDENT, impact: "none", impact_basis: null });
+    await flushPromises();
+    const badge = w.get('[data-testid="incident-impact-badge"]');
+    expect(badge.text()).toBe("Not specified");
+    expect(w.text()).not.toMatch(/\bNone\b/);
+  });
+
+  it("renders an Impact raised note like the other system notes", async () => {
+    const w = mountDetail({ ...BASE_INCIDENT, impact_basis: null }, [
+      {
+        id: "u1",
+        status: "investigating",
+        body: "⬆ Impact raised: none → minor — the service is degraded.",
+        created_at: "2026-08-17T10:30:00Z",
+      },
+    ]);
+    await flushPromises();
+    const note = w.get('[data-testid="incident-update-system-note"]');
+    expect(note.attributes("data-note")).toBe("impact_raised");
+    expect(note.find("p.font-mono").text()).toBe("⬆ Impact raised: none → minor — the service is degraded.");
+  });
+});

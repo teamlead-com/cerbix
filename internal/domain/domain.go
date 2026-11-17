@@ -72,12 +72,15 @@ type Organization struct {
 
 // Project belongs to an organization and is the primary unit of permissions.
 type Project struct {
-	ID        string    `json:"id"`
-	OrgID     string    `json:"org_id"`
-	Slug      string    `json:"slug"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID    string `json:"id"`
+	OrgID string `json:"org_id"`
+	Slug  string `json:"slug"`
+	Name  string `json:"name"`
+	// DefaultIncidentImpact is the impact this project's monitor auto-incidents open with
+	// (FR-042 §4.4). Set through PATCH /projects/{id}; never from Monitoring-as-Code (D14).
+	DefaultIncidentImpact IncidentImpact `json:"default_incident_impact"`
+	CreatedAt             time.Time      `json:"created_at"`
+	UpdatedAt             time.Time      `json:"updated_at"`
 }
 
 // User is a cerbix account provisioned from OIDC on first login.

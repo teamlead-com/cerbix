@@ -280,7 +280,8 @@ func TestServiceAlertPolicyCanonical(t *testing.T) {
 		}
 	}
 
-	// Canonicalization touches page_on and NOTHING else: it is a spelling rule, not a policy edit.
+	// Canonicalization touches page_on and the unstated impact mapping (which it resolves to the D6
+	// defaults) and NOTHING else: it is a spelling rule, not a policy edit.
 	// Silently repairing an out-of-range confirm_evaluations here would let an invalid declaration
 	// reach the database through a validator that never saw it.
 	in := ServiceAlertPolicy{OwnsPaging: true, PageOn: []ServiceAlertState{ServiceAlertDown},

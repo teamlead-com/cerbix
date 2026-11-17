@@ -1843,3 +1843,85 @@ func TestAnArmThatNeverSucceedsWedgesOnlyAfterTheBound(t *testing.T) {
 		t.Fatal("an arm that has never succeeded left the scheduler ready past its bound")
 	}
 }
+
+// FR-042 D20 — the live pass's log line is emitted when a rise happened, even if nothing else did.
+func TestServiceAlertPassLogPredicate(t *testing.T) {
+	cadence := serviceAlertEvery
+	cases := []struct {
+		name string
+		ev   store.ServiceAlertEvaluation
+		want bool
+	}{
+		{"a rise alone", store.ServiceAlertEvaluation{IncidentsRaised: 1}, true},
+		{"nothing, lag under the cadence", store.ServiceAlertEvaluation{Lag: cadence - time.Second}, false},
+		{"nothing at all", store.ServiceAlertEvaluation{}, false},
+		{"an onset", store.ServiceAlertEvaluation{Onsets: 1}, true},
+		{"a close", store.ServiceAlertEvaluation{Closes: 1}, true},
+		{"an error", store.ServiceAlertEvaluation{Errors: 1}, true},
+		{"a withheld onset", store.ServiceAlertEvaluation{Withheld: map[string]int{store.WithheldUnroutable: 1}}, true},
+		{"lag over the cadence", store.ServiceAlertEvaluation{Lag: cadence + time.Second}, true},
+	}
+	for _, c := range cases {
+		if got := serviceAlertPassWorthLogging(c.ev, cadence); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// lockedBuffer is a log sink the leader goroutine writes while the test reads.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// FR-042 D20 — through the real leader loop: a pass whose only news is a rise is logged, and the
+// line says so.
+func TestARiseAloneIsLogged(t *testing.T) {
+	fs := &fakeStore{leader: true, alertEval: store.ServiceAlertEvaluation{Evaluated: 1, IncidentsRaised: 1}}
+	logs := &lockedBuffer{}
+	s := New(fs, dispatch.NewInProc(1), slog.New(slog.NewTextHandler(logs, nil)))
+	s.tick = 15 * time.Millisecond
+	s.retry = 15 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	deadline := time.After(5 * time.Second)
+	for !strings.Contains(logs.String(), "service_alerts_evaluated") {
+		select {
+		case <-deadline:
+			t.Fatalf("a pass whose only news was a rise was never logged:\n%s", logs.String())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	var line string
+	for _, l := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(l, "service_alerts_evaluated") {
+			line = l
+			break
+		}
+	}
+	if !strings.Contains(line, "incidents_raised=1") {
+		t.Fatalf("the line does not say a rise happened: %s", line)
+	}
+}

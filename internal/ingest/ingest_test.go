@@ -599,7 +599,7 @@ func TestReconcilerClosesIncidentOnPendingToUp(t *testing.T) {
 	// Seed an open auto-incident (as if opened before a disable), then recover as pending→up.
 	if _, err := fs.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: "p1", MonitorID: "m1", Title: "down", Status: domain.IncidentInvestigating,
-		Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+		Source: domain.SourceAuto,
 	}, "auto opened", "system"); err != nil {
 		t.Fatalf("seed incident: %v", err)
 	}
@@ -831,7 +831,7 @@ func TestReconcilerResolvingUpdateCarriesTheRecoverySentence(t *testing.T) {
 			ctx := context.Background()
 			inc, err := fs.CreateIncidentBySystem(ctx, domain.Incident{
 				ProjectID: "p1", MonitorID: "m1", Title: "api is down", Status: domain.IncidentInvestigating,
-				Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+				Source: domain.SourceAuto,
 			}, "Automatically opened: the monitor is failing its checks.", autoIncidentAuthor)
 			if err != nil {
 				t.Fatal(err)
@@ -846,5 +846,22 @@ func TestReconcilerResolvingUpdateCarriesTheRecoverySentence(t *testing.T) {
 				t.Fatalf("resolving body = %q, want %q", ups[1].Body, c.want)
 			}
 		})
+	}
+}
+
+// FR-042 §4.2 — the reconciler states no impact: the project's default is read in the inserting
+// statement, so the number a monitor incident opens at is not decided here.
+func TestTheReconcilerLeavesTheImpactToTheProjectDefault(t *testing.T) {
+	fs := newFakeStore()
+	fs.monitors["m1"] = domain.Monitor{ID: "m1", ProjectID: "p1", Name: "api", AutoIncident: true}
+	rc := NewReconciler(fs, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rc.Reconcile(context.Background(), domain.Heartbeat{MonitorID: "m1"}, domain.StatusUp, domain.StatusDown, false, nil)
+	if len(fs.incidents) != 1 {
+		t.Fatalf("incidents = %d, want 1", len(fs.incidents))
+	}
+	for _, inc := range fs.incidents {
+		if inc.Impact != "" || inc.Source != domain.SourceAuto || inc.MonitorID != "m1" {
+			t.Errorf("recorded create = %+v, want empty impact, source auto, monitor m1", inc)
+		}
 	}
 }

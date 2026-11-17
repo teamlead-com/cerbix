@@ -68,4 +68,7 @@ type IncidentEvent struct {
 	//
 	// Absent (0) on payloads written before the fence existed. Those predate the contract.
 	Seq int64 `json:"seq,omitempty"`
+	// ImpactRaised is present only on an event that reports an impact raise (FR-042 §4.3 step 5, D16):
+	// the from/to pair. Additive and optional, so a receiver that does not know it loses nothing.
+	ImpactRaised *ImpactRaise `json:"impact_raised,omitempty"`
 }

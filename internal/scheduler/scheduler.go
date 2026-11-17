@@ -1505,12 +1505,13 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					})
 					// Logged whenever anything happened OR anything is behind: a stalled evaluator
 					// has to read as lag rather than as an absence of alerts, which is
-					// indistinguishable from "nothing is wrong" (§16.7).
-					if ev.Onsets > 0 || ev.Closes > 0 || ev.Errors > 0 || len(ev.Withheld) > 0 ||
-						ev.Lag > serviceAlertEvery {
+					// indistinguishable from "nothing is wrong" (§16.7). A rise is news too (FR-042
+					// D20): it has no metric, so this line is where it shows.
+					if serviceAlertPassWorthLogging(ev, serviceAlertEvery) {
 						s.logger.Info("service_alerts_evaluated", "evaluated", ev.Evaluated,
 							"onsets", ev.Onsets, "closes", ev.Closes, "errors", ev.Errors,
 							"incidents_opened", ev.IncidentsOpened, "incidents_resolved", ev.IncidentsResolved,
+							"incidents_raised", ev.IncidentsRaised,
 							"lag_seconds", int(ev.Lag.Seconds()))
 					}
 				})
@@ -2540,4 +2541,10 @@ func (s *Scheduler) publishPending(ctx context.Context, st publishState) map[str
 		}
 	}
 	return held
+}
+
+// serviceAlertPassWorthLogging: anything happened, or anything is behind (§16.7), or a rise (D20).
+func serviceAlertPassWorthLogging(ev store.ServiceAlertEvaluation, cadence time.Duration) bool {
+	return ev.Onsets > 0 || ev.Closes > 0 || ev.Errors > 0 || len(ev.Withheld) > 0 ||
+		ev.Lag > cadence || ev.IncidentsRaised > 0
 }

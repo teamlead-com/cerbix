@@ -724,3 +724,156 @@ func TestSetServiceEscalationPolicy(t *testing.T) {
 		}
 	})
 }
+
+// ── FR-042 §4.4: the impact mapping on the alerting API ──────────────────────
+
+func storedMapping(fs *fakeStore, id string) domain.ImpactMapping {
+	return fs.serviceStore()[id].alertPolicy().ImpactByState
+}
+
+func TestPatchServiceAlertingLeavesAnAbsentMappingAlone(t *testing.T) {
+	fs := seededStore()
+	h := newHandler(fs)
+	custom := domain.ImpactMapping{Degraded: domain.ImpactMinor, Down: domain.ImpactCritical, Unknown: domain.ImpactNone}
+	id := seedAlertingService(fs, "p1", &domain.ServiceAlertPolicy{
+		OwnsPaging: true, PageOn: []domain.ServiceAlertState{domain.ServiceAlertDown},
+		ConfirmEvaluations: 2, ImpactByState: custom,
+	}, false)
+	rec := do(h, p1Editor, http.MethodPatch, alertingPath("p1", id), `{"confirm_evaluations":4}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH = %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := storedMapping(fs, id); got != custom {
+		t.Errorf("an absent impact_by_state changed the mapping: %+v", got)
+	}
+	if !strings.Contains(rec.Body.String(), `"down":"critical"`) {
+		t.Errorf("the echo lost the stored mapping: %s", rec.Body.String())
+	}
+}
+
+func TestPatchServiceAlertingTakesAFullMapping(t *testing.T) {
+	fs := seededStore()
+	h := newHandler(fs)
+	id := seedAlertingService(fs, "p1", nil, false)
+	rec := do(h, p1Editor, http.MethodPatch, alertingPath("p1", id),
+		`{"impact_by_state":{"degraded":"minor","down":"critical","unknown":"none"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH = %d: %s", rec.Code, rec.Body.String())
+	}
+	want := domain.ImpactMapping{Degraded: domain.ImpactMinor, Down: domain.ImpactCritical, Unknown: domain.ImpactNone}
+	if got := storedMapping(fs, id); got != want {
+		t.Errorf("fake holds %+v, want %+v", got, want)
+	}
+	var echo struct {
+		ImpactByState domain.ImpactMapping `json:"impact_by_state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &echo); err != nil || echo.ImpactByState != want {
+		t.Errorf("echo = %+v (%v), want %+v", echo.ImpactByState, err, want)
+	}
+}
+
+// D18: present means all three keys; anything else is a 400 before the store.
+func TestPatchServiceAlertingRefusesAnIncompleteMapping(t *testing.T) {
+	for name, body := range map[string]string{
+		"partial":       `{"impact_by_state":{"down":"critical"}}`,
+		"unknown key":   `{"impact_by_state":{"degraded":"minor","down":"major","unknown":"none","other":"none"}}`,
+		"null":          `{"impact_by_state":null}`,
+		"a null value":  `{"impact_by_state":{"degraded":null,"down":"major","unknown":"none"}}`,
+		"bad impact":    `{"impact_by_state":{"degraded":"minor","down":"severe","unknown":"none"}}`,
+		"an array":      `{"impact_by_state":["minor","major","none"]}`,
+		"an empty obj":  `{"impact_by_state":{}}`,
+		"a string":      `{"impact_by_state":"major"}`,
+		"an empty text": `{"impact_by_state":{"degraded":"","down":"major","unknown":"none"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := seededStore()
+			h := newHandler(fs)
+			id := seedAlertingService(fs, "p1", nil, false)
+			rec := do(h, p1Editor, http.MethodPatch, alertingPath("p1", id), body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("PATCH %s = %d, want 400: %s", body, rec.Code, rec.Body.String())
+			}
+			if w := fs.serviceStore()[id].alertWrites; w != 0 {
+				t.Errorf("a refused mapping reached the store %d times", w)
+			}
+		})
+	}
+}
+
+// A null as the VALUE of a key is a type error naming that key, not an empty impact and not a
+// generic refusal, and the store is never reached.
+func TestPatchServiceAlertingRefusesANullKeyValueByName(t *testing.T) {
+	fs := seededStore()
+	id := seedAlertingService(fs, "p1", nil, false)
+	rec := do(newHandler(fs), p1Editor, http.MethodPatch, alertingPath("p1", id),
+		`{"impact_by_state":{"degraded":null,"down":"major","unknown":"none"}}`)
+	var e struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusBadRequest || e.Error != "impact_by_state.degraded must be a string" {
+		t.Fatalf("PATCH = %d %q, want 400 \"impact_by_state.degraded must be a string\"", rec.Code, e.Error)
+	}
+	if w := fs.serviceStore()[id].alertWrites; w != 0 {
+		t.Errorf("the store was called %d times", w)
+	}
+}
+
+// Several unknown keys name the first in sorted order, every time.
+func TestPatchServiceAlertingNamesTheSameUnknownKeyEveryTime(t *testing.T) {
+	body := `{"impact_by_state":{"degraded":"minor","down":"major","unknown":"none","zeta":"none","alpha":"none","mid":"none"}}`
+	for i := 0; i < 20; i++ {
+		fs := seededStore()
+		id := seedAlertingService(fs, "p1", nil, false)
+		rec := do(newHandler(fs), p1Editor, http.MethodPatch, alertingPath("p1", id), body)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `unknown key \"alpha\"`) {
+			t.Fatalf("run %d: %d %s, want 400 naming alpha", i, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestServiceAlertingRefusesAFileManagedMappingPatch(t *testing.T) {
+	fs := seededStore()
+	h := newHandler(fs)
+	id := seedAlertingService(fs, "p1", nil, false)
+	fs.serviceStore()[id].fileManaged = true
+	rec := do(h, p1Editor, http.MethodPatch, alertingPath("p1", id),
+		`{"impact_by_state":{"degraded":"minor","down":"critical","unknown":"none"}}`)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "managed_by_file") {
+		t.Fatalf("PATCH = %d %q, want 409 managed_by_file", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTheAlertingViewsCarryTheResolvedMapping(t *testing.T) {
+	fs := seededStore()
+	h := newHandler(fs)
+	id := seedAlertingService(fs, "p1", nil, false)
+	want := domain.DefaultImpactMapping()
+	check := func(t *testing.T, m map[string]domain.IncidentImpact) {
+		t.Helper()
+		if len(m) != 3 || m["degraded"] != want.Degraded || m["down"] != want.Down || m["unknown"] != want.Unknown {
+			t.Errorf("impact_by_state = %v, want the defaults %+v", m, want)
+		}
+	}
+	rec := do(h, p1Editor, http.MethodGet, alertingPath("p1", id), "")
+	var a struct {
+		ImpactByState map[string]domain.IncidentImpact `json:"impact_by_state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &a); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+	}
+	check(t, a.ImpactByState)
+
+	rec = do(h, p1Editor, http.MethodGet, "/api/v1/projects/p1/services/"+id, "")
+	var d struct {
+		Alerting struct {
+			ImpactByState map[string]domain.IncidentImpact `json:"impact_by_state"`
+		} `json:"alerting"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+	}
+	check(t, d.Alerting.ImpactByState)
+}

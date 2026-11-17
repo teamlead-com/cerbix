@@ -30,6 +30,7 @@ type Store interface {
 	ListProjectsByOrg(ctx context.Context, orgID string) ([]domain.Project, error)
 	CreateProject(ctx context.Context, orgID, slug, name string) (domain.Project, error)
 	GetProject(ctx context.Context, id string) (domain.Project, error)
+	SetProjectDefaultIncidentImpact(ctx context.Context, projectID string, impact domain.IncidentImpact, actor store.AuditActor) (domain.Project, error)
 	DeleteProject(ctx context.Context, orgID, projectID string) error
 	CreateMembership(ctx context.Context, m domain.Membership) (domain.Membership, error)
 	ListOrgMembers(ctx context.Context, orgID string) ([]domain.Member, error)
@@ -109,7 +110,7 @@ type Store interface {
 	// API's own contract and made every fake implement it. What stood above this line described the
 	// exemption that used to excuse the receiver by name; the exemption was removed when it turned
 	// out to be hiding a real defect, and the sentence outlived it by a release.
-	CreateIncidentByPrincipal(ctx context.Context, inc domain.Incident, openingBody, author string, actor store.AuditActor) (domain.Incident, error)
+	CreateIncidentByPrincipal(ctx context.Context, inc domain.Incident, basis domain.ImpactBasisSource, openingBody, author string, actor store.AuditActor) (domain.Incident, error)
 	GetIncident(ctx context.Context, id string) (domain.Incident, error)
 	AcknowledgeIncidentByPrincipal(ctx context.Context, id, by string, actor store.AuditActor) (domain.Incident, error)
 	CreateEscalationPolicy(ctx context.Context, p domain.EscalationPolicy) (domain.EscalationPolicy, error)
@@ -259,6 +260,8 @@ type Store interface {
 	CreateServiceWithDependencies(ctx context.Context, svc domain.Service, parents []string, actor store.GraphActor) (domain.Service, error)
 	ServiceNeighbourHealth(ctx context.Context, projectID string, serviceIDs []string) (map[string]domain.ServiceHealthNow, error)
 	ListIncidentImpacts(ctx context.Context, projectID, incidentID string) ([]domain.ServiceImpactLink, error)
+	// IncidentImpactBasis is the basis of an incident's impact (FR-042 D15): its own read, project-scoped.
+	IncidentImpactBasis(ctx context.Context, projectID, incidentID string) (*domain.ImpactBasis, error)
 	SetServiceEscalationPolicy(ctx context.Context, projectID, serviceID, policyID string, actor store.AlertActor) (string, error)
 	IncidentMemberSnapshot(ctx context.Context, incidentID string) ([]domain.IncidentMember, bool, error)
 
@@ -631,6 +634,7 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("DELETE /api/v1/projects/{projectID}/members/{membershipID}", h.removeProjectMember)
 	mux.HandleFunc("GET /api/v1/organizations/{orgID}/audit", h.listAudit)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}", h.getProject)
+	mux.HandleFunc("PATCH /api/v1/projects/{projectID}", h.patchProject)
 	mux.HandleFunc("DELETE /api/v1/projects/{projectID}", h.deleteProject)
 	mux.HandleFunc("GET /api/v1/regions", h.listRegions)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/monitors", h.listMonitors)

@@ -1,6 +1,6 @@
 # func-incident-impact — an incident's impact is declared by its Service, derived by the machine, and only rises (FR-042 / NFR-035)
 
-> **STATUS: revision 4 — APPROVED by the owner on 2026-11-16; not implemented.** The author's calls
+> **STATUS: revision 4 — APPROVED by the owner on 2026-11-16. Implemented in [iter-0215](../iterations/iter-0215.md) / [D-0282](../decisions.md).** The author's calls
 > of §3 (D8–D11, D13–D15, D19, D20) are approved with it. Next: the SPA mock of §8 for the owner's
 > approval, then the implementation. Revision 4 (2026-11-16) answers the second external
 > review (CHANGES REQUIRED, P0 0 / P1 3 / P2 2 / P3 2, all in text revision 3 added — §11): the rise

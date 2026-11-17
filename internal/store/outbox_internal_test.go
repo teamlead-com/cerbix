@@ -51,13 +51,10 @@ func TestIncidentEnqueuesOutboxInTx(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening", "author")
-	if err != nil {
-		t.Fatalf("create incident: %v", err)
-	}
+	})
 	// FENCED, not legacy-pending: D-0177's ordering lives in the claim, so a pre-fence worker running
 	// the old claim must not be able to see these rows at all. That is what the class buys, and it is
 	// worth asserting rather than assuming.
@@ -199,13 +196,10 @@ func TestAWriteThatRacedAResolveIsRefusedWithoutATrace(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening", "author")
-	if err != nil {
-		t.Fatalf("create incident: %v", err)
-	}
+	})
 	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentResolved, Body: "fixed", Author: "first",
 	}); err != nil {
@@ -216,7 +210,7 @@ func TestAWriteThatRacedAResolveIsRefusedWithoutATrace(t *testing.T) {
 	timeline := incidentUpdateCount(t, st, ctx, inc.ID)
 
 	// The loser of the race: it read `investigating` before the resolve committed.
-	_, err = st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
+	_, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentInvestigating, Body: "still looking", Author: "second",
 	})
 	if !errors.Is(err, ErrIncidentTerminal) {
@@ -283,13 +277,10 @@ func TestAnIncidentCannotWalkBackwardsThroughItsLifecycle(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening", "author")
-	if err != nil {
-		t.Fatalf("create incident: %v", err)
-	}
+	})
 	post := func(status domain.IncidentStatus, body string) error {
 		_, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 			IncidentID: inc.ID, Status: status, Body: body, Author: "author",
@@ -339,13 +330,10 @@ func TestAPlainCommentTakesTheStatusItLandsOnNotTheOneItRead(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening", "author")
-	if err != nil {
-		t.Fatalf("create incident: %v", err)
-	}
+	})
 
 	// The commenter has read `investigating` — that read is the whole setup, and it is why the old
 	// handler would have sent that value back.
@@ -388,13 +376,10 @@ func TestAWaitingWriterStampsItsUpdateAfterTheWait(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening", "author")
-	if err != nil {
-		t.Fatalf("create incident: %v", err)
-	}
+	})
 
 	// Hold the INCIDENT row — not the service, not a table lock. That is the row the writer must
 	// wait for, and a timestamp taken before this is released is a timestamp from the past.
@@ -471,26 +456,20 @@ func TestAnIncidentCreatedResolvedIsStampedAndStaysVisible(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "yesterday's outage", Status: domain.IncidentResolved,
 		Impact: domain.ImpactMinor, Source: domain.SourceManual,
-	}, "recorded after the fact", "author")
-	if err != nil {
-		t.Fatalf("create resolved incident: %v", err)
-	}
+	})
 	if inc.ResolvedAt == nil {
 		t.Fatal("an incident created as resolved has no resolved_at: it is invisible to the active " +
 			"list AND to the recent list")
 	}
 	// And an ordinary open incident is NOT stamped — the stamp means "reached Resolved", not
 	// "was written".
-	open, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	open := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "live", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening", "author")
-	if err != nil {
-		t.Fatalf("create open incident: %v", err)
-	}
+	})
 	if open.ResolvedAt != nil {
 		t.Fatalf("an investigating incident carries resolved_at %v", open.ResolvedAt)
 	}
@@ -503,13 +482,10 @@ func TestAWaitingAcknowledgementStampsAfterItsWait(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
-		Impact: domain.ImpactMajor, Source: domain.SourceAuto,
-	}, "opening", "system")
-	if err != nil {
-		t.Fatalf("create incident: %v", err)
-	}
+		Impact: domain.ImpactMajor, Source: domain.SourceManual,
+	})
 
 	hold, err := st.pool.Begin(ctx)
 	if err != nil {
@@ -555,13 +531,10 @@ func TestAnIncidentsEventsAreClaimedInOrder(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening", "author")
-	if err != nil {
-		t.Fatalf("create incident: %v", err)
-	}
+	})
 	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentResolved, Body: "fixed", Author: "author",
 	}); err != nil {
@@ -637,13 +610,10 @@ func TestADeadPredecessorHoldsTheIncidentStream(t *testing.T) {
 	st, ctx := outboxTestStore(t)
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening", "author")
-	if err != nil {
-		t.Fatalf("create incident: %v", err)
-	}
+	})
 	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: inc.ID, Status: domain.IncidentResolved, Body: "fixed", Author: "author",
 	}); err != nil {
@@ -679,20 +649,14 @@ func TestAClaimIsOrderedByWhenTheEventWasDueNotByItsNewLease(t *testing.T) {
 
 	// Two unrelated events so the causal predicate does not order them for us: the OLDER one has
 	// already been attempted, which is exactly what earns it the longer next lease.
-	older, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	older := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "older", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening", "author")
-	if err != nil {
-		t.Fatalf("older incident: %v", err)
-	}
-	newer, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	})
+	newer := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "newer", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening", "author")
-	if err != nil {
-		t.Fatalf("newer incident: %v", err)
-	}
+	})
 	if _, err := st.pool.Exec(ctx, `
 		UPDATE outbox_events SET attempts = 1, next_attempt_at = now() - interval '2 minutes'
 		 WHERE payload -> 'incident' ->> 'id' = $1`, older.ID); err != nil {
@@ -785,13 +749,10 @@ func TestEveryLifecycleEventCarriesAUniqueMonotonicSequence(t *testing.T) {
 	org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 	proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, Title: "down", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening", "author")
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
+	})
 	for _, st2 := range []domain.IncidentStatus{domain.IncidentIdentified, domain.IncidentMonitoring, domain.IncidentResolved} {
 		if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 			IncidentID: inc.ID, Status: st2, Body: string(st2), Author: "author",
@@ -851,7 +812,7 @@ func TestServiceAutoIncidentPathsCarryTheSameSequence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	inc, created, err := st.OpenServiceIncidentTx(ctx, tx, svc.ID, proj.ID, "Checkout is down", 3, nil)
+	inc, created, err := st.OpenServiceIncidentTx(ctx, tx, svc.ID, proj.ID, "Checkout is down", domain.ServiceAlertDown, domain.DefaultImpactMapping(), 3, nil)
 	if err != nil {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("open: %v", err)

@@ -91,11 +91,13 @@ func applyServiceAlertingTx(
 	var before domain.ServiceAlertPolicy
 	var pageOn []string
 	var slug string
+	var rawImpact []byte
 	err := tx.QueryRow(ctx, `
-		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds, slug
+		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds, slug,
+		       impact_by_state
 		  FROM services WHERE id = $1 AND project_id = $2 FOR UPDATE`, serviceID, projectID).
 		Scan(&before.OwnsPaging, &pageOn, &before.PageOnUnknown, &before.ConfirmEvaluations,
-			&before.RenotifySeconds, &slug)
+			&before.RenotifySeconds, &slug, &rawImpact)
 	if noRows(err) {
 		return false, ErrNotFound
 	}
@@ -104,6 +106,9 @@ func applyServiceAlertingTx(
 	}
 	for _, state := range pageOn {
 		before.PageOn = append(before.PageOn, domain.ServiceAlertState(state))
+	}
+	if before.ImpactByState, err = impactMappingFromColumn(rawImpact); err != nil {
+		return false, err
 	}
 	// The stored value is canonicalized for the comparison too, so a re-spelling of the same
 	// declaration is never read as a policy change that closes a firing announcement.
@@ -165,14 +170,21 @@ func applyServiceAlertingTx(
 		}
 	}
 
-	// ── The write. Five columns, and never `alert_config_generation`: the trigger owns it. ────
+	impactColumn, err := impactMappingColumn(next.ImpactByState)
+	if err != nil {
+		return false, err
+	}
+
+	// ── The write. Six columns, and never `alert_config_generation`: the trigger owns it. ─────
+	// `impact_by_state` is the sixth: a mapping edit changes what an incident is GRADED as, never
+	// who is paged, so the generation trigger does not watch it and no epoch or revision is written.
 	if _, err := tx.Exec(ctx, `
 		UPDATE services
 		   SET owns_paging = $3, page_on = $4, page_on_unknown = $5, confirm_evaluations = $6,
-		       renotify_seconds = $7, updated_at = now()
+		       renotify_seconds = $7, impact_by_state = $8::jsonb, updated_at = now()
 		 WHERE id = $1 AND project_id = $2`,
 		serviceID, projectID, next.OwnsPaging, pageOnText(next.PageOn), next.PageOnUnknown,
-		next.ConfirmEvaluations, next.RenotifySeconds); err != nil {
+		next.ConfirmEvaluations, next.RenotifySeconds, impactColumn); err != nil {
 		return false, fmt.Errorf("store: write file alerting declaration: %w", err)
 	}
 
@@ -196,11 +208,13 @@ func alertPolicyMatchesTx(
 ) (bool, error) {
 	var have domain.ServiceAlertPolicy
 	var pageOn []string
+	var rawImpact []byte
 	err := tx.QueryRow(ctx, `
-		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds
+		SELECT owns_paging, page_on, page_on_unknown, confirm_evaluations, renotify_seconds,
+		       impact_by_state
 		  FROM services WHERE id = $1 AND project_id = $2`, serviceID, projectID).
 		Scan(&have.OwnsPaging, &pageOn, &have.PageOnUnknown, &have.ConfirmEvaluations,
-			&have.RenotifySeconds)
+			&have.RenotifySeconds, &rawImpact)
 	if noRows(err) {
 		return false, ErrNotFound
 	}
@@ -209,6 +223,9 @@ func alertPolicyMatchesTx(
 	}
 	for _, state := range pageOn {
 		have.PageOn = append(have.PageOn, domain.ServiceAlertState(state))
+	}
+	if have.ImpactByState, err = impactMappingFromColumn(rawImpact); err != nil {
+		return false, err
 	}
 	return alertPolicyDiff(have.Canonical(), want) == "", nil
 }

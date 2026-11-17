@@ -73,6 +73,11 @@ const (
 	IncidentAuditPostmortem  IncidentAuditAction = "incident.postmortem"
 )
 
+// ProjectAuditDefaultIncidentImpact is the audit action of a project's default-impact write
+// (FR-042 §4.4). It is a project setting, not an incident write, so it sits outside the five-word
+// IncidentAuditAction vocabulary.
+const ProjectAuditDefaultIncidentImpact = "project.default_incident_impact"
+
 // insertIncidentAudit writes the row inside the caller's transaction (D2), resolving the tenant from
 // the project rather than taking it as a parameter (D6): the organization owns this table, and an
 // incident keeps its project even after a service deletion clears its anchor, so a project-level

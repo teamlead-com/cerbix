@@ -106,7 +106,7 @@ func escalatingRecoveryMonitor(t *testing.T, st *Store, ctx context.Context, slu
 	m.feed(false)
 	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: projectID, MonitorID: m.ID, Title: slug + " is down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+		Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 	}, "auto opened", "system")
 	if err != nil {
 		t.Fatalf("incident: %v", err)
@@ -326,7 +326,7 @@ func TestRecoveryFirstOKFollowsTheIncidentOnTheSequentialPath(t *testing.T) {
 	m.feed(false)
 	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: projectID, MonitorID: m.ID, Title: "rt-seq is down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+		Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 	}, "auto opened", "system")
 	if err != nil {
 		t.Fatal(err)

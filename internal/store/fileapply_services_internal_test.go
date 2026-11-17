@@ -881,3 +881,157 @@ func TestRemovingTheAlertingBlockRestoresTheDeclaredDefault(t *testing.T) {
 		t.Fatalf("removing the block converged to %+v, want the default %+v", got, want)
 	}
 }
+
+// FR-042 §4.4 — a service's impact mapping from a file.
+func impactBundle(mapping string) string {
+	return svcBundle + "    alerting:\n      impact_by_state:\n" + mapping
+}
+
+func mappingServiceID(t *testing.T, st *Store, ctx context.Context, projID string) string {
+	t.Helper()
+	var id string
+	if err := st.pool.QueryRow(ctx, `SELECT id FROM services WHERE project_id = $1`, projID).Scan(&id); err != nil {
+		t.Fatalf("read service: %v", err)
+	}
+	return id
+}
+
+func impactColumnOf(t *testing.T, st *Store, ctx context.Context, id string) (raw *string) {
+	t.Helper()
+	if err := st.pool.QueryRow(ctx, `SELECT impact_by_state::text FROM services WHERE id = $1`, id).Scan(&raw); err != nil {
+		t.Fatalf("read impact_by_state: %v", err)
+	}
+	return raw
+}
+
+// alertingAuditTargets lists this service's `service.alerting` audit targets, oldest first.
+// audit_logs.id is a RANDOM uuid, so it cannot order rows (it made this test fail in plain-Postgres
+// mode); created_at is the commit-order clock, with id only as a tie-break.
+func alertingAuditTargets(t *testing.T, st *Store, ctx context.Context, serviceID string) []string {
+	t.Helper()
+	rows, err := st.pool.Query(ctx, `SELECT target FROM audit_logs
+		  WHERE action = 'service.alerting' AND target LIKE $1
+		  ORDER BY created_at, id`, "service="+serviceID+" %")
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func TestAMappingOnlyBundleEditIsApplied(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	applyServiceBundle(t, st, ctx, impactBundle("        down: critical\n"))
+	id := mappingServiceID(t, st, ctx, projID)
+	before := len(alertingAuditTargets(t, st, ctx, id))
+
+	applyServiceBundle(t, st, ctx, impactBundle("        down: critical\n        degraded: major\n"))
+
+	raw := impactColumnOf(t, st, ctx, id)
+	if raw == nil || !strings.Contains(*raw, `"degraded": "major"`) {
+		t.Fatalf("column = %v, want the second mapping", raw)
+	}
+	targets := alertingAuditTargets(t, st, ctx, id)
+	if len(targets) != before+1 {
+		t.Fatalf("audit rows %d -> %d, want exactly one new", before, len(targets))
+	}
+	if len(targets) != 2 {
+		t.Fatalf("want exactly two service.alerting rows for this service, got %d: %q", len(targets), targets)
+	}
+	if !strings.Contains(targets[0], "degraded=minor,down=major,unknown=none→degraded=minor,down=critical,unknown=none") {
+		t.Fatalf("first apply audit target = %q", targets[0])
+	}
+	last := targets[len(targets)-1]
+	if !strings.Contains(last, "provider=file:") ||
+		!strings.Contains(last, "impact_by_state:") ||
+		!strings.Contains(last, "degraded=minor,down=critical,unknown=none→degraded=major,down=critical,unknown=none") {
+		t.Fatalf("audit target = %q", last)
+	}
+}
+
+func TestAMappingFileEditWritesNoRevisionNoEpochNoGenerationBump(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	applyServiceBundle(t, st, ctx, svcBundle)
+	id := mappingServiceID(t, st, ctx, projID)
+	counts := func() (rev, epoch, gen int64) {
+		t.Helper()
+		if err := st.pool.QueryRow(ctx, `
+			SELECT (SELECT count(*) FROM service_definition_revisions WHERE service_id = $1),
+			       (SELECT count(*) FROM service_evaluation_epochs WHERE service_id = $1),
+			       (SELECT alert_config_generation FROM services WHERE id = $1)`, id).Scan(&rev, &epoch, &gen); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	r0, e0, g0 := counts()
+	applyServiceBundle(t, st, ctx, impactBundle("        down: critical\n"))
+	if raw := impactColumnOf(t, st, ctx, id); raw == nil {
+		t.Fatal("the mapping did not reach the column")
+	}
+	r1, e1, g1 := counts()
+	if r1 != r0 || e1 != e0 || g1 != g0 {
+		t.Fatalf("revisions %d->%d epochs %d->%d generation %d->%d, want all unchanged", r0, r1, e0, e1, g0, g1)
+	}
+}
+
+func TestRemovingImpactByStateFromTheFileRestoresTheDefaults(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	applyServiceBundle(t, st, ctx, impactBundle("        down: critical\n"))
+	id := mappingServiceID(t, st, ctx, projID)
+	if impactColumnOf(t, st, ctx, id) == nil {
+		t.Fatal("custom mapping not stored")
+	}
+	applyServiceBundle(t, st, ctx, svcBundle)
+	if raw := impactColumnOf(t, st, ctx, id); raw != nil {
+		t.Fatalf("column = %s, want NULL", *raw)
+	}
+}
+
+func TestReapplyingAnUnchangedMappingWritesNothing(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	b := impactBundle("        down: critical\n")
+	applyServiceBundle(t, st, ctx, b)
+	id := mappingServiceID(t, st, ctx, projID)
+	var u0 time.Time
+	if err := st.pool.QueryRow(ctx, `SELECT updated_at FROM services WHERE id = $1`, id).Scan(&u0); err != nil {
+		t.Fatal(err)
+	}
+	n0 := len(alertingAuditTargets(t, st, ctx, id))
+	applyServiceBundle(t, st, ctx, b)
+	var u1 time.Time
+	if err := st.pool.QueryRow(ctx, `SELECT updated_at FROM services WHERE id = $1`, id).Scan(&u1); err != nil {
+		t.Fatal(err)
+	}
+	if !u1.Equal(u0) || len(alertingAuditTargets(t, st, ctx, id)) != n0 {
+		t.Fatalf("a re-apply wrote: updated_at %v -> %v, audit rows %d -> %d", u0, u1, n0, len(alertingAuditTargets(t, st, ctx, id)))
+	}
+}
+
+func TestTheUIPatchOfAFileManagedMappingIsRefused(t *testing.T) {
+	st, ctx := serviceSchemaStore(t)
+	_, projID := seedTenant(t, st, ctx)
+	applyServiceBundle(t, st, ctx, impactBundle("        down: critical\n"))
+	id := mappingServiceID(t, st, ctx, projID)
+	before := impactColumnOf(t, st, ctx, id)
+	m := domain.ImpactMapping{Degraded: domain.ImpactNone, Down: domain.ImpactNone, Unknown: domain.ImpactNone}
+	_, err := st.UpdateServiceAlertPolicy(ctx, projID, id, ServiceAlertPolicyPatch{ImpactByState: &m}, AlertActor{})
+	if !errors.Is(err, ErrServiceManagedByFile) {
+		t.Fatalf("got %v, want ErrServiceManagedByFile", err)
+	}
+	after := impactColumnOf(t, st, ctx, id)
+	if (before == nil) != (after == nil) || (before != nil && *before != *after) {
+		t.Fatalf("column changed %v -> %v", before, after)
+	}
+}

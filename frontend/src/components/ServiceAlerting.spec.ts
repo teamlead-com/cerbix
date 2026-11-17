@@ -15,7 +15,16 @@ vi.mock("@/api/client", () => ({ api: apiMock }));
 //     else changed between load and save, and the server merges under its own lock.
 //   * a refusal renders as ITSELF, from the payload's own message.
 
-type Alerting = { owns_paging: boolean; page_on: string[]; page_on_unknown: boolean; confirm_evaluations: number; renotify_seconds?: number };
+type ImpactByState = { degraded: string; down: string; unknown: string };
+type Alerting = {
+  owns_paging: boolean;
+  page_on: string[];
+  page_on_unknown: boolean;
+  confirm_evaluations: number;
+  renotify_seconds?: number;
+  // FR-042: the server always resolves the mapping (three keys), so every fixture carries it.
+  impact_by_state: ImpactByState;
+};
 
 function mountWith(opts: {
   alerting?: Alerting | null;
@@ -73,7 +82,15 @@ function mountWith(opts: {
   });
 }
 
-const owning: Alerting = { owns_paging: true, page_on: ["down"], page_on_unknown: false, confirm_evaluations: 2, renotify_seconds: 0 };
+const DEFAULT_MAPPING: ImpactByState = { degraded: "minor", down: "major", unknown: "none" };
+const owning: Alerting = {
+  owns_paging: true,
+  page_on: ["down"],
+  page_on_unknown: false,
+  confirm_evaluations: 2,
+  renotify_seconds: 0,
+  impact_by_state: DEFAULT_MAPPING,
+};
 
 describe("ServiceAlerting", () => {
   it("reports coverage from the server, not from the switch", async () => {
@@ -481,7 +498,8 @@ describe("ServiceAlerting keeps unsaved edits across a prop update", () => {
     await flushPromises();
 
     expect(val(w, "alerting-confirm")).toBe("7");
-    expect(w.get('[data-testid="alerting-page-on-degraded"]').classes()).toContain("text-ok");
+    // D-15 (FR-042 mock): the toggle reads in the UP hue — `text-ok` was never a token.
+    expect(w.get('[data-testid="alerting-page-on-degraded"]').classes()).toContain("text-up");
     expect(w.get('[data-testid="alerting-save"]').attributes("disabled"), "nothing to save").toBeDefined();
   });
 
@@ -536,5 +554,185 @@ describe("ServiceAlerting keeps unsaved edits across a prop update", () => {
     expect(val(w, "alerting-renotify")).toBe("60");
     expect(val(w, "alerting-confirm")).toBe("3");
     expect(w.get('[data-testid="alerting-save"]').attributes("disabled")).toBeDefined();
+  });
+});
+
+// FR-042 / NFR-035, mock §1 (approved 2026-11-16): the impact this service's incident opens with,
+// per paging state. The mapping is ONE field to the diff (D18: a PATCH states all three keys or
+// none), its inert/warning presentation follows the DRAFT, and it never blocks Save.
+describe("ServiceAlerting incident impact", () => {
+  const sel = (w: ReturnType<typeof mountWith>, s: string) => w.get(`[data-testid="alerting-impact-${s}"]`);
+  const live = { live: { armed: true }, burn: { armed: true } };
+
+  it("offers the three selectors in the Pages-for order, with the badge words as options", async () => {
+    const w = mountWith({ alerting: owning, state: live });
+    await flushPromises();
+    const ids = w.findAll('select[data-testid^="alerting-impact-"]')
+      .map((s) => s.attributes("data-testid"));
+    expect(ids).toEqual(["alerting-impact-down", "alerting-impact-degraded", "alerting-impact-unknown"]);
+    expect(sel(w, "down").findAll("option").map((o) => [o.attributes("value"), o.text()])).toEqual([
+      ["none", "Not specified"],
+      ["minor", "Minor"],
+      ["major", "Major"],
+      ["critical", "Critical"],
+    ]);
+    expect((sel(w, "down").element as HTMLSelectElement).value).toBe("major");
+    expect((sel(w, "degraded").element as HTMLSelectElement).value).toBe("minor");
+    expect((sel(w, "unknown").element as HTMLSelectElement).value).toBe("none");
+    expect(w.get('[data-testid="alerting-impact-hint"]').text()).toBe(
+      "The impact this service's incident opens with, by the state that opened it. While the incident is open it rises to the value of any worse state the service reaches, and never falls. A change applies from the next incident; an open incident keeps the values it opened with.",
+    );
+  });
+
+  it("sends all three keys after ONE selector change", async () => {
+    const w = mountWith({ alerting: owning, state: live });
+    await flushPromises();
+    await sel(w, "down").setValue("critical");
+    await w.get('[data-testid="alerting-save"]').trigger("click");
+    await flushPromises();
+    expect(apiMock.PATCH.mock.calls[0][1].body).toEqual({
+      impact_by_state: { down: "critical", degraded: "minor", unknown: "none" },
+    });
+  });
+
+  it("sends no mapping when the selectors were not touched", async () => {
+    const w = mountWith({ alerting: owning, state: live });
+    await flushPromises();
+    await w.get('[data-testid="alerting-confirm"]').setValue("4");
+    await w.get('[data-testid="alerting-save"]').trigger("click");
+    await flushPromises();
+    expect(apiMock.PATCH.mock.calls[0][1].body).toEqual({ confirm_evaluations: 4 });
+  });
+
+  it("a selector moved and moved back leaves the form clean", async () => {
+    const w = mountWith({ alerting: owning, state: live });
+    await flushPromises();
+    await sel(w, "unknown").setValue("major");
+    expect(w.get('[data-testid="alerting-save"]').attributes("disabled")).toBeUndefined();
+    await sel(w, "unknown").setValue("none");
+    expect(w.get('[data-testid="alerting-save"]').attributes("disabled")).toBeDefined();
+  });
+
+  it("does not write through to the parent's declaration", async () => {
+    const alerting = { ...owning, impact_by_state: { ...DEFAULT_MAPPING } };
+    const w = mountWith({ alerting, state: live });
+    await flushPromises();
+    await sel(w, "degraded").setValue("critical");
+    expect(alerting.impact_by_state.degraded).toBe("minor");
+
+    // setImpact replaces the object, so the select alone cannot catch an aliased mapping. Mutate
+    // the draft's mapping IN PLACE: only cloneAlerting's own copy keeps that off the parent's prop.
+    const fresh = { ...owning, impact_by_state: { ...DEFAULT_MAPPING } };
+    await w.setProps({ serviceId: "s2", alerting: fresh }); // identity change: the draft is rebuilt by clone
+    await flushPromises();
+    (w.vm as unknown as { draft: { impact_by_state: Record<string, string> } }).draft.impact_by_state.unknown = "critical";
+    expect(fresh.impact_by_state.unknown, "the draft must not share the prop's mapping").toBe("none");
+  });
+
+  it("keeps an unsaved mapping edit across a prop update, as ONE field", async () => {
+    const w = mountWith({ alerting: owning, state: live });
+    await flushPromises();
+    await sel(w, "degraded").setValue("major");
+
+    // The server meanwhile changed `unknown` and `confirm`. The mapping is one field: the operator
+    // touched it, so the draft's whole mapping stands; confirm was not touched, so it follows.
+    await w.setProps({ alerting: { ...owning, confirm_evaluations: 6, impact_by_state: { ...DEFAULT_MAPPING, unknown: "minor" } } });
+    await flushPromises();
+    expect((sel(w, "degraded").element as HTMLSelectElement).value).toBe("major");
+    expect((sel(w, "unknown").element as HTMLSelectElement).value).toBe("none");
+    expect((w.get('[data-testid="alerting-confirm"]').element as HTMLInputElement).value).toBe("6");
+
+    await w.get('[data-testid="alerting-save"]').trigger("click");
+    await flushPromises();
+    expect(apiMock.PATCH.mock.calls[0][1].body).toEqual({
+      impact_by_state: { down: "major", degraded: "major", unknown: "none" },
+    });
+  });
+
+  it("an untouched mapping follows the server's new one", async () => {
+    const w = mountWith({ alerting: owning, state: live });
+    await flushPromises();
+    await w.get('[data-testid="alerting-renotify"]').setValue("900");
+    await w.setProps({ alerting: { ...owning, impact_by_state: { ...DEFAULT_MAPPING, down: "critical" } } });
+    await flushPromises();
+    expect((sel(w, "down").element as HTMLSelectElement).value).toBe("critical");
+    await w.get('[data-testid="alerting-save"]').trigger("click");
+    await flushPromises();
+    expect(apiMock.PATCH.mock.calls[0][1].body).toEqual({ renotify_seconds: 900 });
+  });
+
+  it("marks degraded and unknown inert under today's default paging, in ONE plural sentence", async () => {
+    const w = mountWith({ alerting: owning, state: live }); // page_on = {down}, unknown off
+    await flushPromises();
+    expect(w.get('[data-testid="alerting-impact-row-down"]').attributes("data-inert")).toBe("false");
+    expect(w.get('[data-testid="alerting-impact-row-degraded"]').attributes("data-inert")).toBe("true");
+    expect(w.get('[data-testid="alerting-impact-row-unknown"]').attributes("data-inert")).toBe("true");
+    // Inert is a presentation, not a lock: the operator may prepare the value before paging on.
+    expect(sel(w, "degraded").attributes("disabled")).toBeUndefined();
+    expect(sel(w, "degraded").classes()).toContain("border-dashed");
+    expect(w.get('[data-testid="alerting-impact-inert"]').text()).toBe(
+      "degraded and unknown do not page, so they never open or raise an incident. Their values are kept, and apply once they page.",
+    );
+  });
+
+  it("names a single inert state in the singular, and follows the DRAFT, not the saved row", async () => {
+    const w = mountWith({ alerting: owning, state: live });
+    await flushPromises();
+    await w.get('[data-testid="alerting-page-on-degraded"]').trigger("click");
+    expect(w.get('[data-testid="alerting-impact-row-degraded"]').attributes("data-inert")).toBe("false");
+    expect(w.get('[data-testid="alerting-impact-inert"]').text()).toBe(
+      "unknown does not page, so it never opens or raises an incident. Its value is kept, and applies once it pages.",
+    );
+
+    await w.get('[data-testid="alerting-page-on-unknown"]').setValue(true);
+    expect(w.find('[data-testid="alerting-impact-inert"]').exists(), "nothing is inert any more").toBe(false);
+  });
+
+  it("warns when degraded is rated above down, names both words, and does not block Save", async () => {
+    const w = mountWith({ alerting: owning, state: live });
+    await flushPromises();
+    expect(w.find('[data-testid="alerting-impact-warning"]').exists()).toBe(false);
+
+    await sel(w, "degraded").setValue("critical");
+    const warn = w.get('[data-testid="alerting-impact-warning"]');
+    expect(warn.text()).toBe(
+      "Degraded is rated above down (Critical against Major). That is allowed, but an incident that opens on down will be published as less severe than one that opens on degraded.",
+    );
+    // Shown although degraded is inert here (page_on = {down}) — D-7.
+    expect(w.get('[data-testid="alerting-impact-row-degraded"]').attributes("data-inert")).toBe("true");
+    expect(sel(w, "degraded").classes()).toContain("border-degraded/55");
+    expect(w.get('[data-testid="alerting-save"]').attributes("disabled")).toBeUndefined();
+
+    // Equal is not above.
+    await sel(w, "degraded").setValue("major");
+    expect(w.find('[data-testid="alerting-impact-warning"]').exists()).toBe(false);
+  });
+
+  it("is read-only for a file-managed service, like the rest of the block", async () => {
+    const w = mountWith({ alerting: owning, state: live, managedBy: "services/checkout.yaml" });
+    await flushPromises();
+    for (const s of ["down", "degraded", "unknown"]) expect(sel(w, s).attributes("disabled")).toBeDefined();
+    expect(w.find('[data-testid="alerting-impact-inert"]').exists()).toBe(true);
+  });
+
+  it("is read-only without write access", async () => {
+    const w = mountWith({ alerting: owning, state: live, canWrite: false });
+    await flushPromises();
+    for (const s of ["down", "degraded", "unknown"]) expect(sel(w, s).attributes("disabled")).toBeDefined();
+  });
+
+  it("colours the 'pages for no state' warning and a save error with real tokens (D-15)", async () => {
+    const w = mountWith({
+      alerting: { ...owning, page_on: [] },
+      state: live,
+      patchError: "service alert policy: something",
+    });
+    await flushPromises();
+    expect(w.get('[data-testid="alerting-pages-nothing"]').classes()).toContain("text-degraded");
+    await w.get('[data-testid="alerting-confirm"]').setValue("3");
+    await w.get('[data-testid="alerting-save"]').trigger("click");
+    await flushPromises();
+    expect(w.get('[data-testid="alerting-error"]').classes()).toContain("text-down");
+    expect(w.html()).not.toMatch(/\b(text-ok|bg-ok\/10|border-ok|text-warn|text-bad)\b/);
   });
 });

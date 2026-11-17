@@ -40,6 +40,8 @@ var registeredStatusPageRequestContracts = []requestContract{
 	{schema: "CreateComponent", body: createComponentRequest{}},
 	{schema: "UpdateComponent", body: updateComponentRequest{}},
 	{schema: "ConversionTarget", body: conversionTargetBody{}},
+	{schema: "PatchProject", body: patchProjectRequest{}},
+	{schema: "PatchServiceAlertingRequest", body: patchServiceAlertingRequest{}},
 }
 
 func TestRegisteredStatusPageRequestContractsMatchOpenAPI(t *testing.T) {

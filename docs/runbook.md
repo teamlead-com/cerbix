@@ -1533,6 +1533,108 @@ issued before it as stale.
   this release the threshold applies again. Nothing needs to be set back before a rollback.
 - **One residue.** A failure written by an older binary keeps the monitor `down` and leaves a run in progress as it was, so back on this release the next success continues that run rather than starting a new one. At worst one recovery is confirmed a few checks early.
 
+## Incident impact (FR-042 / NFR-035)
+
+Since iter-0215 an automatic incident's impact is derived. The contract is
+[`func-incident-impact.md`](specs/func-incident-impact.md) (D-0282).
+- **Service incidents.** A service declares `impact_by_state` in its alerting policy (Service → Alerting,
+  `PATCH …/services/{serviceID}/alerting`, or `alerting.impact_by_state` in a bundle). Default:
+  `degraded → minor`, `down → major`, `unknown → none`. Its auto-incident opens at the mapped impact for
+  the confirmed state, and rises — never falls — while open, against the mapping frozen at open. Editing
+  the mapping changes only the incidents opened after the edit.
+- **Monitor incidents** open at the project's `default_incident_impact` (default `major`; Settings →
+  Project → Incidents, or `PATCH /api/v1/projects/{projectID}` with `project:manage`). It is not
+  declarable in Monitoring-as-Code.
+- **Manual and alert-receiver incidents** keep the impact they were created with.
+- **Nobody edits an automatic incident's impact**, global admins included. A wrong manual impact is
+  corrected by resolving the incident and opening another.
+
+### Upgrading
+
+- **Migration 00119** adds three nullable or defaulted columns with CHECKs and needs no maintenance step.
+  Every project starts at `major`, so monitor incidents open as before.
+- **Two behaviour changes for services (D6).** A service that pages on `degraded` opens its new
+  incidents as `minor`, not `major`; a service with `page_on_unknown` opens an `unknown` incident as
+  `none` ("Impact not specified"), not `major`. To list the services concerned before upgrading:
+
+  ```sql
+  SELECT p.slug AS project, s.slug AS service, s.page_on, s.page_on_unknown
+    FROM services s JOIN projects p ON p.id = s.project_id
+   WHERE s.owns_paging AND ('degraded' = ANY (s.page_on) OR s.page_on_unknown)
+   ORDER BY 1, 2;
+  ```
+
+  To keep `major`, set the mapping on those services after the upgrade.
+- **Incidents already open keep their impact and never rise (D12).** They have no basis
+  (`impact_basis IS NULL`); applying the live mapping to them would be a mid-incident edit. An outage
+  that spans the upgrade stays at what it opened with; the next incident is classified. Their page reads
+  "basis not recorded (opened before impact classification)".
+
+### Mixed versions and rollback
+
+- **Subscriber mail (D16).** A process that predates this release and delivers the outbox — roles
+  `all`, `api` and `scheduler`; `worker` and `agent` do not — ignores `impact_raised` and emails
+  subscribers on **every** rise, with today's subject `[<status>] <title>`, not only on a rise to
+  `critical`. That happens while old and new processes overlap, and after a rollback for rise events
+  still queued. The mail is true (the same note is on the public timeline) and nothing is lost; there is
+  no gate. Upgrade the outbox-delivering roles together to keep the window short.
+- **Monitoring-as-Code (rollback).** An older binary's bundle decoder refuses a bundle that declares
+  `alerting.impact_by_state`. **Remove that key from every bundle before rolling back.** On this release
+  an absent key means the default mapping, so the provider resets those services to the defaults when it
+  applies the edited bundle; an older binary ignores the column anyway.
+- **What an older binary does on this schema.** It writes none of the new columns and is refused
+  nothing: its incidents get no basis and never rise when this release is back, its projects keep their
+  stored default. The down migration is not needed for a rollback; running it drops every mapping,
+  project default and basis.
+
+### Reading a basis
+
+The incident page shows one line under the impact; `GET /api/v1/incidents/{incidentID}` returns the
+same as `impact_basis` (always present, `null` when not recorded) and `impact_basis_unavailable: true`
+when the read failed. No other endpoint, feed or webhook carries it.
+
+| `impact_basis.source` | Line on the incident page |
+| --- | --- |
+| `service_mapping` | `<impact> — declared by service <name> for state <state>`, then the mapping frozen at open |
+| `project_default` | `<impact> — project default for monitor incidents` |
+| `manual` | `<impact> — set by the author when the incident was created` |
+| the alert receiver's source | `<impact> — from the alert's severity label` |
+| (null) | `<impact> — basis not recorded (opened before impact classification)` |
+| (read failed) | `<impact> — basis unavailable` |
+
+For `service_mapping`, `state` is the state that set the **current** impact: the opening state, or the
+state of the last rise. `service` is the name and slug at open, kept after the service is deleted.
+
+```sql
+SELECT id, status, impact,
+       impact_basis->>'source'          AS source,
+       impact_basis->>'state'           AS state,
+       impact_basis->'mapping'          AS frozen_mapping,
+       impact_basis->'service'->>'name' AS service
+  FROM incidents
+ WHERE id = '<incident id>';
+```
+
+Each rise is a public timeline note with the incident's status unchanged, one of:
+
+```
+⬆ Impact raised: <from> → <to> — the service is degraded.
+⬆ Impact raised: <from> → <to> — the service is down.
+⬆ Impact raised: <from> → <to> — the service's state is unknown.
+```
+
+The opening note names the state too: `Opened automatically: service DEGRADED confirmed over <n>
+evaluation(s).`
+
+### The leader's `incidents_raised`
+
+The scheduler leader logs `service_alerts_evaluated` when anything happened or anything is behind; a
+rise alone is now enough. Its `incidents_raised` field counts the open service incidents whose impact
+the pass raised. There is no metric for rises: each is also an `incident_updates` row and an outbox
+event. A rise that loses a race with an operator's write on the same incident fails that slice's pass
+(`service_alert_eval_failed`, SQLSTATE 40001) and lands on the next evaluation tick; one such line
+during an acknowledge is expected, repeated ones for the same services are not.
+
 ## Service reliability operations (FR-021)
 
 The persisted relationships for this subsystem are summarized in the

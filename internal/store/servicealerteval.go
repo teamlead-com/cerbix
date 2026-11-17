@@ -43,6 +43,10 @@ type ServiceAlertEvaluation struct {
 	// per-service unique index absorbs.
 	IncidentsOpened   int
 	IncidentsResolved int
+	// IncidentsRaised counts the rises this slice wrote (FR-042 D20): open service incidents whose
+	// impact the confirmed pageable state took higher. Logged, not a metric — each rise is already a
+	// timeline note and an outbox event.
+	IncidentsRaised int
 	// Withheld counts ONSETS this pass refused to announce, BY REASON. Two reasons exist and they are
 	// different problems with different owners: `unroutable` says somebody's paging configuration is
 	// broken right now, `no_governing_revision` says the declaration has not taken effect yet. A
@@ -111,7 +115,8 @@ func (s *Store) evaluateServiceAlertsOn(
 		       s.page_on, s.page_on_unknown, s.confirm_evaluations, s.alert_config_generation,
 		       COALESCE(s.oncall_schedule_id::text, ''), rev.id::text,
 		       st.candidate_state, st.streak, st.live_firing, st.emitted_state, st.emitted_seq,
-		       st.evaluated_at, COALESCE(st.undelivered_seq, 0)
+		       st.evaluated_at, COALESCE(st.undelivered_seq, 0),
+		       s.impact_by_state
 		  FROM services s
 		  LEFT JOIN service_alert_state st ON st.service_id = s.id
 		  -- The declaration governing THIS snapshot, resolved the one way the epoch owner resolves
@@ -137,15 +142,21 @@ func (s *Store) evaluateServiceAlertsOn(
 		var streak *int
 		var firing *bool
 		var seq *int64
+		var impactRaw []byte
 		if err := rows.Scan(&c.serviceID, &c.projectID, &c.name, &c.slug,
 			&pageOn, &c.policy.PageOnUnknown, &c.policy.ConfirmEvaluations, &c.configGeneration,
 			&c.scheduleID, &c.revisionID,
 			&candState, &streak, &firing, &emitted, &seq, &c.evaluatedAt,
-			&c.undeliveredSeq); err != nil {
+			&c.undeliveredSeq, &impactRaw); err != nil {
 			rows.Close()
 			return out, fmt.Errorf("store: scan alert candidate: %w", err)
 		}
 		c.policy.OwnsPaging = true
+		var merr error
+		if c.policy.ImpactByState, merr = impactMappingFromColumn(impactRaw); merr != nil {
+			rows.Close()
+			return out, merr
+		}
 		for _, p := range pageOn {
 			c.policy.PageOn = append(c.policy.PageOn, domain.ServiceAlertState(p))
 		}
@@ -256,6 +267,25 @@ func (s *Store) evaluateServiceAlertsOn(
 			decision.NextEmitted, decision.NextFiring = candidateState, true
 		}
 
+		// FR-042 §4.3 / D13: the RISE follows the CONFIRMED state, not the announcement. It sits
+		// before the withheld/notify branching on purpose: an onset the arming check below withholds
+		// (no route, no governing revision) still raises the open incident — who is paged is
+		// irrelevant to impact (D9) — and neither branch could raise it anyway: the onset branch's
+		// `OpenServiceIncidentTx` ends in `ON CONFLICT DO NOTHING` for an incident already open, and
+		// the D-0187 re-announce re-sends the same state. The step looks before it locks, so a pass
+		// with nothing to raise takes no lock on the incident (I12). An error fails the pass: under
+		// this REPEATABLE READ snapshot a lock that waited for a committed change is SQLSTATE 40001,
+		// and the leader evaluates again on its next tick — no retry here.
+		if streak >= c.policy.ConfirmEvaluations && c.policy.Pages(candidateState) {
+			raised, rerr := raiseServiceIncidentImpactTx(ctx, tx, c.serviceID, candidateState)
+			if rerr != nil {
+				return out, rerr
+			}
+			if raised {
+				out.IncidentsRaised++
+			}
+		}
+
 		// FR-022 invariant 5: a service opens an incident ONLY while that signal's coverage is ARMED,
 		// and `owns_paging` — which the slice already filters on — is one of five conditions, not the
 		// whole of it. Two of the others can be false here and were never checked:
@@ -342,7 +372,8 @@ func (s *Store) evaluateServiceAlertsOn(
 				// postmortem names the declaration that was governing during the outage rather than
 				// one that becomes effective at the next bucket boundary.
 				_, created, ierr := s.OpenServiceIncidentTx(ctx, tx, c.serviceID, c.projectID,
-					c.name+" — service "+string(candidateState), streak, c.revisionID)
+					c.name+" — service "+string(candidateState), candidateState, c.policy.ImpactByState,
+					streak, c.revisionID)
 				if ierr != nil {
 					return out, ierr
 				}

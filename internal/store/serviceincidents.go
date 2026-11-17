@@ -31,15 +31,47 @@ import (
 // `revisionID` is the declaration the OUTAGE was computed from, resolved by the caller that computed
 // it. It is not optional and not re-derived here: see `snapshotServiceMembersTx`.
 func (s *Store) OpenServiceIncidentTx(
-	ctx context.Context, tx pgx.Tx, serviceID, projectID, title string, confirmedOver int,
-	revisionID *string,
+	ctx context.Context, tx pgx.Tx, serviceID, projectID, title string,
+	state domain.ServiceAlertState, mapping domain.ImpactMapping,
+	confirmedOver int, revisionID *string,
 ) (domain.Incident, bool, error) {
+	// The impact is the mapping's answer for the state that confirmed the onset (FR-042 §4.2), and the
+	// mapping it was classified under is recorded beside it (D8): a later edit of the mapping must not
+	// rewrite why this incident has the impact it has. Nothing is written when the state cannot open one.
+	resolved := mapping.Resolved()
+	impact, ok := resolved.For(state)
+	if !ok {
+		return domain.Incident{}, false, fmt.Errorf("store: open service incident: state %q cannot open an incident", state)
+	}
+	if err := resolved.Validate(); err != nil {
+		return domain.Incident{}, false, fmt.Errorf("store: open service incident: %w", err)
+	}
+	var svcName, svcSlug string
+	if err := tx.QueryRow(ctx,
+		`SELECT name, slug FROM services WHERE id = $1 AND project_id = $2`, serviceID, projectID,
+	).Scan(&svcName, &svcSlug); err != nil {
+		if noRows(err) {
+			return domain.Incident{}, false, fmt.Errorf("store: open service incident: service %s not found", serviceID)
+		}
+		return domain.Incident{}, false, fmt.Errorf("store: open service incident: read service: %w", err)
+	}
+	basis := domain.ImpactBasis{
+		Source: domain.ImpactBasisServiceMapping, Mapping: &resolved, State: state,
+		Service: &domain.ImpactBasisService{Name: svcName, Slug: svcSlug},
+	}
+	if err := basis.Validate(); err != nil {
+		return domain.Incident{}, false, fmt.Errorf("store: open service incident: %w", err)
+	}
+	basisJSON, err := json.Marshal(basis)
+	if err != nil {
+		return domain.Incident{}, false, fmt.Errorf("store: marshal impact basis: %w", err)
+	}
 	row := tx.QueryRow(ctx,
-		`INSERT INTO incidents (project_id, service_id, title, status, impact, source)
-		 VALUES ($1, $2, $3, 'investigating', 'major', 'auto')
+		`INSERT INTO incidents (project_id, service_id, title, status, impact, source, impact_basis)
+		 VALUES ($1, $2, $3, 'investigating', $4, 'auto', $5::jsonb)
 		 ON CONFLICT (service_id) WHERE source = 'auto' AND status <> 'resolved' AND service_id IS NOT NULL
 		 DO NOTHING
-		 RETURNING `+incidentColumns, projectID, serviceID, title)
+		 RETURNING `+incidentColumns, projectID, serviceID, title, string(impact), string(basisJSON))
 	inc, err := scanIncident(row)
 	if err != nil {
 		if noRows(err) {
@@ -60,7 +92,7 @@ func (s *Store) OpenServiceIncidentTx(
 	// The opening update states WHAT confirmed it. An operator who finds an incident nobody typed must be
 	// able to see the machine that opened it and why — and `confirmedOver` is the same number that governs
 	// whether the service pages at all (§16.3).
-	body := fmt.Sprintf("Opened automatically: service DOWN confirmed over %d evaluation(s).", confirmedOver)
+	body := domain.ServiceIncidentOpeningNote(state, confirmedOver)
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO incident_updates (incident_id, status, body, author) VALUES ($1, 'investigating', $2, 'system')`,
 		inc.ID, body); err != nil {
@@ -348,4 +380,142 @@ func snapshotEscalationPolicyTx(ctx context.Context, tx pgx.Tx, incidentID, proj
 		return fmt.Errorf("store: snapshot escalation policy: %w", err)
 	}
 	return nil
+}
+
+// raiseServiceIncidentImpactTx — FR-042 §4.3. Reports whether it raised. Errors are wrapped with
+// %w so a caller can see SQLSTATE 40001.
+//
+// It raises the service's open auto-incident to `mapping[state]` of the mapping FROZEN on the
+// incident (D8; the service's live mapping is never read, I4) when that ranks above the impact it
+// has, and does nothing otherwise: impact never falls (D2). Idempotency is the rank comparison, not
+// a marker lookup (R9) — an incident may rise more than once, and a `⚡ Context:`-style guard allows
+// one note per incident for its whole life.
+//
+// It is the sibling of resolveServiceIncidentTx and follows its order — lock, then clock, then
+// write (D-0177) — with one difference: the resolve runs once per incident, this runs on EVERY
+// evaluation while the incident is open and almost always has nothing to do. So it looks before it
+// locks. The unlocked read is safe to trust for "nothing to do": impact never falls, the frozen
+// mapping never changes and `resolved` is terminal, so a stale answer can only say "raise" where the
+// lock then says "already raised", never the reverse. Locking on every tick would turn every
+// acknowledge during an outage into a 40001 for the evaluator's whole slice (§4.3, concurrency).
+func raiseServiceIncidentImpactTx(ctx context.Context, tx pgx.Tx, serviceID string,
+	state domain.ServiceAlertState) (bool, error) {
+	// Step 0 — no lock.
+	var (
+		incidentID string
+		current    domain.IncidentImpact
+		rawBasis   []byte
+	)
+	err := tx.QueryRow(ctx,
+		`SELECT id, impact, impact_basis FROM incidents
+		  WHERE service_id = $1 AND source = 'auto' AND status <> 'resolved'`, serviceID).
+		Scan(&incidentID, &current, &rawBasis)
+	if noRows(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: read service incident impact: %w", err)
+	}
+	if rawBasis == nil { // D12: an incident with no basis never rises.
+		return false, nil
+	}
+	var basis domain.ImpactBasis
+	if err := json.Unmarshal(rawBasis, &basis); err != nil {
+		return false, fmt.Errorf("store: decode impact basis of incident %s: %w", incidentID, err)
+	}
+	if basis.Source != domain.ImpactBasisServiceMapping || basis.Mapping == nil {
+		return false, nil
+	}
+	to, ok := basis.Mapping.For(state)
+	if !ok || to.Rank() <= current.Rank() {
+		return false, nil
+	}
+
+	// Step 1 — a rise is due: take the row and compare again on what the lock returns.
+	var (
+		status domain.IncidentStatus
+		from   domain.IncidentImpact
+	)
+	err = tx.QueryRow(ctx,
+		`SELECT id, status, impact FROM incidents
+		  WHERE id = $1 AND status <> 'resolved'
+		  FOR UPDATE`, incidentID).Scan(&incidentID, &status, &from)
+	if noRows(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: lock service incident for impact rise: %w", err)
+	}
+	if to.Rank() <= from.Rank() {
+		return false, nil
+	}
+
+	// Step 2 — the clock, read AFTER the lock: the caller's `asOf` predates whatever step 1 waited for.
+	var asOf time.Time
+	if err := tx.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&asOf); err != nil {
+		return false, fmt.Errorf("store: post-lock clock: %w", err)
+	}
+
+	// Step 3 — the raise. `updated_at` is not optional: the public page and the feeds read it.
+	inc, err := scanIncident(tx.QueryRow(ctx,
+		`UPDATE incidents
+		    SET impact = $2,
+		        impact_basis = jsonb_set(impact_basis, '{state}', to_jsonb($3::text)),
+		        updated_at = $4
+		  WHERE id = $1
+		 RETURNING `+incidentColumns, incidentID, to, string(state), asOf))
+	if err != nil {
+		return false, fmt.Errorf("store: raise service incident impact: %w", err)
+	}
+
+	// Step 4 — the public note, with the LOCKED status: a rise does not move the lifecycle.
+	upd, err := scanIncidentUpdate(tx.QueryRow(ctx,
+		`INSERT INTO incident_updates (incident_id, status, body, author, created_at)
+		 VALUES ($1, $2, $3, 'system', $4) RETURNING `+incidentUpdateColumns,
+		inc.ID, status, domain.ImpactRaisedNote(from, to, state), asOf))
+	if err != nil {
+		return false, fmt.Errorf("store: impact rise note: %w", err)
+	}
+
+	// Step 5 — an incident.updated event on the existing topic (D16), carrying the from/to pair.
+	seq, err := nextIncidentEventSeqTx(ctx, tx, inc.ID)
+	if err != nil {
+		return false, err
+	}
+	payload, err := json.Marshal(domain.IncidentEvent{
+		Type: domain.EventIncidentUpdated, Incident: inc, Update: &upd, Seq: seq,
+		ImpactRaised: &domain.ImpactRaise{From: from, To: to},
+	})
+	if err != nil {
+		return false, fmt.Errorf("store: marshal impact rise event: %w", err)
+	}
+	if err := enqueueOutboxAtTx(ctx, tx, domain.TopicIncidentEvent, payload, asOf); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// IncidentImpactBasis reads the basis of an incident's impact by its own call (FR-042 D15), scoped to
+// the project at the store boundary like ListIncidentImpacts: `WHERE id = $1 AND project_id = $2`.
+// (nil, nil) means the basis was not recorded (D12). ErrNotFound means no such incident in that
+// project, or a malformed id.
+func (s *Store) IncidentImpactBasis(ctx context.Context, projectID, incidentID string) (*domain.ImpactBasis, error) {
+	var raw []byte
+	err := s.pool.QueryRow(ctx,
+		`SELECT impact_basis FROM incidents WHERE id = $1 AND project_id = $2`,
+		incidentID, projectID).Scan(&raw)
+	if noRows(err) || isInvalidTextRepresentation(err) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: read impact basis: %w", err)
+	}
+	if raw == nil {
+		return nil, nil
+	}
+	var b domain.ImpactBasis
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return nil, fmt.Errorf("store: decode impact basis of incident %s: %w", incidentID, err)
+	}
+	return &b, nil
 }

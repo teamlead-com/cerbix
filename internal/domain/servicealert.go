@@ -71,18 +71,27 @@ type ServiceAlertPolicy struct {
 	// all. Zero-by-default is what keeps this an added control rather than an imposed cadence: no
 	// existing service starts repeating because the column appeared.
 	RenotifySeconds int `json:"renotify_seconds"`
+	// ImpactByState maps a paging state to the impact its auto-opened incident gets (FR-042 D7/§4.1).
+	// The ZERO value means "not stated" and is the D6 defaults: Impacts() resolves it, so a NULL
+	// column and an explicit copy of the defaults are one policy.
+	ImpactByState ImpactMapping `json:"impact_by_state"`
 }
+
+// Impacts is the mapping in force: the stated one, or the D6 defaults when none was stated.
+func (p ServiceAlertPolicy) Impacts() ImpactMapping { return p.ImpactByState.Resolved() }
 
 // DefaultServiceAlertPolicy is what an undeclared service has.
 func DefaultServiceAlertPolicy() ServiceAlertPolicy {
 	return ServiceAlertPolicy{
 		PageOn:             []ServiceAlertState{ServiceAlertDown},
 		ConfirmEvaluations: 2,
+		ImpactByState:      DefaultImpactMapping(),
 	}
 }
 
 // Canonical returns the policy in the ONE form that is stored, hashed and compared: `page_on`
-// deduplicated and sorted, never nil.
+// deduplicated and sorted, never nil, and `impact_by_state` resolved (an unstated mapping becomes the
+// D6 defaults, so "not stated" and "stated as the defaults" compare and hash as one policy).
 //
 // It lives here, beside Validate, because §16.6a gives the API and the MaC apply ONE validator and
 // canonical order is half of what that validator owes them. Normalizing in the store instead would
@@ -105,6 +114,7 @@ func (p ServiceAlertPolicy) Canonical() ServiceAlertPolicy {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	p.PageOn = out
+	p.ImpactByState = p.ImpactByState.Resolved()
 	return p
 }
 
@@ -122,6 +132,9 @@ func (p ServiceAlertPolicy) Validate() error {
 	if p.ConfirmEvaluations < 1 || p.ConfirmEvaluations > 10 {
 		return fmt.Errorf("service alert policy: confirm_evaluations must be 1..10, got %d",
 			p.ConfirmEvaluations)
+	}
+	if err := p.ImpactByState.Resolved().Validate(); err != nil {
+		return fmt.Errorf("service alert policy: %w", err)
 	}
 	for _, s := range p.PageOn {
 		switch s {

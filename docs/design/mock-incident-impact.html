@@ -1,0 +1,850 @@
+<title>Cerbix Incident Impact</title>
+
+<style>
+/* Tokens VERBATIM from frontend/src/style.css (the block every approved mock carries). This change
+   adds NO new colour, no new status and no new component shape. The impact badges keep the two
+   tables they already use (frontend/src/lib/incident.ts for the public page, the incident page and
+   the new-incident form; IncidentsView.vue's own outlined table for the operator list). The one
+   warning borrows the --degraded notice the forms already use; the inert hint is ink-3 text.
+   Spec: docs/specs/func-incident-impact.md (FR-042 / NFR-035), revision 4, §8. */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --focus:#7d79ff;
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+h1,h2,h3{margin:0; text-wrap:balance}
+p{margin:0}
+code{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.92em}
+a{color:var(--accent); text-decoration:none}
+button{font:inherit; color:inherit}
+
+.page{max-width:1180px; margin:0 auto; padding:28px 22px 80px; display:flex; flex-direction:column; gap:40px}
+.head{display:flex; flex-direction:column; gap:10px; max-width:80ch}
+.head h1{font-size:24px; font-weight:600; letter-spacing:-.01em}
+.head p{color:var(--ink-2)}
+.eyebrow{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+.themes{display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden; margin-left:auto}
+.themes button{border:0; background:var(--surface); padding:4px 10px; font-size:12px; color:var(--ink-3); cursor:pointer}
+.themes button.on{background:var(--accent-weak); color:var(--accent); font-weight:600}
+
+/* one annotation grammar for the whole mock: NEW = added by this change */
+.new{display:inline-flex; align-items:center; height:18px; padding:0 7px; border-radius:999px;
+  background:var(--note-bg); border:1px solid var(--note-border); color:var(--note);
+  font-size:10.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; vertical-align:middle}
+.note{border:1px solid var(--note-border); background:var(--note-bg); border-radius:6px; padding:12px 14px; color:var(--ink-2); font-size:13px}
+.note b{color:var(--note); font-weight:600}
+.hl{outline:1.5px dashed var(--note); outline-offset:3px; border-radius:3px}
+
+section{display:flex; flex-direction:column; gap:14px}
+section > header{display:flex; flex-direction:column; gap:4px}
+section > header h2{font-size:16px; font-weight:600}
+section > header .where{font-size:12.5px; color:var(--ink-3)}
+section > header .where code{font-size:12px; color:var(--ink-2)}
+h3.sub{font-size:13px; font-weight:600; color:var(--ink-2)}
+
+.contract{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); border:1px solid var(--border); border-radius:6px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.contract > div{padding:14px 16px; border-right:1px solid var(--border); border-bottom:1px solid var(--border); display:flex; flex-direction:column; gap:4px}
+.contract .v{font-size:15px; font-weight:600}
+.contract .d{font-size:12.5px; color:var(--ink-2)}
+
+.card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.stateline{display:flex; align-items:center; flex-wrap:wrap; gap:8px; font-size:11.5px; color:var(--ink-3); padding:12px 16px 0}
+.stateline .tagv{border:1px solid var(--border-strong); border-radius:3px; padding:1px 7px; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-2)}
+.stateline .tagv.rec{border-color:var(--note-border); color:var(--note); background:var(--note-bg)}
+.stateline .tagv.old{border-style:dashed; color:var(--ink-3)}
+
+.two{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+@media (max-width:900px){.two{grid-template-columns:1fr}}
+ul.plain{margin:0; padding-left:18px; color:var(--ink-2); font-size:13px; display:flex; flex-direction:column; gap:7px}
+ul.plain b{color:var(--ink)}
+
+/* ── shared app atoms, faithful to the Tailwind classes they mirror ───────────────────────── */
+/* lib/incident.ts badges: rounded-full px-[9px] py-[2px] text-[11.5px] font-medium */
+.bdg{display:inline-flex; align-items:center; border-radius:999px; padding:2px 9px; font-size:11.5px; font-weight:500; white-space:nowrap}
+.bdg.semi{font-weight:600}
+.i-none{color:var(--ink-3); background:var(--surface-2)}
+.i-minor{color:var(--maint); background:var(--maint-weak)}
+.i-major{color:var(--degraded); background:var(--degraded-weak)}
+.i-critical{color:var(--down); background:var(--down-weak)}
+.s-inv{color:var(--degraded); background:var(--degraded-weak)}
+.s-ide{color:var(--maint); background:var(--maint-weak)}
+.s-res{color:var(--up); background:var(--up-weak)}
+/* IncidentsView.vue: rounded-xs border px-[7px] py-px text-[10.5px] font-bold uppercase tracking-[0.05em] */
+.ob{display:inline-block; border:1px solid var(--border); border-radius:4px; padding:1px 7px; font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; white-space:nowrap}
+.ob.none{color:var(--ink-3); border-color:var(--border)}
+.ob.minor{color:var(--degraded); border-color:color-mix(in srgb,var(--degraded) 30%,transparent)}
+.ob.major{color:var(--down); border-color:color-mix(in srgb,var(--down) 40%,transparent)}
+/* IncidentsView.vue status chip: h-[22px] rounded-full px-[7px] text-[11.5px] font-semibold + 7px dot */
+.sc{display:inline-flex; align-items:center; gap:6px; height:22px; padding:0 7px; border-radius:999px; font-size:11.5px; font-weight:600; white-space:nowrap}
+.sc i{width:7px; height:7px; border-radius:50%; background:currentColor}
+/* IncidentSubjectChip.vue */
+.subj{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border); background:var(--surface-2); border-radius:999px; padding:2px 8px; font-size:11.5px; white-space:nowrap; color:var(--ink)}
+.subj .k{font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-3)}
+.subj .n{font-weight:500}
+.src{display:inline-block; border:1px solid var(--border); border-radius:4px; padding:0 6px; font-family:ui-monospace,Menlo,monospace; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-3)}
+/* select, as ServiceAlerting's escalation select: rounded border border-border bg-surface px-1.5 py-0.5 text-[12px] */
+select.sm{border:1px solid var(--border); background:var(--surface); color:var(--ink); border-radius:8px; padding:2px 6px; font:12px/1.4 inherit; font-family:inherit}
+select.sm:disabled{opacity:1; color:var(--ink-2); background:var(--surface-2); cursor:not-allowed}
+select.md{border:1px solid var(--border); background:var(--surface-2); color:var(--ink); border-radius:6px; padding:8px 12px; font-size:13px; font-family:inherit; min-width:200px}
+.btn{display:inline-flex; align-items:center; height:34px; border-radius:6px; padding:0 16px; font-size:13px; font-weight:500; border:1px solid transparent; cursor:default}
+.btn.pri{background:var(--accent); color:var(--accent-ink)}
+.btn.pri.dis{opacity:.5}
+.btn.xs{height:auto; padding:4px 8px; font-size:12px; border-radius:8px; font-weight:400}
+
+/* ── 1 · ServiceAlerting.vue ─────────────────────────────────────────────────────────────── */
+.sa-h{display:flex; flex-wrap:wrap; align-items:center; gap:8px; border-bottom:1px solid var(--border); padding:10px 16px}
+.sa-h h4{margin:0; font-size:13.5px; font-weight:600}
+.sa-badge{border-radius:8px; padding:2px 6px; font-family:ui-monospace,Menlo,monospace; font-size:11px}
+.sa-badge.up{background:color-mix(in srgb,var(--up) 10%,transparent); color:var(--up)}
+.sa-badge.pend{border:1px dashed var(--pending); background:color-mix(in srgb,var(--pending) 10%,transparent); color:var(--pending)}
+.sa-file{margin-left:auto; border-radius:8px; background:color-mix(in srgb,var(--ink-3) 10%,transparent); padding:2px 6px; font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--ink-3)}
+.sa-b{padding:12px 16px; display:flex; flex-direction:column; gap:12px; font-size:12.5px}
+.sa-row{display:flex; flex-wrap:wrap; align-items:center; gap:8px}
+.sa-row .t3{color:var(--ink-3)}
+.sa-cov{margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:4px}
+.sa-cov .t2{color:var(--ink-2)} .sa-cov .t3{color:var(--ink-3)}
+.sa-cov .up{color:var(--up)} .sa-cov .pend{color:var(--pending)}
+/* page_on toggles AS COMPILED TODAY: the intended `ok` hue is not a defined token (see §7, D-15),
+   so "on" differs from "off" only by ink against ink-3. */
+.po{border:1px solid var(--border); border-radius:8px; padding:2px 6px; font-family:ui-monospace,Menlo,monospace; font-size:11px; background:transparent}
+.po.on{color:var(--ink); border-color:var(--border-strong)}
+.po.off{color:var(--ink-3)}
+.cb{width:13px; height:13px; border:1px solid var(--border-strong); border-radius:3px; display:inline-grid; place-items:center; font-size:10px; line-height:1; background:var(--surface)}
+.cb.on{background:var(--accent); border-color:var(--accent); color:var(--accent-ink)}
+.cb.dis{opacity:.55}
+.num{width:64px; border:1px solid var(--border); background:var(--surface); border-radius:8px; padding:2px 6px; font-family:ui-monospace,Menlo,monospace; font-size:12px}
+/* NEW: the impact row */
+.imp{display:flex; flex-direction:column; gap:6px}
+.imp-sel{display:flex; flex-wrap:wrap; align-items:center; gap:6px 14px}
+.imp-one{display:inline-flex; align-items:center; gap:6px}
+.imp-one .st{font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--ink-2)}
+.imp-one.inert .st{color:var(--ink-3); text-decoration:line-through; text-decoration-color:var(--border-strong)}
+.imp-one.inert select{border-style:dashed; color:var(--ink-3)}
+.imp .hint{font-size:11.5px; color:var(--ink-3); line-height:1.5; max-width:86ch}
+.imp .inert-hint{font-size:11.5px; color:var(--ink-3); line-height:1.5}
+.imp .inert-hint .mono{color:var(--ink-2)}
+.warn{border:1px solid color-mix(in srgb,var(--degraded) 40%,transparent); background:var(--degraded-weak); border-radius:4px; padding:6px 10px; font-size:12px; color:var(--ink-2); line-height:1.5; max-width:86ch}
+.warn b{color:var(--degraded); font-weight:600}
+.sa-foot{display:flex; flex-wrap:wrap; align-items:center; gap:8px; border-top:1px solid var(--border); padding:10px 16px 12px; font-size:12.5px}
+
+/* ── 2 · SettingsView.vue ────────────────────────────────────────────────────────────────── */
+.st-grid{display:grid; grid-template-columns:210px 1fr; gap:28px; padding:20px}
+@media (max-width:820px){.st-grid{grid-template-columns:1fr; gap:16px}}
+.st-nav{display:flex; flex-direction:column; gap:18px}
+.st-nav .g{padding:0 10px 5px; font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+.st-nav .it{display:block; border-radius:6px; padding:7px 10px; font-size:13px; color:var(--ink-2)}
+.st-nav .it.on{background:var(--accent-weak); color:var(--accent); font-weight:500}
+.st-card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); padding:18px; display:flex; flex-direction:column; gap:14px}
+.st-card h4{margin:0; font-size:14px; font-weight:600}
+.st-card .lab{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+.st-card .expl{font-size:12.5px; color:var(--ink-3); line-height:1.55; max-width:72ch}
+.st-card .foot{display:flex; align-items:center; gap:12px; border-top:1px solid var(--border); padding-top:14px}
+.st-card .ro{font-size:12.5px; color:var(--ink-3)}
+
+/* ── 3 · IncidentDetailView.vue ──────────────────────────────────────────────────────────── */
+.idv{padding:22px 22px 18px; display:flex; flex-direction:column; gap:0}
+.idv .row{display:flex; flex-wrap:wrap; align-items:center; gap:10px}
+.idv h5{margin:0; font-size:22px; font-weight:600; letter-spacing:-.01em}
+.idv h5.s{font-size:17px}
+.idv .meta{margin-top:7px; display:flex; flex-wrap:wrap; gap:4px 16px; font-size:13px; color:var(--ink-3)}
+.idv .meta .mono{color:var(--ink-2)}
+.basis{margin-top:6px; font-size:12.5px; color:var(--ink-3); line-height:1.5}
+.basis .ip{color:var(--ink-2); font-weight:500}
+.basis .mono{font-size:12px; color:var(--ink-2)}
+.basis .map{display:block; margin-top:2px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-3)}
+.basis.unav{display:inline-block; border:1px dashed var(--border-strong); border-radius:6px; padding:2px 8px}
+.tl-card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow)}
+.tl-card .h{border-bottom:1px solid var(--border); padding:13px 16px; font-size:13px; font-weight:600}
+.tl-card ol{list-style:none; margin:0; padding:0}
+.tl-card li{display:flex; gap:12px; border-bottom:1px solid var(--border); padding:13px 16px}
+.tl-card li:last-child{border-bottom:0}
+.tl-card .dot{margin-top:4px; width:9px; height:9px; border-radius:50%; flex:none}
+.tl-card .l1{display:flex; align-items:center; gap:8px}
+.tl-card .l1 .st{font-size:12.5px; font-weight:500}
+.tl-card .l1 .mono{font-size:11px; color:var(--ink-3)}
+.tl-card .body{margin-top:4px; color:var(--ink-2); font-size:13px; white-space:pre-wrap}
+.tl-card .body.sys{font-family:ui-monospace,Menlo,monospace; font-size:12.5px}
+.forms{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+@media (max-width:900px){.forms{grid-template-columns:1fr}}
+.forms .idv{padding:14px 16px 16px}
+
+/* ── 4 · before / after table ────────────────────────────────────────────────────────────── */
+.ba{width:100%; border-collapse:collapse; font-size:12.5px}
+.ba th{text-align:left; font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); padding:9px 14px; border-bottom:1px solid var(--border)}
+.ba td{padding:12px 14px; border-bottom:1px solid var(--border); vertical-align:top; color:var(--ink-2)}
+.ba tr:last-child td{border-bottom:0}
+.ba td.w{font-weight:600; color:var(--ink); white-space:nowrap}
+.ba td .f{display:block; font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--ink-3); font-weight:400; margin-top:2px}
+.ba td.was{opacity:.8}
+.strike{text-decoration:line-through; text-decoration-color:var(--down)}
+.ba .why{font-size:12px; color:var(--ink-3)}
+.oplist{width:320px; max-width:100%; border:1px solid var(--accent); border-radius:8px; background:var(--surface); padding:12px 13px; display:flex; flex-direction:column; gap:8px; box-shadow:0 0 0 1px var(--accent-weak)}
+.oplist .r{display:flex; align-items:center; gap:8px}
+.oplist .r.wrap{flex-wrap:wrap}
+.oplist .t{font-size:13.5px; font-weight:600; line-height:1.3}
+.oplist .m{display:flex; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-3)}
+.oplist .m span:last-child{margin-left:auto}
+.fakesel{border:1px solid var(--border); background:var(--surface-2); border-radius:6px; font-size:13px; width:220px; overflow:hidden}
+.fakesel div{padding:5px 12px}
+.fakesel div.on{background:var(--accent); color:var(--accent-ink)}
+.pastrow{display:flex; align-items:center; gap:12px; padding:12px 14px; border:1px solid var(--border); border-radius:8px; background:var(--surface); max-width:560px}
+.pastrow .dt{width:8px; height:8px; border-radius:50%; background:var(--up); flex:none}
+.pastrow .tt{font-size:13.5px; font-weight:500}
+.pastrow .mm{font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-3)}
+
+/* ── 5 · PublicStatusView.vue ────────────────────────────────────────────────────────────── */
+.pub{border:1px solid var(--border); border-radius:10px; background:var(--bg); overflow:hidden}
+.pub-top{height:60px; display:flex; align-items:center; gap:12px; border-bottom:1px solid var(--border); background:var(--surface); padding:0 20px}
+.pub-top .mark{width:28px; height:28px; border-radius:8px; background:var(--accent)}
+.pub-top b{font-size:15px; font-weight:600}
+.pub-top .r{margin-left:auto; display:flex; gap:8px}
+.pub-top .r span{height:34px; display:inline-flex; align-items:center; border:1px solid var(--border); border-radius:6px; padding:0 12px; font-size:13px; color:var(--ink); background:var(--surface)}
+.pub-main{max-width:820px; margin:0 auto; padding:26px 20px 30px}
+.ov{display:flex; flex-wrap:wrap; align-items:center; gap:16px; border:1px solid var(--border); border-radius:8px; padding:22px; background:var(--surface-2); box-shadow:var(--shadow); margin-bottom:14px}
+.ov .ic{width:42px; height:42px; border-radius:11px; display:grid; place-items:center; color:#fff; background:var(--pending); flex:none}
+.ov h6{margin:0; font-size:20px; font-weight:600; color:var(--ink-3); letter-spacing:-.01em}
+.ov .sup{margin-top:2px; font-size:13.5px; color:var(--ink-2)}
+.ov .upd{margin-left:auto; text-align:right; font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink-3)}
+.pub-h2{display:flex; align-items:center; gap:10px; margin:26px 0 10px}
+.pub-h2 h6{margin:0; font-size:13px; font-weight:600}
+.pub-h2 .r{margin-left:auto; font-size:12px; color:var(--ink-3)}
+.grp{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden; margin-bottom:12px}
+.grp .gh{border-bottom:1px solid var(--border); padding:11px 18px; font-size:12px; font-weight:600; color:var(--ink-2)}
+.comp{border-bottom:1px solid var(--border); padding:14px 18px}
+.comp:last-child{border-bottom:0}
+.comp .l{display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; margin-bottom:9px}
+.comp .nm{font-size:14px; font-weight:500}
+.comp .stt{margin-left:auto; display:inline-flex; align-items:center; gap:7px; font-size:12.5px; font-weight:600}
+.comp .stt i{width:8px; height:8px; border-radius:50%}
+.comp .stt.ok{color:var(--up)} .comp .stt.ok i{background:var(--up)}
+.comp .stt.nd{color:var(--ink-3)} .comp .stt.nd i{background:var(--pending)}
+.comp .lnk{flex-basis:100%; font-size:12px; font-weight:600; color:var(--accent)}
+.strip{display:flex; gap:2px; height:26px}
+.strip i{flex:1; min-width:0; border-radius:2px; background:var(--up)}
+.strip i.g{background:var(--inset)}
+.strip i.d{background:var(--degraded)}
+.axis{margin-top:7px; display:flex; justify-content:space-between; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-3)}
+.axis b{color:var(--ink-2); font-weight:600}
+.ai-h{display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; margin:26px 0 10px}
+.ai-h h6{margin:0; font-size:13px; font-weight:600}
+.cnt{border-radius:999px; padding:2px 8px; font-size:11px; font-weight:600}
+.art{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.art .hd{padding:14px 18px}
+.art .hd .l{display:flex; flex-wrap:wrap; align-items:center; gap:8px}
+.art .hd .tt{flex:1 1 220px; min-width:0; font-size:14px; font-weight:600; line-height:1.35}
+.art .hd .chev{width:17px; height:17px; color:var(--ink-3); transform:rotate(180deg)}
+.art .hd .md{margin-top:8px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-3); line-height:1.6}
+.art .hd .pv{margin-top:8px; font-size:13px; color:var(--ink-2); line-height:1.6}
+.art .pn{border-top:1px solid var(--border); background:var(--surface-2); padding:15px 18px}
+.art .pn .lb{margin-bottom:10px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3)}
+.art .pn .u{border-left:2px solid var(--border); padding-left:12px}
+.art .pn .u .l{display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:11px}
+.art .pn .u .l b{color:var(--ink-2); font-weight:600}
+.art .pn .u .l .mono{color:var(--ink-3)}
+.art .pn .u .l .lt{border-radius:999px; background:var(--accent-weak); color:var(--accent); padding:1px 8px; font-weight:600}
+.art .pn .u p{margin-top:3px; font-size:13px; color:var(--ink-2); line-height:1.6}
+
+/* ── 7 · decisions ───────────────────────────────────────────────────────────────────────── */
+.dec{counter-reset:d; display:flex; flex-direction:column; gap:10px; margin:0; padding:0; list-style:none}
+.dec li{border:1px solid var(--border); border-radius:8px; background:var(--surface); padding:12px 14px 12px 50px; position:relative; font-size:13px; color:var(--ink-2)}
+.dec li::before{counter-increment:d; content:"D-" counter(d); position:absolute; left:12px; top:12px; font-family:ui-monospace,Menlo,monospace; font-size:11px; font-weight:700; color:var(--note)}
+.dec li b{color:var(--ink); font-weight:600}
+.dec .alt{display:block; margin-top:5px; font-size:12.5px; color:var(--ink-3)}
+.dec .alt::before{content:"Alternative: "; font-weight:600; color:var(--ink-3)}
+</style>
+
+<div class="page">
+
+  <div class="head">
+    <div class="eyebrow">
+      <span class="lbl">Design mock · incident impact · FR-042 / NFR-035 · APPROVED by the owner 2026-11-16</span>
+      <span class="themes" role="group" aria-label="Theme">
+        <button type="button" data-t="" class="on">Auto</button><button type="button" data-t="light">Light</button><button type="button" data-t="dark">Dark</button>
+      </span>
+    </div>
+    <h1>An incident's impact is declared by its service, derived by the machine, and only rises</h1>
+    <p>Mock for <span class="mono">docs/specs/func-incident-impact.md</span> §8 (revision 4, approved 2026-11-16). Every surface below is an existing screen with the change drawn into it, not a new screen. The change in the SPA is: three selectors on a service's alerting block, one project setting, one line on the incident page, one new system note, and the word <span class="mono">none</span> spelled in words wherever impact is printed. Wherever the spec leaves the exact words or placement to the mock, the choice made here is listed at the end, in §7, with its alternative.</p>
+  </div>
+
+  <div class="contract">
+    <div><span class="lbl">Service mapping</span><span class="v mono">impact_by_state</span><span class="d">degraded → minor · down → major · unknown → none (D6); in the service's alerting policy, not the definition (D7)</span></div>
+    <div><span class="lbl">Project default</span><span class="v mono">default_incident_impact</span><span class="d">major; what a monitor auto-incident opens with (D4); UI/API only, not in a bundle (D14)</span></div>
+    <div><span class="lbl">Basis</span><span class="v mono">impact_basis</span><span class="d">what the incident was classified under, frozen at open; incident page only (D15)</span></div>
+    <div><span class="lbl">The word for none</span><span class="v">"Impact not specified"</span><span class="d">as a phrase; "Not specified" as a badge (§4.6, I13). Mail and feeds keep the stored word</span></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════ 1 ═══════════════════════════════════════════════ -->
+  <section>
+    <header>
+      <h2>1 · Service → Alerting: three impact selectors <span class="new">new row</span></h2>
+      <div class="where">route <code>/services/:id</code> · <code>frontend/src/components/ServiceAlerting.vue</code>, the "Paging ownership" card. The new row sits <b>directly under "Pages for"</b>, before "Confirm over". The card is reproduced as the code renders it today, including the <code>page_on</code> toggles (see D-15 in §7 on their colour).</div>
+    </header>
+
+    <div class="card">
+      <div class="stateline"><span class="tagv rec">1a · normal</span> all three states page (<span class="mono">page_on = {down, degraded}</span>, <span class="mono">page_on_unknown</span> on); the D6 defaults; nothing inert, no warning</div>
+      <div style="padding:12px 16px 16px">
+        <div class="card" style="box-shadow:none">
+          <div class="sa-h">
+            <h4>Paging ownership</h4>
+            <span class="sa-badge up">live: armed</span>
+            <span class="sa-badge pend">burn: pending</span>
+          </div>
+          <div class="sa-b">
+            <ul class="sa-cov">
+              <li><span class="t2">Live transitions:</span> <span class="up">armed</span> <span class="t3">— members' alerts are delegated</span></li>
+              <li><span class="t2">Sealed burn:</span> <span class="pend">pending</span> <span class="t3">— no evaluation yet</span></li>
+            </ul>
+            <div class="sa-row"><span class="cb on">✓</span><span>This service owns paging for its declared inputs</span></div>
+            <div class="sa-row">
+              <span class="t3">Pages for</span>
+              <span class="po on">down</span><span class="po on">degraded</span>
+              <span class="sa-row" style="margin-left:8px; gap:6px"><span class="cb on">✓</span><span>and when it cannot be seen (<span class="mono">unknown</span>)</span></span>
+            </div>
+            <div class="imp hl">
+              <div class="imp-sel">
+                <span class="t3" style="color:var(--ink-3)">Incident impact</span>
+                <label class="imp-one"><span class="st">down</span><select class="sm"><option>Not specified</option><option>Minor</option><option selected>Major</option><option>Critical</option></select></label>
+                <label class="imp-one"><span class="st">degraded</span><select class="sm"><option>Not specified</option><option selected>Minor</option><option>Major</option><option>Critical</option></select></label>
+                <label class="imp-one"><span class="st">unknown</span><select class="sm"><option selected>Not specified</option><option>Minor</option><option>Major</option><option>Critical</option></select></label>
+              </div>
+              <p class="hint">The impact this service's incident opens with, by the state that opened it. While the incident is open it rises to the value of any worse state the service reaches, and never falls. A change applies from the next incident; an open incident keeps the values it opened with.</p>
+            </div>
+            <div class="sa-row"><span class="t3">Confirm over</span><span class="num">2</span><span class="t3">consecutive evaluations</span></div>
+            <div class="sa-row"><span class="t3">Repeat the last escalation step every</span><span class="num" style="width:80px">0</span><span class="t3">seconds</span><span class="t3" style="font-size:11.5px">(0 = never repeat; needs a policy with “repeat last step” on)</span></div>
+            <div class="sa-row" style="padding-top:4px"><span class="btn pri xs">Save</span><span class="t3" style="font-size:11.5px">Only the fields you changed are sent.</span></div>
+          </div>
+          <div class="sa-foot"><span style="color:var(--ink-3)">Escalation policy</span><select class="sm"><option>— none —</option></select><span class="btn xs" style="border-color:var(--border); color:var(--ink-2)">Save policy</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">1b · inert</span> today's default paging: <span class="mono">page_on = {down}</span>, <span class="mono">page_on_unknown</span> off</div>
+        <div class="sa-b" style="padding-top:14px">
+          <div class="sa-row">
+            <span class="t3">Pages for</span>
+            <span class="po on">down</span><span class="po off">degraded</span>
+            <span class="sa-row" style="margin-left:8px; gap:6px"><span class="cb"></span><span>and when it cannot be seen (<span class="mono">unknown</span>)</span></span>
+          </div>
+          <div class="imp">
+            <div class="imp-sel">
+              <span style="color:var(--ink-3)">Incident impact</span>
+              <label class="imp-one"><span class="st">down</span><select class="sm"><option selected>Major</option></select></label>
+              <label class="imp-one inert hl" title="degraded does not page, so it never opens or raises an incident"><span class="st">degraded</span><select class="sm"><option selected>Minor</option></select></label>
+              <label class="imp-one inert hl" title="unknown does not page, so it never opens or raises an incident"><span class="st">unknown</span><select class="sm"><option selected>Not specified</option></select></label>
+            </div>
+            <p class="inert-hint hl"><span class="mono">degraded</span> and <span class="mono">unknown</span> do not page, so they never open or raise an incident. Their values are kept, and apply once they page.</p>
+            <p class="hint">The impact this service's incident opens with, by the state that opened it. While the incident is open it rises to the value of any worse state the service reaches, and never falls. A change applies from the next incident; an open incident keeps the values it opened with.</p>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">1c · inert, one state</span> <span class="mono">page_on = {down, degraded}</span>, <span class="mono">page_on_unknown</span> off</div>
+        <div class="sa-b" style="padding-top:14px">
+          <div class="sa-row">
+            <span class="t3">Pages for</span>
+            <span class="po on">down</span><span class="po on">degraded</span>
+            <span class="sa-row" style="margin-left:8px; gap:6px"><span class="cb"></span><span>and when it cannot be seen (<span class="mono">unknown</span>)</span></span>
+          </div>
+          <div class="imp">
+            <div class="imp-sel">
+              <span style="color:var(--ink-3)">Incident impact</span>
+              <label class="imp-one"><span class="st">down</span><select class="sm"><option selected>Major</option></select></label>
+              <label class="imp-one"><span class="st">degraded</span><select class="sm"><option selected>Minor</option></select></label>
+              <label class="imp-one inert hl"><span class="st">unknown</span><select class="sm"><option selected>Major</option></select></label>
+            </div>
+            <p class="inert-hint hl"><span class="mono">unknown</span> does not page, so it never opens or raises an incident. Its value is kept, and applies once it pages.</p>
+          </div>
+        </div>
+        <div class="stateline" style="padding-top:0; padding-bottom:14px">The selector is <b>not</b> disabled: an operator may prepare the value before switching paging on, and the save sends it (§4.1 "shown as such in the editor, not refused").</div>
+      </div>
+    </div>
+
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">1d · degraded rated above down</span> allowed, warned, saves</div>
+        <div class="sa-b" style="padding-top:14px">
+          <div class="sa-row">
+            <span class="t3">Pages for</span>
+            <span class="po on">down</span><span class="po on">degraded</span>
+            <span class="sa-row" style="margin-left:8px; gap:6px"><span class="cb"></span><span>and when it cannot be seen (<span class="mono">unknown</span>)</span></span>
+          </div>
+          <div class="imp">
+            <div class="imp-sel">
+              <span style="color:var(--ink-3)">Incident impact</span>
+              <label class="imp-one"><span class="st">down</span><select class="sm"><option selected>Major</option></select></label>
+              <label class="imp-one"><span class="st">degraded</span><select class="sm" style="border-color:color-mix(in srgb,var(--degraded) 55%,transparent)"><option selected>Critical</option></select></label>
+              <label class="imp-one inert"><span class="st">unknown</span><select class="sm"><option selected>Not specified</option></select></label>
+            </div>
+            <p class="warn hl"><b>Degraded is rated above down</b> (Critical against Major). That is allowed, but an incident that opens on <span class="mono">down</span> will be published as less severe than one that opens on <span class="mono">degraded</span>.</p>
+            <p class="inert-hint"><span class="mono">unknown</span> does not page, so it never opens or raises an incident. Its value is kept, and applies once it pages.</p>
+          </div>
+          <div class="sa-row"><span class="btn pri xs">Save</span><span style="color:var(--ink-3); font-size:11.5px">Only the fields you changed are sent.</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">1e · managed by a file</span> read-only, as the rest of the block is today (409 <span class="mono">managed_by_file</span> on a PATCH)</div>
+        <div style="padding:12px 16px 16px">
+          <div class="card" style="box-shadow:none">
+            <div class="sa-h"><h4>Paging ownership</h4><span class="sa-badge up">live: armed</span><span class="sa-badge pend">burn: pending</span><span class="sa-file">declared in services/checkout.yaml</span></div>
+            <div class="sa-b">
+              <div class="sa-row">
+                <span class="t3">Pages for</span>
+                <span class="po on" style="opacity:.6">down</span><span class="po off" style="opacity:.6">degraded</span>
+                <span class="sa-row" style="margin-left:8px; gap:6px"><span class="cb dis"></span><span>and when it cannot be seen (<span class="mono">unknown</span>)</span></span>
+              </div>
+              <div class="imp">
+                <div class="imp-sel">
+                  <span style="color:var(--ink-3)">Incident impact</span>
+                  <label class="imp-one"><span class="st">down</span><select class="sm" disabled><option selected>Critical</option></select></label>
+                  <label class="imp-one inert"><span class="st">degraded</span><select class="sm" disabled><option selected>Minor</option></select></label>
+                  <label class="imp-one inert"><span class="st">unknown</span><select class="sm" disabled><option selected>Not specified</option></select></label>
+                </div>
+                <p class="inert-hint"><span class="mono">degraded</span> and <span class="mono">unknown</span> do not page, so they never open or raise an incident. Their values are kept, and apply once they page.</p>
+              </div>
+              <p style="font-size:11.5px; color:var(--ink-3)">These fields are part of the file's desired state, so they are edited there.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="note"><b>Order and labels.</b> The selectors follow the row above them — <span class="mono">down</span>, <span class="mono">degraded</span>, then <span class="mono">unknown</span> — so each state's paging toggle and its impact sit in the same order (D-2). The options read <i>Not specified · Minor · Major · Critical</i>, the badge words, never the enum (I13). <b>Inert</b> follows the <i>draft</i>, not the saved row: toggling <span class="mono">degraded</span> on in "Pages for" lifts its strike-through and its sentence before Save, because the operator is deciding both at once (D-4). <b>Warning</b> is computed on the draft too, is not a refusal, and does not disable Save (D-7). <b>What Save sends.</b> The mapping is one field to the diff: any selector change sends <span class="mono">impact_by_state</span> with all three keys, as D18 requires; an untouched mapping sends nothing, so "Only the fields you changed are sent" stays true. <b>Read-only without write access</b> (not file-managed) looks like 1e without the file chip and without the last sentence, exactly as the block behaves today.</div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 2 ═══════════════════════════════════════════════ -->
+  <section>
+    <header>
+      <h2>2 · Settings → Project → Incidents <span class="new">new tab</span></h2>
+      <div class="where">route <code>/settings?tab=incidents</code> · <code>frontend/src/views/SettingsView.vue</code>, the <i>Project</i> group of the grouped nav, after <i>Release gate</i> (D19). Shown to everyone who sees the project's settings; editable only with <span class="mono">project:manage</span> on this project. The card follows the instance "Monitor defaults" card (labelled field, explanation, Save + "✓ Saved").</div>
+    </header>
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">2a · with project:manage</span> after a change, before Save</div>
+        <div class="st-grid">
+          <nav class="st-nav">
+            <div>
+              <div class="g">Project</div>
+              <span class="it">Notification channels</span><span class="it">Incoming alerts</span><span class="it">Secrets</span><span class="it">Release gate</span><span class="it on hl">Incidents</span><span class="it">Members</span><span class="it">Danger zone</span>
+            </div>
+            <div><div class="g">Organization</div><span class="it">Members</span><span class="it">API tokens</span><span class="it">Webhooks</span></div>
+          </nav>
+          <div class="st-card">
+            <h4>Incidents</h4>
+            <label style="display:flex; flex-direction:column; gap:6px">
+              <span class="lab">Impact of monitor incidents</span>
+              <select class="md hl"><option>Not specified</option><option>Minor</option><option>Major</option><option selected>Critical</option></select>
+            </label>
+            <p class="expl hl">The impact a monitor's automatic incident opens with. It is shown on status pages and in incident lists, and it does not change while the incident is open. Changing it here does not touch incidents that are already open — it applies from the next one. Incidents a service opens take their impact from that service's alerting settings instead.</p>
+            <div class="foot"><span class="btn pri">Save</span><span style="font-size:12.5px; color:var(--ink-3)">was Major</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">2b · without project:manage</span> read-only (an editor or viewer of the project)</div>
+        <div class="st-grid">
+          <nav class="st-nav">
+            <div>
+              <div class="g">Project</div>
+              <span class="it">Notification channels</span><span class="it">Incoming alerts</span><span class="it">Secrets</span><span class="it">Release gate</span><span class="it on">Incidents</span>
+            </div>
+            <div><div class="g">Organization</div><span class="it">Members</span><span class="it">API tokens</span><span class="it">Webhooks</span></div>
+          </nav>
+          <div class="st-card">
+            <h4>Incidents</h4>
+            <div style="display:flex; flex-direction:column; gap:6px">
+              <span class="lab">Impact of monitor incidents</span>
+              <span><span class="bdg i-major hl">Major</span></span>
+            </div>
+            <p class="expl">The impact a monitor's automatic incident opens with. It is shown on status pages and in incident lists, and it does not change while the incident is open. Changing it here does not touch incidents that are already open — it applies from the next one. Incidents a service opens take their impact from that service's alerting settings instead.</p>
+            <p class="ro hl">Only a project admin can change this.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note"><b>Read-only shows the value, not a disabled control</b> — the way the release-gate tab shows a policy to a reader (D-9). The badge is the incident page's own impact badge, so the reader sees the word they will meet on incidents. <b>Errors</b> render under Save in the down hue, the field's own message (a 400 for a value outside the enum cannot come from this select; a 403 can, if the role was revoked while the page was open). <b>No-op</b>: Save is disabled until the value differs from the stored one, so the form never sends the server's no-op. <b>"was Major"</b> appears only while the draft differs; after a save it gives way to "✓ Saved".</div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 3 ═══════════════════════════════════════════════ -->
+  <section>
+    <header>
+      <h2>3 · Incident page: the basis line, and the "Impact raised" note <span class="new">new line · new note</span></h2>
+      <div class="where">route <code>/incidents/:id</code> · <code>frontend/src/views/IncidentDetailView.vue</code>. The line is <b>its own row under the header's meta row</b> (started · acknowledged · resolved), above the impact-link chips. It is read from <code>impact_basis</code> / <code>impact_basis_unavailable</code> of the detail response (§4.6). After Acknowledge, the line stays: <code>acknowledge()</code> carries both fields over (§4.6).</div>
+    </header>
+
+    <h3 class="sub">3a · One incident that rose twice — header and timeline as the page renders them</h3>
+    <div class="card">
+      <div class="idv">
+        <div class="row">
+          <h5>Checkout — service unknown</h5>
+          <span class="bdg s-ide">Identified</span>
+          <span class="bdg i-major">Major</span>
+          <span class="src">auto</span>
+          <a class="subj"><span class="k">service</span><span class="n">· checkout</span></a>
+        </div>
+        <div class="meta">
+          <span>started <span class="mono">41m ago</span></span>
+          <span>acknowledged by <b style="font-weight:500; color:var(--ink-2)">Ada Park</b> · <span class="mono">24m ago</span></span>
+        </div>
+        <p class="basis hl"><span class="ip">Major impact</span> — declared by service <a href="#">Checkout</a> for state <span class="mono">down</span>
+          <span class="map">mapping frozen at open: down → major · degraded → minor · unknown → not specified</span></p>
+      </div>
+      <div style="padding:0 22px 22px">
+        <div class="tl-card">
+          <div class="h">Timeline</div>
+          <ol>
+            <li><span class="dot s-inv"></span><div><div class="l1"><span class="st">Investigating</span><span class="mono">41m ago</span><span class="mono">· system</span></div><p class="body sys">Opened automatically: service UNKNOWN confirmed over 3 evaluation(s).</p></div></li>
+            <li class="hl"><span class="dot s-inv"></span><div><div class="l1"><span class="st">Investigating</span><span class="mono">33m ago</span><span class="mono">· system</span></div><p class="body sys">⬆ Impact raised: none → minor — the service is degraded.</p></div></li>
+            <li><span class="dot s-ide"></span><div><div class="l1"><span class="st">Identified</span><span class="mono">24m ago</span><span class="mono">· ada@example.com</span></div><p class="body">Payment provider is timing out on card authorisation; failing over to the secondary.</p></div></li>
+            <li class="hl"><span class="dot s-ide"></span><div><div class="l1"><span class="st">Identified</span><span class="mono">9m ago</span><span class="mono">· system</span></div><p class="body sys">⬆ Impact raised: minor → major — the service is down.</p></div></li>
+          </ol>
+        </div>
+      </div>
+    </div>
+    <div class="note"><b>The note renders like every other system note</b> — detected by its prefix (a new key <span class="mono">impact_raised</span> → <span class="mono">⬆ Impact raised:</span> in <span class="mono">SYSTEM_NOTE_MARKERS</span>, beside the <span class="mono">🕸 Impact:</span> key it must not be confused with), body in mono, the gutter dot in the colour of the status the incident had (a rise does not move the lifecycle: the second rise carries <i>Identified</i>, the status the operator left). No new glyph in the gutter: only the changes note has one, because it links to a deploy. <b>Two rises</b> are two notes and the line above them always names the state that set the <i>current</i> impact — <span class="mono">down</span> here, not the opening <span class="mono">unknown</span>. The opening note names the opening state (§4.2), which is why it now says UNKNOWN where today's code says DOWN for every state. The words <span class="mono">none → minor</span> inside the note are the stored enum words the spec fixes (§4.3) — see D-18 in §7.</div>
+
+    <h3 class="sub">3b · The six forms of the line (§4.6), the service form in both cases</h3>
+    <div class="forms">
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">service_mapping · service exists</span> the name is a link</div>
+        <div class="idv">
+          <div class="row"><h5 class="s">Checkout — service down</h5><span class="bdg s-inv">Investigating</span><span class="bdg i-major">Major</span><span class="src">auto</span><a class="subj"><span class="k">service</span><span class="n">· checkout</span></a></div>
+          <div class="meta"><span>started <span class="mono">6m ago</span></span></div>
+          <p class="basis hl"><span class="ip">Major impact</span> — declared by service <a href="#">Checkout</a> for state <span class="mono">down</span>
+            <span class="map">mapping frozen at open: down → major · degraded → minor · unknown → not specified</span></p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">service_mapping · service deleted</span> <span class="mono">service_id</span> is NULL; the name is the snapshot, as text</div>
+        <div class="idv">
+          <div class="row"><h5 class="s">Legacy search — service degraded</h5><span class="bdg s-res">Resolved</span><span class="bdg i-minor">Minor</span><span class="src">auto</span></div>
+          <div class="meta"><span>started <span class="mono">12d ago</span></span><span>resolved <span class="mono">12d ago</span></span></div>
+          <p class="basis hl"><span class="ip">Minor impact</span> — declared by service Legacy search <span style="color:var(--ink-3)">(deleted)</span> for state <span class="mono">degraded</span>
+            <span class="map">mapping frozen at open: down → critical · degraded → minor · unknown → not specified</span></p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">service_mapping · impact none</span> a service that pages on unknown</div>
+        <div class="idv">
+          <div class="row"><h5 class="s">Checkout — service unknown</h5><span class="bdg s-inv">Investigating</span><span class="bdg i-none">Not specified</span><span class="src">auto</span><a class="subj"><span class="k">service</span><span class="n">· checkout</span></a></div>
+          <div class="meta"><span>started <span class="mono">3m ago</span></span></div>
+          <p class="basis hl"><span class="ip">Impact not specified</span> — declared by service <a href="#">Checkout</a> for state <span class="mono">unknown</span>
+            <span class="map">mapping frozen at open: down → major · degraded → minor · unknown → not specified</span></p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">project_default</span> a monitor auto-incident</div>
+        <div class="idv">
+          <div class="row"><h5 class="s">api-gateway is down</h5><span class="bdg s-inv">Investigating</span><span class="bdg i-major">Major</span><span class="src">auto</span><a class="subj"><span class="k">monitor</span><span class="n">· api-gateway</span></a></div>
+          <div class="meta"><span>started <span class="mono">2m ago</span></span></div>
+          <p class="basis hl"><span class="ip">Major impact</span> — <a href="#">project default</a> for monitor incidents</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">manual</span> opened from "New incident" or by a token</div>
+        <div class="idv">
+          <div class="row"><h5 class="s">Elevated API latency</h5><span class="bdg s-ide">Identified</span><span class="bdg i-minor">Minor</span><span class="src">manual</span></div>
+          <div class="meta"><span>started <span class="mono">1h ago</span></span></div>
+          <p class="basis hl"><span class="ip">Minor impact</span> — set by the author when the incident was created</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">alertmanager</span> from the receiver</div>
+        <div class="idv">
+          <div class="row"><h5 class="s">KubePodCrashLooping</h5><span class="bdg s-inv">Investigating</span><span class="bdg i-critical">Critical</span><span class="src">api</span></div>
+          <div class="meta"><span>started <span class="mono">14m ago</span></span><span class="mono" style="border:1px solid var(--border); border-radius:4px; background:var(--inset); padding:0 6px; font-size:11px">a1f9…c03e</span></div>
+          <p class="basis hl"><span class="ip">Critical impact</span> — from the alert's severity label</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">not recorded</span> <span class="mono">impact_basis: null</span> — opened before FR-042, or by an older binary (D12)</div>
+        <div class="idv">
+          <div class="row"><h5 class="s">Checkout — service down</h5><span class="bdg s-inv">Investigating</span><span class="bdg i-major">Major</span><span class="src">auto</span><a class="subj"><span class="k">service</span><span class="n">· checkout</span></a></div>
+          <div class="meta"><span>started <span class="mono">3h ago</span></span></div>
+          <p class="basis hl"><span class="ip">Major impact</span> — basis not recorded (opened before impact classification)</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv rec">unavailable</span> <span class="mono">impact_basis: null</span> + <span class="mono">impact_basis_unavailable: true</span></div>
+        <div class="idv">
+          <div class="row"><h5 class="s">Checkout — service down</h5><span class="bdg s-inv">Investigating</span><span class="bdg i-major">Major</span><span class="src">auto</span><a class="subj"><span class="k">service</span><span class="n">· checkout</span></a></div>
+          <div class="meta"><span>started <span class="mono">6m ago</span></span></div>
+          <p class="basis unav hl"><span class="ip">Major impact</span> — basis unavailable</p>
+        </div>
+      </div>
+    </div>
+    <div class="note"><b>Grammar of the line.</b> It starts with the impact <i>phrase</i> — "Major impact", "Impact not specified" — the spec's <span class="mono">&lt;impact&gt;</span>, so the line reads as a sentence and never prints a bare "None" (D-10). The service name is the snapshot <span class="mono">name</span>; it is a link only while <span class="mono">service_id</span> is set (§4.6), and when it is not, "(deleted)" says why the one name that is not a link is not one (D-12) — the header has no subject chip for such an incident, so this line is the only place that still names the service. <b>The frozen mapping</b> is printed on the service form as a second, mono line, because the owner's condition on D7 is that the frozen mapping be visible on the incident page; the §4.6 line alone names only the current state (D-11). "project default" links to Settings → Incidents (D-13). "basis unavailable" wears the dashed border of the page's existing "impact links unavailable" chip, so a failed read does not look like a fact (D-14). The basis is <b>never</b> on the public page, in the list, in mail, feeds or webhooks (D15, I11).</div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 4 ═══════════════════════════════════════════════ -->
+  <section>
+    <header>
+      <h2>4 · <span class="mono">none</span> in words — all eight places, was / becomes <span class="new">wording</span></h2>
+      <div class="where">§4.6 and §8 item 4. The badge tables keep their colours (none stays ink-3 on surface-2, or ink-3 outlined in the operator list); only the words change. The helper that renders them is <code>frontend/src/lib/incident.ts</code> <code>impactBadge</code> plus one phrase helper beside it; the operator list stops printing the raw enum.</div>
+    </header>
+    <div class="card" style="overflow-x:auto">
+      <table class="ba">
+        <thead><tr><th>#</th><th>Place</th><th>Was</th><th>Becomes</th><th>Why this form</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="w">1</td>
+            <td class="w">Public page — count pill<span class="f">PublicStatusView.vue · impact-count</span></td>
+            <td class="was"><span class="cnt i-critical">Critical 1</span> <span class="cnt i-none">None 2</span></td>
+            <td><span class="cnt i-critical">Critical 1</span> <span class="cnt i-none hl">Not specified 2</span></td>
+            <td class="why">The badge word plus the count, like its neighbours. It is the widest pill (≈ 95 px) and the pill row already wraps.</td>
+          </tr>
+          <tr>
+            <td class="w">2</td>
+            <td class="w">Public page — group heading<span class="f">PublicStatusView.vue · impact-group-heading · &gt; 8 active</span></td>
+            <td class="was"><span style="font-size:12px; font-weight:600; color:var(--ink-2)">None impact</span></td>
+            <td><span class="hl" style="font-size:12px; font-weight:600; color:var(--ink-2)">Impact not specified</span></td>
+            <td class="why">The phrase, as the headline already says it. The other headings keep "Critical impact", "Major impact", "Minor impact"; the none group is always last.</td>
+          </tr>
+          <tr>
+            <td class="w">3</td>
+            <td class="w">Public page — card badge<span class="f">PublicStatusView.vue · impact-badge</span></td>
+            <td class="was"><span class="bdg semi s-inv">Investigating</span> <span class="bdg semi i-none">None</span></td>
+            <td><span class="bdg semi s-inv">Investigating</span> <span class="bdg semi i-none hl">Not specified</span></td>
+            <td class="why">The badge. Fits: the title takes the flexible space (basis 220 px) and the badges wrap under it on a phone (see §5).</td>
+          </tr>
+          <tr>
+            <td class="w">4</td>
+            <td class="w">Past incident row (page and <span class="mono">/status/:slug/history</span>)<span class="f">PastIncidentRow.vue</span></td>
+            <td class="was"><span class="mono" style="font-size:11.5px; color:var(--ink-3)">resolved 2d ago · lasted 1h 12m · none impact</span></td>
+            <td><span class="mono hl" style="font-size:11.5px; color:var(--ink-3)">resolved 2d ago · lasted 1h 12m · impact not specified</span></td>
+            <td class="why">The phrase in lower case, as the tail already lower-cases "minor impact". The word order flips for none only — "not specified impact" is not English.</td>
+          </tr>
+          <tr>
+            <td class="w">5</td>
+            <td class="w">Operator list — card badge<span class="f">IncidentsView.vue · left column, 320 px</span></td>
+            <td class="was">
+              <div class="oplist"><div class="r"><span class="sc s-inv"><i></i>Investigating</span><span class="ob none">none</span><span class="subj"><span class="k">service</span><span class="n">· checkout</span></span></div><div class="t">Checkout — service unknown</div><div class="m"><span>7c1e40ab</span><span>3m ago</span></div></div>
+            </td>
+            <td>
+              <div class="oplist" style="margin-bottom:10px"><div class="r"><span class="sc s-inv"><i></i>Investigating</span><span class="ob none">Not specified</span><span class="subj"><span class="k">service</span><span class="n">· checkout</span></span></div><div class="t">Checkout — service unknown</div><div class="m"><span>7c1e40ab</span><span>3m ago</span></div></div>
+              <div class="lbl" style="margin:0 0 6px">↑ as the row is today (no wrap) — the chips squeeze · ↓ proposed: the row wraps</div>
+              <div class="oplist hl"><div class="r wrap"><span class="sc s-inv"><i></i>Investigating</span><span class="ob none">Not specified</span><span class="subj"><span class="k">service</span><span class="n">· checkout</span></span></div><div class="t">Checkout — service unknown</div><div class="m"><span>7c1e40ab</span><span>3m ago</span></div></div>
+            </td>
+            <td class="why">The badge, upper-cased by the existing class: NOT SPECIFIED. It is the only place the word does not fit: status chip + this badge + a subject chip exceed the card's 294 px of content, and the row has no <span class="mono">flex-wrap</span>. Proposed: add the wrap (D-16). The list stops printing <span class="mono">inc.impact</span> raw and goes through the badge words — for minor/major/critical the text is unchanged ("MINOR", "MAJOR", "CRITICAL").</td>
+          </tr>
+          <tr>
+            <td class="w">6</td>
+            <td class="w">Operator list — selected incident badge<span class="f">IncidentsView.vue · right panel</span></td>
+            <td class="was"><span class="sc s-inv"><i></i>Investigating</span> <span class="ob none">none impact</span></td>
+            <td><span class="sc s-inv"><i></i>Investigating</span> <span class="ob none hl">Impact not specified</span></td>
+            <td class="why">The phrase (upper-cased: IMPACT NOT SPECIFIED), because the others read "MAJOR IMPACT". This row already wraps. No basis line here (D19, §6).</td>
+          </tr>
+          <tr>
+            <td class="w">7</td>
+            <td class="w">Incident page — impact badge<span class="f">IncidentDetailView.vue</span></td>
+            <td class="was"><span class="bdg s-inv">Investigating</span> <span class="bdg i-none">None</span></td>
+            <td><span class="bdg s-inv">Investigating</span> <span class="bdg i-none hl">Not specified</span></td>
+            <td class="why">The badge; the basis line under it carries the phrase ("Impact not specified — declared by …").</td>
+          </tr>
+          <tr>
+            <td class="w">8</td>
+            <td class="w">New incident — impact selector<span class="f">NewIncidentView.vue</span></td>
+            <td class="was"><div class="fakesel"><div>None</div><div class="on">Minor</div><div>Major</div><div>Critical</div></div></td>
+            <td><div class="fakesel hl"><div>Not specified</div><div class="on">Minor</div><div>Major</div><div>Critical</div></div></td>
+            <td class="why">The badge word, so what the author picks is what the incident will show. Order and default (Minor) unchanged. The field label stays "Impact".</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note"><b>Two strings, one rule.</b> Where impact stands <i>alone</i> as a label (pill, badge, option), it is <b>Not specified</b>. Where impact is <i>named</i> as a phrase (headings, the past-row tail, the selected badge, the basis line, the page headline that already does this), it is <b>Impact not specified</b>. Both come from <span class="mono">lib/incident.ts</span>, so no view composes "&lt;label&gt; impact" by hand any more — the composition is exactly what produced "None impact". <b>Not covered here, on purpose:</b> the words <span class="mono">none → minor</span> inside the server's own note (§3a; D-18) and the stored word in mail and feeds (§6).</div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 5 ═══════════════════════════════════════════════ -->
+  <section>
+    <header>
+      <h2>5 · The public status page with an open incident of impact <span class="mono">none</span></h2>
+      <div class="where">route <code>/status/:slug</code> · <code>frontend/src/views/PublicStatusView.vue</code>, anonymous. The service <i>Checkout</i> pages when it cannot be seen (<span class="mono">page_on_unknown</span>) and has the default mapping, so its incident opens at <span class="mono">none</span>. Its component therefore reads "No data" (cerbix cannot see it), and the page's other components are measured and operational. Every string below is what the code produces for that input; only the four marked ones are changed by FR-042.</div>
+    </header>
+    <div class="pub">
+      <div class="pub-top"><span class="mark"></span><b>Acme status</b><span class="r"><span>☼</span><span>RSS</span></span></div>
+      <div class="pub-main">
+        <div class="ov">
+          <span class="ic"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 8v5M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg></span>
+          <div style="min-width:0">
+            <h6>1 active incident</h6>
+            <div class="sup">Impact not specified. All measured services are currently operational. 1 component on this page has no measurement.</div>
+          </div>
+          <div class="upd">updated 12s ago<br>2026-11-16 14:22 UTC</div>
+        </div>
+
+        <div class="pub-h2"><h6>Current status by service</h6><span class="r">90-day uptime</span></div>
+        <div class="grp">
+          <div class="gh">Storefront</div>
+          <div class="comp">
+            <div class="l"><span class="nm">API</span><span class="stt ok"><i></i>Operational</span></div>
+            <div class="strip" id="strip-a"></div>
+            <div class="axis"><span>90 days ago</span><span><b>99.98%</b> uptime</span><span>today</span></div>
+          </div>
+          <div class="comp">
+            <div class="l"><span class="nm">Checkout</span><span class="stt nd"><i></i>No data</span><span class="lnk">Active incident</span></div>
+            <div class="strip" id="strip-b"></div>
+            <div class="axis"><span>90 days ago</span><span><b>99.91%</b> uptime</span><span>today</span></div>
+          </div>
+          <div class="comp">
+            <div class="l"><span class="nm">Dashboard</span><span class="stt ok"><i></i>Operational</span></div>
+            <div class="strip" id="strip-c"></div>
+            <div class="axis"><span>90 days ago</span><span><b>100.00%</b> uptime</span><span>today</span></div>
+          </div>
+        </div>
+
+        <div class="ai-h"><h6>Active incidents (1)</h6><span class="cnt i-none hl">Not specified 1</span></div>
+        <div class="art">
+          <div class="hd">
+            <div class="l">
+              <span class="tt">Checkout — service unknown</span>
+              <span class="bdg semi s-inv">Investigating</span>
+              <span class="bdg semi i-none hl">Not specified</span>
+              <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+            </div>
+            <div class="md">Opened 3m ago · Updated 3m ago · 1 updates</div>
+            <div class="pv">Opened automatically: service UNKNOWN confirmed over 3 evaluation(s).</div>
+          </div>
+          <div class="pn">
+            <div class="lb">Timeline</div>
+            <div class="u">
+              <div class="l"><b>Investigating</b><span class="mono">3m ago</span><span class="lt">Latest</span></div>
+              <p class="hl">Opened automatically: service UNKNOWN confirmed over 3 evaluation(s).</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="pub-h2"><h6>Past incidents</h6><span class="r">last 90 days</span></div>
+        <div class="grp">
+          <div class="pastrow" style="border:0; border-radius:0; max-width:none">
+            <span class="dt"></span>
+            <div style="flex:1; min-width:0"><div class="tt">Checkout — service unknown</div><div class="mm hl">resolved 6d ago · lasted 18 min · impact not specified</div></div>
+            <span class="bdg semi s-res">Resolved</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note"><b>How a visitor reads it.</b> The band is neutral (pending tile, ink-3 headline), not amber: nothing in it claims a severity cerbix cannot observe — the D6 reason for <span class="mono">unknown → none</span>. The headline counts the incident, the copy says the impact is not specified, and the component it is about says "No data". All three are true and none contradicts another. The headline and band are today's code (<span class="mono">overallStatusPresentation</span> already handles <span class="mono">none</span>); FR-042 changes only the pill, the badge, the opening note (UNKNOWN, not DOWN) and the past-row tail. <b>If the service later goes down</b>, the visitor sees a second timeline entry "⬆ Impact raised: none → major — the service is down.", the pill and badge turn to <i>Major</i>, the band turns amber, and the card moves by <span class="mono">updated_at</span> (§4.3 step 3). "1 updates" is today's string, untouched here.</div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 6 ═══════════════════════════════════════════════ -->
+  <section>
+    <header>
+      <h2>6 · What does not change, though impact is visible there</h2>
+      <div class="where">named, so the absence reads as a decision.</div>
+    </header>
+    <ul class="plain">
+      <li><b>Incident list, right-hand panel</b> (<span class="mono">IncidentsView.vue</span>) — shows the impact badge (§4, row 6) but <b>no basis line</b>: it is fed by the list, which does not carry the basis (D15, D19). "Manage →" leads to the incident page, where the line is.</li>
+      <li><b>No impact control anywhere on an existing incident</b> — not on the incident page, not in the list's quick status buttons, not in "Post an update", for any role (D3, D17). The impact badge stays a badge.</li>
+      <li><b>Subscriber mail</b> prints the stored word (<span class="mono">Impact: none</span>) and keeps today's subject <span class="mono">[&lt;status&gt;] &lt;title&gt;</span>; only a rise to <span class="mono">critical</span> is mailed, with the §4.5 template. Mail is not SPA; I13 does not apply (§4.6).</li>
+      <li><b>Feeds</b> (RSS / Atom / JSON) print <span class="mono">status: investigating · impact: none</span> — read by programs, unchanged.</li>
+      <li><b>Webhooks</b> — the <span class="mono">incident</span> object carries the new impact; a rise adds <span class="mono">impact_raised</span>; never the basis.</li>
+      <li><b>Public page headline and band</b> — already say "Impact not specified" and already rank <span class="mono">none</span> below <span class="mono">minor</span>; no code change.</li>
+      <li><b>Service page, monitor page, dashboard</b> — show no incident impact today and gain none. The service page's open-incident link stays a link.</li>
+      <li><b>Instance Settings → Monitor defaults</b> — gains nothing: the default is per project (D4), in the project's Incidents tab.</li>
+      <li><b>The impact-link chips</b> (<span class="mono">🕸 probable root</span> / <span class="mono">affected</span>) on the incident page — a different "impact" (the dependency graph), untouched; the basis line sits above them.</li>
+    </ul>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 7 ═══════════════════════════════════════════════ -->
+  <section>
+    <header>
+      <h2>7 · Decisions for the owner — all eighteen approved as drawn, 2026-11-16</h2>
+      <div class="where">every place where this mock chose between options. One decision per item, with the alternative not taken. Items D-15 and D-18 are not wording choices but things the mock ran into.</div>
+    </header>
+    <ol class="dec">
+      <li><b>The eight <span class="mono">none</span> strings</b> (§4): <i>Not specified</i> where impact is a standalone label (count pill, both badges, the selector option); <i>Impact not specified</i> where it is a phrase (group heading, selected-incident badge, basis line); <i>impact not specified</i> in the past-row tail. <span class="alt">one word everywhere, "Unspecified" — shorter in the operator list, but it reads like a missing value rather than a statement, and the headline already says "Impact not specified".</span></li>
+      <li><b>Selector order</b> in Service → Alerting: <span class="mono">down · degraded · unknown</span>, the order of the "Pages for" row above it. <span class="alt"><span class="mono">degraded · down · unknown</span>, the key order of the spec, the API and the audit segment.</span></li>
+      <li><b>The hint under the selectors</b> (always shown): "The impact this service's incident opens with, by the state that opened it. While the incident is open it rises to the value of any worse state the service reaches, and never falls. A change applies from the next incident; an open incident keeps the values it opened with." <span class="alt">a shorter hint behind an ⓘ tooltip — less text on a busy card, but the rule "only rises, and an edit does not touch an open incident" is the one an operator most needs to see before saving.</span></li>
+      <li><b>Inert presentation</b>: the state name struck through, the select's border dashed, the select <i>still enabled</i>, plus <b>one</b> sentence under the row naming every inert state ("… do not page, so they never open or raise an incident. Their values are kept, and apply once they page."). It follows the draft, not the saved row. <span class="alt">a hint under each selector — repeats itself twice in the default configuration, where two of three are inert; or follow only the saved row, which would contradict the toggles the operator just clicked.</span></li>
+      <li><b>The default case is mostly inert</b>: a service on today's paging (<span class="mono">page_on = {down}</span>) shows two of three selectors inert (§1b). Kept as is — that is the truth of the default. <span class="alt">hide inert selectors until their state pages — tidier, but the operator could no longer prepare a value before turning paging on, which §4.1 allows.</span></li>
+      <li><b>Selector option words</b>: <i>Not specified · Minor · Major · Critical</i> in the service editor and the project tab, the same words as the badges. <span class="alt">the enum words <span class="mono">none · minor · major · critical</span> in mono, matching the MaC key — but then the editor alone would print "none" (I13).</span></li>
+      <li><b>The degraded &gt; down warning</b>: an amber notice under the row (the forms' existing degraded notice), the degraded select's border tinted, shown whenever the draft has it — even when <span class="mono">degraded</span> is inert — and never blocking Save. Text: "Degraded is rated above down (Critical against Major). That is allowed, but an incident that opens on down will be published as less severe than one that opens on degraded." <span class="alt">a red border with a refusal-style message (it is not a refusal, §4.1), or showing it only when both states page.</span></li>
+      <li><b>Tab name and field label</b>: tab <i>Incidents</i>, card title <i>Incidents</i>, field <i>Impact of monitor incidents</i> — leaves room for later incident settings in the same tab. <span class="alt">tab <i>Incident impact</i> — more exact today, but a tab per field is how the nav grew to ten entries.</span></li>
+      <li><b>The project tab's explanation and read-only form</b>: "The impact a monitor's automatic incident opens with. It is shown on status pages and in incident lists, and it does not change while the incident is open. Changing it here does not touch incidents that are already open — it applies from the next one. Incidents a service opens take their impact from that service's alerting settings instead." Read-only shows the value as the impact badge and "Only a project admin can change this." <span class="alt">a disabled select for readers, as the instance Monitor-defaults card would; and no sentence about services (shorter, but the commonest question will be "why is my service incident not using this?").</span></li>
+      <li><b>Where the basis line goes</b>: its own row under the header's meta row, starting with the impact phrase ("Major impact — declared by …"). <span class="alt">a span inside the meta row (wraps unpredictably beside "acknowledged by …"), or a tooltip on the impact badge (hidden; the owner's D7 condition is that the basis be visible).</span></li>
+      <li><b>The frozen mapping</b> is printed on the service form, as a second mono line: "mapping frozen at open: down → major · degraded → minor · unknown → not specified". <span class="alt">the §4.6 line alone, the mapping only in the API — but D7's condition says the frozen mapping must be visible on the incident page (see the report: §4.6's table does not include it).</span></li>
+      <li><b>A deleted service</b>: the snapshot name as text, followed by a muted "(deleted)". <span class="alt">the name alone — exactly the §4.6 text; the reader is left to guess why the one service name that is not a link is not one.</span></li>
+      <li><b>"project default" is a link</b> to Settings → Incidents. <span class="alt">plain text — the spec's string, no navigation; the reader has to know where the setting lives.</span></li>
+      <li><b>"basis unavailable" in a dashed outline</b>, the "impact links unavailable" chip's grammar, text unchanged. <span class="alt">plain ink-3 like the other forms — a failed read then looks like one more fact.</span></li>
+      <li><i>Found, not chosen:</i> <span class="mono">ServiceAlerting.vue</span> uses colour classes that no token defines (<span class="mono">text-ok</span>, <span class="mono">bg-ok/10</span>, <span class="mono">border-ok</span>, <span class="mono">text-warn</span>, <span class="mono">text-bad</span>) — absent from the compiled CSS, so a selected "Pages for" toggle differs from an unselected one only by ink against ink-3, and the "pages for no state" warning and save errors are uncoloured. The new inert state reads off those toggles. Proposed: fix them to <span class="mono">up</span> / <span class="mono">degraded</span> / <span class="mono">down</span> in the FR-042 change to this file. <span class="alt">leave them for a separate fix; the mock then shows the toggles exactly as in §1.</span></li>
+      <li><b>The operator list's badge row wraps</b> (<span class="mono">flex-wrap</span> on that row), so "NOT SPECIFIED" and a subject chip fit the 320 px card (§4 row 5). <span class="alt">shorten the badge in this one place ("N/S", "UNSPEC.") — saves the wrap, costs a word nobody can read; or drop the subject chip when it would not fit.</span></li>
+      <li><b>The "Impact raised" note uses the status dot</b> like the other system notes, no new gutter glyph. <span class="alt">an ⬆ glyph in the gutter, as the changes note has its own — but that glyph exists because it links to a deploy, and this note links to nothing.</span></li>
+      <li><b>The note's enum words on the public page</b>: <i>found, not chosen</i>. §4.3 fixes the body as "⬆ Impact raised: &lt;from&gt; → &lt;to&gt; …" with the stored words, and the note is public, so a visitor reads "none → minor" — the only place the SPA would still print the bare word after FR-042. Shown here as specified. <span class="alt">change §4.3 to the display words ("Impact raised: not specified → minor …"), which changes the server string, its idempotency-free rise test and the subscriber mail body — a spec change, not a mock change, and not made here.</span></li>
+    </ol>
+  </section>
+
+</div>
+
+<script>
+/* Theme switch for the mock only (Auto follows the OS, as the app does). */
+document.querySelectorAll(".themes button").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var t = b.getAttribute("data-t");
+    if (t) document.documentElement.setAttribute("data-theme", t);
+    else document.documentElement.removeAttribute("data-theme");
+    document.querySelectorAll(".themes button").forEach(function (x) { x.classList.toggle("on", x === b); });
+  });
+});
+/* 90-day strips, deterministic: gaps are GAPS (inset), never zeros. */
+function strip(id, marks) {
+  var el = document.getElementById(id), html = "";
+  for (var i = 0; i < 90; i++) html += "<i" + (marks[i] ? ' class="' + marks[i] + '"' : "") + "></i>";
+  el.innerHTML = html;
+}
+strip("strip-a", {41: "d"});
+strip("strip-b", {12: "d", 63: "d", 84: "g", 89: "g"});
+strip("strip-c", {});
+</script>

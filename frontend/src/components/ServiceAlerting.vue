@@ -18,10 +18,13 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
+import { IMPACT_ORDER, impactBadge, impactRank } from "@/lib/incident";
 
 type Alerting = components["schemas"]["ServiceAlerting"];
 type AlertingState = components["schemas"]["ServiceAlertingState"];
 type SignalState = components["schemas"]["ServiceSignalState"];
+type ImpactByState = components["schemas"]["ImpactByState"];
+type ImpactState = keyof ImpactByState;
 
 const props = defineProps<{
   projectId: string;
@@ -205,7 +208,12 @@ async function savePolicy() {
 
 /** A copy the operator can edit without writing through to the parent's `detail`. */
 function cloneAlerting(value: Alerting): Alerting {
-  return { ...value, page_on: [...value.page_on] };
+  return { ...value, page_on: [...value.page_on], impact_by_state: { ...value.impact_by_state } };
+}
+
+/** The mapping's identity for the diff: the three values in a fixed order, so key order never counts. */
+function mappingKey(m: ImpactByState): string {
+  return `${m.down},${m.degraded},${m.unknown}`;
 }
 
 /**
@@ -220,6 +228,12 @@ function diffAlerting(before: Alerting, now: Alerting): Partial<Alerting> {
   if (before.confirm_evaluations !== now.confirm_evaluations) out.confirm_evaluations = now.confirm_evaluations;
   if (before.renotify_seconds !== now.renotify_seconds) out.renotify_seconds = now.renotify_seconds;
   if (before.page_on.join(",") !== now.page_on.join(",")) out.page_on = now.page_on;
+  // FR-042 D18: the mapping is ONE field. The server takes all three keys or none, so any selector
+  // change sends the whole draft mapping, and an untouched one sends nothing — "Only the fields you
+  // changed are sent" stays true. A copy, so a body can never alias the live draft.
+  if (mappingKey(before.impact_by_state) !== mappingKey(now.impact_by_state)) {
+    out.impact_by_state = { ...now.impact_by_state };
+  }
   return out;
 }
 
@@ -242,6 +256,9 @@ watch(
     const touched = diffAlerting(previous, draft.value);
     const next = { ...cloneAlerting(value), ...touched };
     if (touched.page_on) next.page_on = [...touched.page_on];
+    // The mapping survives WHOLE or not at all, as it travels: a touched mapping keeps every one of
+    // the operator's three values, an untouched one takes the server's three.
+    if (touched.impact_by_state) next.impact_by_state = { ...touched.impact_by_state };
     draft.value = next;
   },
   { immediate: true },
@@ -297,6 +314,41 @@ function togglePageOn(value: "down" | "degraded") {
   if (set.has(value)) set.delete(value);
   else set.add(value);
   draft.value.page_on = [...set].sort();
+}
+
+// ── FR-042: the incident impact per paging state (mock §1, approved 2026-11-16) ──────────────────
+// The selectors follow the "Pages for" row above them — down, degraded, unknown — so each state's
+// paging toggle and its impact read in the same order (D-2); the options are the badge words (D-6).
+const IMPACT_STATES: ImpactState[] = ["down", "degraded", "unknown"];
+const impactOptions = IMPACT_ORDER.map((value) => ({ value, label: impactBadge(value).label }));
+
+/**
+ * A state that does not page never opens or raises an incident, so its impact is INERT. It follows
+ * the DRAFT, not the saved row: toggling `degraded` on lifts its strike-through before Save, because
+ * the operator is deciding both at once (D-4). Inert is a presentation, never a lock — the select
+ * stays enabled so a value can be prepared before paging is switched on (§4.1, D-5).
+ */
+function isInert(s: ImpactState): boolean {
+  const d = draft.value;
+  if (!d) return false;
+  return s === "unknown" ? !d.page_on_unknown : !d.page_on.includes(s);
+}
+const inertStates = computed(() => IMPACT_STATES.filter(isInert));
+
+/**
+ * Degraded rated above down is allowed — an operator may mean it — but an incident that opens on
+ * `down` would then be published as less severe than one that opens on `degraded`, so it is SAID.
+ * On the draft, whether or not degraded pages, and it never blocks Save (D-7).
+ */
+const degradedAboveDown = computed(() => {
+  const m = draft.value?.impact_by_state;
+  if (!m || impactRank(m.degraded) <= impactRank(m.down)) return null;
+  return { degraded: impactBadge(m.degraded).label, down: impactBadge(m.down).label };
+});
+
+function setImpact(s: ImpactState, value: string) {
+  if (!draft.value) return;
+  draft.value.impact_by_state = { ...draft.value.impact_by_state, [s]: value as ImpactByState[ImpactState] };
 }
 
 /** Only what actually changed travels, so a concurrent edit to another field survives. */
@@ -402,7 +454,7 @@ async function save() {
           <span class="text-ink-3">— {{ sig.b.detail }}</span>
           <span
             v-if="sig.s?.last_error"
-            class="font-mono text-[11.5px] text-bad"
+            class="font-mono text-[11.5px] text-down"
             :data-testid="`alerting-error-${sig.key}`"
           >{{ sig.s.last_error }}</span>
         </li>
@@ -434,7 +486,7 @@ async function save() {
           :key="s"
           type="button"
           class="rounded border px-1.5 py-0.5 font-mono text-[11px]"
-          :class="draft?.page_on.includes(s) ? 'border-ok bg-ok/10 text-ok' : 'border-border text-ink-3'"
+          :class="draft?.page_on.includes(s) ? 'border-up bg-up-weak text-up' : 'border-border text-ink-3'"
           :disabled="readOnly || saving"
           :data-testid="`alerting-page-on-${s}`"
           @click="togglePageOn(s)"
@@ -450,9 +502,59 @@ async function save() {
           <span>and when it cannot be seen (<span class="font-mono">unknown</span>)</span>
         </label>
       </div>
-      <p v-if="draft && draft.page_on.length === 0 && !draft.page_on_unknown" class="text-[11.5px] text-warn" data-testid="alerting-pages-nothing">
+      <p v-if="draft && draft.page_on.length === 0 && !draft.page_on_unknown" class="text-[11.5px] text-degraded" data-testid="alerting-pages-nothing">
         This declaration pages for no state at all, which leaves members alerting for themselves.
       </p>
+
+      <!-- FR-042 mock §1: the incident impact per state, directly under "Pages for" and before
+           "Confirm over". Read-only exactly when the rest of the block is. -->
+      <div class="flex flex-col gap-1.5" data-testid="alerting-impact">
+        <div class="flex flex-wrap items-center gap-x-[14px] gap-y-1.5">
+          <span class="text-ink-3">Incident impact</span>
+          <label
+            v-for="s in IMPACT_STATES"
+            :key="s"
+            class="inline-flex items-center gap-1.5"
+            :data-testid="`alerting-impact-row-${s}`"
+            :data-inert="String(isInert(s))"
+            :title="isInert(s) ? `${s} does not page, so it never opens or raises an incident` : undefined"
+          >
+            <span
+              class="font-mono text-[11px]"
+              :class="isInert(s) ? 'text-ink-3 line-through decoration-border-strong' : 'text-ink-2'"
+            >{{ s }}</span>
+            <select
+              class="rounded border bg-surface px-1.5 py-0.5 text-[12px] disabled:bg-surface-2"
+              :class="[
+                isInert(s) ? 'border-dashed text-ink-3' : 'disabled:text-ink-2',
+                s === 'degraded' && degradedAboveDown ? 'border-degraded/55' : 'border-border',
+              ]"
+              :value="draft?.impact_by_state[s]"
+              :disabled="readOnly || saving"
+              :data-testid="`alerting-impact-${s}`"
+              @change="setImpact(s, ($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="o in impactOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+            </select>
+          </label>
+        </div>
+        <p
+          v-if="degradedAboveDown"
+          class="max-w-[86ch] rounded-xs border border-degraded/40 bg-degraded-weak px-2.5 py-1.5 text-[12px] leading-normal text-ink-2"
+          data-testid="alerting-impact-warning"
+        >
+          <b class="font-semibold text-degraded">Degraded is rated above down</b> ({{ degradedAboveDown.degraded }} against {{ degradedAboveDown.down }}). That is allowed, but an incident that opens on <span class="font-mono">down</span> will be published as less severe than one that opens on <span class="font-mono">degraded</span>.
+        </p>
+        <!-- ONE sentence names every inert state, "a", "a and b" or "a, b and c" (D-4). -->
+        <p v-if="inertStates.length" class="text-[11.5px] leading-normal text-ink-3" data-testid="alerting-impact-inert">
+          <template v-for="(s, i) in inertStates" :key="s"><template v-if="i > 0">{{ i === inertStates.length - 1 ? " and " : ", " }}</template><span class="font-mono text-ink-2">{{ s }}</span></template>
+          <template v-if="inertStates.length === 1"> does not page, so it never opens or raises an incident. Its value is kept, and applies once it pages.</template>
+          <template v-else> do not page, so they never open or raise an incident. Their values are kept, and apply once they page.</template>
+        </p>
+        <p class="max-w-[86ch] text-[11.5px] leading-normal text-ink-3" data-testid="alerting-impact-hint">
+          The impact this service's incident opens with, by the state that opened it. While the incident is open it rises to the value of any worse state the service reaches, and never falls. A change applies from the next incident; an open incident keeps the values it opened with.
+        </p>
+      </div>
 
       <label class="flex items-center gap-2">
         <span class="text-ink-3">Confirm over</span>
@@ -494,7 +596,7 @@ async function save() {
         </span>
       </label>
 
-      <p v-if="error" class="text-[12px] text-bad" data-testid="alerting-error">{{ error }}</p>
+      <p v-if="error" class="text-[12px] text-down" data-testid="alerting-error">{{ error }}</p>
 
       <div v-if="!readOnly" class="flex items-center gap-2 pt-1">
         <button
@@ -543,7 +645,7 @@ async function save() {
       <span v-if="!policies.length && !policyError" class="text-[11.5px] text-ink-3" data-testid="alerting-escalation-empty">
         This project has no escalation policy yet, so a service can only page its route directly.
       </span>
-      <p v-if="policyError" class="text-[12px] text-bad" data-testid="alerting-escalation-error">{{ policyError }}</p>
+      <p v-if="policyError" class="text-[12px] text-down" data-testid="alerting-escalation-error">{{ policyError }}</p>
     </div>
 
   </section>

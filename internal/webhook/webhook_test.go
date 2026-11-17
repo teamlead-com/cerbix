@@ -102,3 +102,32 @@ func TestDeliverNoWebhooksIsSuccess(t *testing.T) {
 		t.Fatalf("no webhooks should be a no-op, got %v", err)
 	}
 }
+
+// FR-042 §4.6 "Webhooks", D15/D16, I11 — a rise reaches webhooks with the additive `impact_raised`
+// pair, and the payload never carries `impact_basis`. A characterization test: the field is the
+// domain's, and the dispatcher serializes the event as it is.
+func TestARiseWebhookCarriesImpactRaisedAndNoBasis(t *testing.T) {
+	got := make(chan []byte, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got <- b
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	store := &fakeStore{hooks: []domain.Webhook{{ID: "wh1", URL: srv.URL, Secret: "topsecret", Enabled: true}}}
+	ev := domain.IncidentEvent{Type: domain.EventIncidentUpdated,
+		Incident:     domain.Incident{ID: "inc1", ProjectID: "p1", Title: "Checkout", Impact: domain.ImpactCritical},
+		Update:       &domain.IncidentUpdate{Body: domain.ImpactRaisedNote(domain.ImpactMinor, domain.ImpactCritical, domain.ServiceAlertDown)},
+		ImpactRaised: &domain.ImpactRaise{From: domain.ImpactMinor, To: domain.ImpactCritical}}
+	if err := New(store, srv.Client()).Deliver(context.Background(), ev); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	body := string(<-got)
+	if want := `"impact_raised":{"from":"minor","to":"critical"}`; !strings.Contains(body, want) {
+		t.Errorf("body lacks %s: %s", want, body)
+	}
+	if strings.Contains(body, "impact_basis") {
+		t.Errorf("body carries impact_basis: %s", body)
+	}
+}

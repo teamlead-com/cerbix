@@ -1,7 +1,7 @@
 // Presentation helpers for status-page component statuses and the page summary —
 // a single source of labels and token-driven colors.
 
-import { IMPACT_ORDER, impactBadge, type IncidentImpact } from "@/lib/incident";
+import { IMPACT_ORDER, impactPhrase, type IncidentImpact } from "@/lib/incident";
 
 export type ComponentStatus =
   | "operational"
@@ -161,10 +161,10 @@ function worstIncidentImpact(
   }, "none");
 }
 
+// The headline already said "Impact not specified" before FR-042; it now takes the phrase from the
+// one helper every surface shares, so the page headline and the group headings cannot drift (I13).
 function incidentImpactCopy(impact: IncidentImpact): string {
-  return impact === "none"
-    ? "Impact not specified"
-    : `${impactBadge(impact).label} impact`;
+  return impactPhrase(impact);
 }
 
 function unmeasuredDisclosure(unmeasured: number): string {

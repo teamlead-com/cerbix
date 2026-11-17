@@ -101,7 +101,7 @@ func (h *Handler) openExternalIncident(r *http.Request, projectID, key string, a
 	}
 	// The receiver is a PRINCIPAL write (D1): Alertmanager posts with a project-write token, and that
 	// token is who opened the incident. It comes through the principal door like the manual create.
-	if _, err := h.store.CreateIncidentByPrincipal(r.Context(), inc, alertBody(a), author, actor); err != nil {
+	if _, err := h.store.CreateIncidentByPrincipal(r.Context(), inc, domain.ImpactBasisAlertmanager, alertBody(a), author, actor); err != nil {
 		// D8b: a duplicate delivery that arrives CONCURRENTLY loses the partial unique index rather
 		// than the read above. It is the same event as the sequential duplicate and gets the same
 		// answer — ignored, 200, no incident of its own — instead of the 500 it used to get.

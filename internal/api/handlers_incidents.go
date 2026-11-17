@@ -94,7 +94,7 @@ func (h *Handler) createIncident(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	created, err := h.store.CreateIncidentByPrincipal(r.Context(), inc, body.Body, p.UserID, auditActor(p))
+	created, err := h.store.CreateIncidentByPrincipal(r.Context(), inc, domain.ImpactBasisManual, body.Body, p.UserID, auditActor(p))
 	if err != nil {
 		h.serverError(w, "create_incident", err)
 		return
@@ -130,6 +130,12 @@ type authedIncidentView struct {
 	// membership.
 	Members            *[]domain.IncidentMember `json:"members,omitempty"`
 	MembersUnavailable bool                     `json:"members_unavailable,omitempty"`
+	// ImpactBasis is the mapping in force when the incident was classified (FR-042 D15). Like
+	// Impacts it is deliberately NOT a field of domain.Incident, which the public projection, the
+	// feeds and the webhooks embed. ALWAYS serialized: the object, or null when not recorded (D12)
+	// or unreadable; impact_basis_unavailable says which.
+	ImpactBasis            *domain.ImpactBasis `json:"impact_basis"`
+	ImpactBasisUnavailable bool                `json:"impact_basis_unavailable,omitempty"`
 }
 
 // getIncident returns one incident with its impact links (authenticated detail
@@ -160,6 +166,14 @@ func (h *Handler) getIncident(w http.ResponseWriter, r *http.Request) {
 		out.ImpactsUnavailable = true
 	case impacts != nil:
 		out.Impacts = impacts
+	}
+	// The basis of the impact, by its own project-scoped read, on the same terms: the incident still
+	// renders when it fails and the failure is disclosed.
+	if basis, err := h.store.IncidentImpactBasis(r.Context(), inc.ProjectID, inc.ID); err != nil {
+		h.logEvent(r, "incident_impact_basis_read_failed", "incident_id", inc.ID, "error", err.Error())
+		out.ImpactBasisUnavailable = true
+	} else {
+		out.ImpactBasis = basis
 	}
 	// The member snapshot, on the same terms as the impacts: the incident still renders
 	// when the read fails, and the failure is DISCLOSED rather than served as "no

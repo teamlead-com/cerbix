@@ -173,7 +173,13 @@ func (i Incident) Validate() error {
 	if !i.Status.Valid() {
 		return fmt.Errorf("incident: unknown status %q", i.Status)
 	}
-	if !i.Impact.Valid() {
+	// An empty impact is legal only for a monitor-anchored auto incident, whose impact the store
+	// resolves from the project default (FR-042 R1). Every other incident needs a valid impact.
+	if i.Impact == "" {
+		if !(i.Source == SourceAuto && i.MonitorID != "" && i.ServiceID == "") {
+			return fmt.Errorf("incident: impact is required")
+		}
+	} else if !i.Impact.Valid() {
 		return fmt.Errorf("incident: unknown impact %q", i.Impact)
 	}
 	if !i.Source.Valid() {

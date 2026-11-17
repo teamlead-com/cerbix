@@ -52,13 +52,10 @@ func TestDeletingAServiceClearsTheAnchorAndKeepsTheIncident(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := armedService(t, st, ctx)
 
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "checkout degraded",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened", "tester")
-	if err != nil {
-		t.Fatalf("create service incident: %v", err)
-	}
+	})
 	if inc.ServiceID != f.serviceID || inc.MonitorID != "" {
 		t.Fatalf("stored anchors = service %q / monitor %q", inc.ServiceID, inc.MonitorID)
 	}
@@ -106,7 +103,7 @@ func TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers(t *testing.T)
 			t.Fatalf("begin: %v", err)
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-		inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout degraded", 2, governingRevision(t, st, ctx, f.serviceID))
+		inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout degraded", domain.ServiceAlertDown, domain.DefaultImpactMapping(), 2, governingRevision(t, st, ctx, f.serviceID))
 		if err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -177,13 +174,10 @@ func TestOpeningAServiceIncidentIsIdempotentAndSnapshotsItsMembers(t *testing.T)
 	}
 
 	// A monitor or project-level incident has NO snapshot, and that is a different answer from an empty one.
-	other, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	other := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: f.projectID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMinor, Source: domain.SourceManual,
-	}, "", "tester")
-	if err != nil {
-		t.Fatalf("create manual incident: %v", err)
-	}
+	})
 	if _, present, err := st.IncidentMemberSnapshot(ctx, other.ID); err != nil || present {
 		t.Errorf("a project-level incident reported a snapshot (present=%v, err=%v)", present, err)
 	}
@@ -200,13 +194,10 @@ func TestTheMachineLeavesAHumanIncidentAlone(t *testing.T) {
 	st, ctx := serviceSchemaStore(t)
 	f := armedService(t, st, ctx)
 
-	human, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	human := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "checkout — investigating by hand",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened by a person", "ada@example.com")
-	if err != nil {
-		t.Fatalf("human incident: %v", err)
-	}
+	})
 
 	tx, err := st.pool.Begin(ctx)
 	if err != nil {
@@ -293,18 +284,12 @@ func TestTheSuppressionNoteKeepsOneHomeWhenBothIncidentsAreOpen(t *testing.T) {
 
 	monitorInc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, MonitorID: f.monitorID, Title: "checkout-http is down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+		Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 	}, "monitor reported down", "system")
 	if err != nil {
 		t.Fatalf("monitor incident: %v", err)
 	}
-	serviceInc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
-		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "Checkout — service down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
-	}, "opened automatically", "system")
-	if err != nil {
-		t.Fatalf("service incident: %v", err)
-	}
+	serviceInc := openServiceFixture(t, st, ctx, f.projectID, f.serviceID, "Checkout — service down", domain.ImpactMajor)
 	var eventID string
 	if err := st.pool.QueryRow(ctx, `
 		INSERT INTO outbox_events (topic, payload) VALUES ('monitor_transition','{}') RETURNING id`).
@@ -359,12 +344,7 @@ func TestAnOpenServiceIncidentMovesNoComponentStatus(t *testing.T) {
 		t.Fatalf("the fixture produced no projection at all: %+v", b)
 	}
 
-	if _, err := st.CreateIncidentBySystem(ctx, domain.Incident{
-		ProjectID: f.projectID, ServiceID: f.serviceID, Title: "Checkout — service down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactCritical, Source: domain.SourceAuto,
-	}, "opened automatically", "system"); err != nil {
-		t.Fatalf("service incident: %v", err)
-	}
+	openServiceFixture(t, st, ctx, f.projectID, f.serviceID, "Checkout — service down", domain.ImpactCritical)
 
 	after, err := st.ServicePageProjections(ctx, refs, true)
 	if err != nil {
@@ -435,7 +415,7 @@ func TestServiceIncidentAnnouncesItsLifecycleLikeAnyOther(t *testing.T) {
 
 	var opened domain.Incident
 	inTx(func(tx pgx.Tx) {
-		inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 3, governingRevision(t, st, ctx, f.serviceID))
+		inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", domain.ServiceAlertDown, domain.DefaultImpactMapping(), 3, governingRevision(t, st, ctx, f.serviceID))
 		if err != nil || !created {
 			t.Fatalf("open: %v (created=%v)", err, created)
 		}
@@ -448,7 +428,7 @@ func TestServiceIncidentAnnouncesItsLifecycleLikeAnyOther(t *testing.T) {
 
 	// The evaluator that LOSES the open race announces nothing: one opening, one announcement.
 	inTx(func(tx pgx.Tx) {
-		if _, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 3, governingRevision(t, st, ctx, f.serviceID)); err != nil || created {
+		if _, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", domain.ServiceAlertDown, domain.DefaultImpactMapping(), 3, governingRevision(t, st, ctx, f.serviceID)); err != nil || created {
 			t.Fatalf("second open: %v (created=%v, want false)", err, created)
 		}
 	})
@@ -588,7 +568,7 @@ func openLiveOccurrence(t *testing.T, st *Store, ctx context.Context, f armFixtu
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
-	inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", 2, governingRevision(t, st, ctx, f.serviceID))
+	inc, created, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout down", domain.ServiceAlertDown, domain.DefaultImpactMapping(), 2, governingRevision(t, st, ctx, f.serviceID))
 	if err != nil || !created {
 		t.Fatalf("open incident: %v (created=%v)", err, created)
 	}
@@ -933,7 +913,7 @@ func TestAServiceIncidentResolvesAfterTheWaitItActuallyDid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin setup: %v", err)
 	}
-	if _, _, err := st.OpenServiceIncidentTx(ctx, setup, f.serviceID, f.projectID, "down", 3, nil); err != nil {
+	if _, _, err := st.OpenServiceIncidentTx(ctx, setup, f.serviceID, f.projectID, "down", domain.ServiceAlertDown, domain.DefaultImpactMapping(), 3, nil); err != nil {
 		_ = setup.Rollback(ctx)
 		t.Fatalf("open: %v", err)
 	}

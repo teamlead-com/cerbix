@@ -9657,3 +9657,95 @@ hysteresis on the way down only: one lucky success sent a false "recovered", zer
   success continues that run rather than starting a new one.
 - **Unchanged.** `heartbeats`, every SLA, SLI, budget, gate and status-page reader, the confirm phase, and
   `TestMonitorSpec`. No new metric.
+
+## D-0282 — an incident's impact is derived from its Service's mapping, frozen at open, and only rises; a project states the impact of its monitor incidents; impact stays a classification (FR-042 / NFR-035, iter-0215, 2026-11-17)
+
+**Context.** [`func-incident-impact.md`](specs/func-incident-impact.md), revision 4, approved by the owner
+on 2026-11-16; mock [`mock-incident-impact.html`](design/mock-incident-impact.html) approved the same day,
+all eighteen of its decisions as drawn. Every automatic incident was `major` and never changed, so a
+merely degraded service was published as "Major impact" and a degraded service that went fully down kept
+what it opened with. The spec's decisions D1–D20 and invariants I1–I14 are the contract and are not
+repeated here: D1 (impact declared on the service), D2 (only rises), D3 (no human edit), D4 (one project
+default), D5 (subscribers mailed on a rise to `critical`), D6 (default mapping `degraded → minor`,
+`down → major`, `unknown → none`), D7 (the mapping in the alerting policy, not the definition), D8 (the
+frozen basis), D12 (incidents open at upgrade never rise), D13 (a rise follows the confirmed state),
+D15 (the basis is not a field of `domain.Incident`), D16 (no mechanism for mixed versions), D18 (all three
+keys or 400), D20 (a log field, no metric). This record keeps what the build decided inside that contract.
+
+**Decision.**
+1. **Schema.** Migration 00119 adds `services.impact_by_state` (NULL = the D6 defaults),
+   `projects.default_incident_impact` (`NOT NULL DEFAULT 'major'`) and `incidents.impact_basis` (NULL
+   before the migration, never backfilled), each with a closed CHECK wrapped in `COALESCE(…, false)`
+   and guarded by `CASE`, because a CHECK that evaluates to NULL passes and `AND` has no promised order.
+2. **Validation (R1).** `Incident.Validate` allows an empty impact only for a monitor-anchored `auto`
+   incident. Each door narrows further: the principal door refuses an empty impact and a missing basis
+   source; the system door refuses a supplied impact, a missing monitor anchor, a service anchor and
+   another source, and selects the project default inside the creating transaction.
+3. **The system door narrows; the escalation-snapshot branch stays (R4).** The branch in
+   `createIncident` that snapshots a service's ladder is shared with the principal door, which keeps
+   passing `ServiceID` through, so it stays and is reachable only from there. The store's fixtures moved
+   to the door their incident comes through (R8: 51 store sites).
+4. **Canonical stored form (R3).** A mapping equal to the defaults is stored as NULL. Equality is always
+   on resolved forms, so this is representation, not behaviour; every default service stays NULL.
+5. **Reads and writes of the mapping (R2, R5, R10).** Only the evaluator's slice `SELECT` gains
+   `impact_by_state` (`lockAlertConfigRowsTx` is `SELECT 1 … FOR UPDATE` and reads nothing). The basis
+   snapshot's name and slug are read inside `OpenServiceIncidentTx`, project-scoped; no caller can hand
+   in a wrong name. The audit segment `impact_by_state:` is appended last, after `renotify_seconds`.
+6. **The rise (R9) and the project-default lock.** `raiseServiceIncidentImpactTx`
+   follows spec §4.3 as written: an unlocked look, then `SELECT … FOR UPDATE` and a second rank
+   comparison, the clock after the lock, one note and one `incident.updated` event per rise.
+   Idempotency is the rank comparison; no marker and no unique index. The project-default write keeps
+   its `SELECT … FOR UPDATE` before the comparison, as §4.4 says — a controller ruling against the
+   final review's `FOR NO KEY UPDATE` suggestion; the cost is that child-row inserts of that project
+   wait for a project PATCH's short transaction.
+7. **`null` in the two PATCH bodies (R6).** `impact_by_state: null`, and `null` as the value of one of
+   its keys, are 400s naming the field or the key (D18). `default_incident_impact: null` reads as absent,
+   like every pointer field of this API's PATCH bodies; the description no longer promises it.
+8. **API shapes (R7).** `impact_basis` is required and nullable on `AuthedIncident`;
+   `impact_basis_unavailable` is optional; `ImpactBasis` is a plain `oneOf` without a discriminator, so
+   the generated client types do not invent `source` literals from schema names.
+9. **Telemetry (R11, D20).** The leader's `service_alerts_evaluated` condition is a function,
+   `serviceAlertPassWorthLogging`; a rise alone emits the line, which carries `incidents_raised`.
+10. **The guards are source scans by scope and rule, backed by a behavioural regression.** I3: the
+    writer scan holds each writer to its kind — the creating paths may INSERT, only the rise step may
+    UPDATE impact. NFR-035: the reader scan allows a scope (function, method expression or package-level
+    identifier) and a rule (`.Impact` selector, SQL literal, `incidentColumns*`), not a file, because an
+    allowed file also holds the gate's incident lookup. SQL is matched case-insensitively, a `+` chain
+    of literals is judged as one statement, and prose is filtered by the column's SQL position. The
+    scans' blind spots are listed in the test file; the NFR-035 regression compares outputs of two
+    services that differ only in their mapping.
+11. **The SPA (mock as drawn).** `none` reads "Not specified" / "Impact not specified" on every SPA
+    surface; mail and feeds keep the stored word. The mapping is one field in the alerting editor's
+    diff. The Incidents settings panel reads the project itself and never falls back to a value it did
+    not read. A basis source the build does not know renders "basis unavailable". The editor's undefined
+    colour classes became tokens (mock D-15).
+
+**Rejected.**
+- **A per-file allow-list for the NFR-035 reader scan** (the plan's first form): a predicate on impact
+  added to the gate's incident lookup in `store/statuspagecontext.go` would have passed.
+- **A marker guard for the rise note** (the `⚡ Context:` pattern): it allows one note per incident for
+  its whole life, and an incident may rise more than once.
+- **Passing the service's name and slug into `OpenServiceIncidentTx`**: a caller could hand in a wrong
+  one, and the snapshot is what keeps the basis line readable after the service is deleted.
+- **A `discriminator` on `ImpactBasis`**: four `source` values over two schemas without an explicit
+  mapping make the generator invent literals.
+- **Removing the escalation-snapshot branch** along with the system door's service clause: the principal
+  door still opens service-anchored manual incidents through it.
+- **Treating `default_incident_impact: null` as a reset**: the spec gives that PATCH no D18 rule, and a
+  reset to `major` is one explicit value away.
+
+**Consequences.**
+- **Upgrade (D6, D12).** A service that pages on `degraded` opens its new incidents as `minor`, and one
+  with `page_on_unknown` opens an `unknown` incident as `none`. Monitor incidents stay `major` (every
+  project starts at that default). Incidents open at the upgrade keep their impact and never rise.
+- **Mixed versions and rollback (D16).** A process without FR-042 that delivers the outbox (`all`, `api`,
+  `scheduler`) emails subscribers on every rise, with today's subject. An older binary's
+  Monitoring-as-Code decoder refuses a bundle that declares `alerting.impact_by_state`, so the key must
+  be removed from bundles before a rollback. An older binary on this schema writes none of the new
+  columns: its incidents get a NULL basis and never rise.
+- **Unchanged (NFR-035).** No SLO, budget, burn, gate, coverage, delegation, suppression or escalation
+  computation reads impact; a mapping change creates no revision, epoch or `alert_config_generation`
+  bump. No new outbox topic and no new metric.
+- **Known limits.** The source scans do not see SQL assembled with `+=`, `fmt.Sprintf`, `strings.Join` or
+  a `strings.Builder`, `SELECT *`, column lists under other names, or a serialized incident; the
+  behavioural regression covers what they miss on the paths it drives.

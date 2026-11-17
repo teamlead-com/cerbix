@@ -66,6 +66,17 @@ type rawServiceAlerting struct {
 	// same default. They agree today, and encoding them identically would make a future change of
 	// default silently rewrite what every bundle meant.
 	RenotifySeconds *int `yaml:"renotify_seconds"`
+	// ImpactByState is the service's impact mapping (FR-042 §4.4). A pointer so an omitted block and
+	// an explicit null both read as "the defaults"; KnownFields(true) refuses any key but the three.
+	ImpactByState *rawImpactByState `yaml:"impact_by_state"`
+}
+
+// rawImpactByState is the wire shape of the mapping. Each key is a pointer: an omitted key (or an
+// explicit null) takes that key's default, so `{down: critical}` is a complete declaration.
+type rawImpactByState struct {
+	Degraded *string `yaml:"degraded"`
+	Down     *string `yaml:"down"`
+	Unknown  *string `yaml:"unknown"`
 }
 
 type rawServiceOwner struct {
@@ -352,6 +363,29 @@ func decodeServiceAlerting(slug string, ra *rawServiceAlerting) (*domain.Service
 	}
 	if ra.RenotifySeconds != nil {
 		p.RenotifySeconds = *ra.RenotifySeconds
+	}
+	if ib := ra.ImpactByState; ib != nil {
+		// Overlay onto the defaults per key. An ABSENT key keeps its default (§4.1); a key that is
+		// present and blank is a mistake, not an omission, so it is refused here rather than
+		// resolved to the default by Canonical. Validate below refuses a bad value naming the service.
+		for _, k := range []struct {
+			name string
+			src  *string
+			dst  *domain.IncidentImpact
+		}{
+			{"degraded", ib.Degraded, &p.ImpactByState.Degraded},
+			{"down", ib.Down, &p.ImpactByState.Down},
+			{"unknown", ib.Unknown, &p.ImpactByState.Unknown},
+		} {
+			if k.src == nil {
+				continue
+			}
+			v := strings.TrimSpace(*k.src)
+			if v == "" {
+				return nil, rejectf(ReasonDomainInvalid, slug, "alerting.impact_by_state.%s is empty: state an impact or omit the key", k.name)
+			}
+			*k.dst = domain.IncidentImpact(v)
+		}
 	}
 	p = p.Canonical()
 	if err := p.Validate(); err != nil {

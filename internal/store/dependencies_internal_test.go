@@ -83,7 +83,7 @@ func TestMonitorDependencies(t *testing.T) {
 	}
 	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: pg.ID, Title: "postgres-main is down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+		Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 	}, "auto", "system")
 	if err != nil {
 		t.Fatalf("open incident: %v", err)
@@ -95,7 +95,7 @@ func TestMonitorDependencies(t *testing.T) {
 	// Suppression note on the child's open auto-incident — once.
 	childInc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: apiSvc.ID, Title: "api-svc is down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+		Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 	}, "auto", "system")
 	if err != nil {
 		t.Fatalf("child incident: %v", err)

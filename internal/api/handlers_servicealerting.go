@@ -1,6 +1,9 @@
 package api
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"time"
@@ -49,6 +52,9 @@ type serviceAlertingView struct {
 	// RenotifySeconds repeats the last escalation step while the incident is unresolved; 0 is off
 	// and is the default (D-0185).
 	RenotifySeconds int `json:"renotify_seconds"`
+	// ImpactByState is always the RESOLVED mapping, three keys (FR-042 D7). Not a paging field:
+	// changing it bumps no generation and opens no epoch.
+	ImpactByState domain.ImpactMapping `json:"impact_by_state"`
 }
 
 // serviceSignalStateView is one signal's COVERAGE, which is a different question from the
@@ -87,6 +93,7 @@ func newServiceAlertingView(p domain.ServiceAlertPolicy) serviceAlertingView {
 		PageOnUnknown:      p.PageOnUnknown,
 		ConfirmEvaluations: p.ConfirmEvaluations,
 		RenotifySeconds:    p.RenotifySeconds,
+		ImpactByState:      p.Impacts(),
 		PageOn:             make([]string, 0, len(p.PageOn)),
 	}
 	for _, s := range p.PageOn {
@@ -110,6 +117,62 @@ type patchServiceAlertingRequest struct {
 	PageOnUnknown      *bool     `json:"page_on_unknown"`
 	ConfirmEvaluations *int      `json:"confirm_evaluations"`
 	RenotifySeconds    *int      `json:"renotify_seconds"`
+	// ImpactByState records PRESENCE (FR-042 D18): absent leaves the mapping untouched, present
+	// must state all three keys, and `null` is a 400 rather than "absent".
+	ImpactByState impactByStateField `json:"impact_by_state"`
+}
+
+// impactByStateField records PRESENCE, because D18 makes `null` a 400 rather than "absent".
+// encoding/json calls UnmarshalJSON on a field for a JSON null too, so a null is still "present".
+type impactByStateField struct {
+	present bool
+	raw     json.RawMessage
+}
+
+func (f *impactByStateField) UnmarshalJSON(b []byte) error {
+	f.present = true
+	f.raw = append(json.RawMessage(nil), b...)
+	return nil
+}
+
+// parse judges a present value: a JSON object with exactly the keys degraded, down and unknown,
+// each a string that is a valid impact.
+func (f impactByStateField) parse() (domain.ImpactMapping, error) {
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(f.raw, &keys); err != nil || keys == nil {
+		return domain.ImpactMapping{}, fmt.Errorf("impact_by_state must state degraded, down and unknown")
+	}
+	var m domain.ImpactMapping
+	var unknown []string
+	for k := range keys {
+		if k != "degraded" && k != "down" && k != "unknown" {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown) // Go map order is random; the message must not be
+		return domain.ImpactMapping{}, fmt.Errorf("impact_by_state: unknown key %q", unknown[0])
+	}
+	for _, k := range []struct {
+		name string
+		dst  *domain.IncidentImpact
+	}{{"degraded", &m.Degraded}, {"down", &m.Down}, {"unknown", &m.Unknown}} {
+		rawV, ok := keys[k.name]
+		if !ok {
+			return domain.ImpactMapping{}, fmt.Errorf("impact_by_state must state degraded, down and unknown")
+		}
+		// json.Unmarshal of a null into a string succeeds and leaves it empty, so a null value is
+		// refused here as the wrong type rather than falling through to the empty-text message.
+		var v string
+		if bytes.Equal(bytes.TrimSpace(rawV), []byte("null")) || json.Unmarshal(rawV, &v) != nil {
+			return domain.ImpactMapping{}, fmt.Errorf("impact_by_state.%s must be a string", k.name)
+		}
+		*k.dst = domain.IncidentImpact(v)
+	}
+	if err := m.Validate(); err != nil {
+		return domain.ImpactMapping{}, err
+	}
+	return m, nil
 }
 
 // alertActor carries the request's principal into the store, which writes the audit row INSIDE the
@@ -215,6 +278,14 @@ func (h *Handler) patchServiceAlerting(w http.ResponseWriter, r *http.Request) {
 			states = append(states, domain.ServiceAlertState(v))
 		}
 		patch.PageOn = &states
+	}
+	if body.ImpactByState.present {
+		m, err := body.ImpactByState.parse()
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		patch.ImpactByState = &m
 	}
 	// What CAN be judged without the stored value is judged here, so an invalid request is a 400
 	// and the store is never called: the states themselves and the confirmation bound are absolute,

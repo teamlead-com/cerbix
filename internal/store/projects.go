@@ -9,11 +9,11 @@ import (
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
-const projectColumns = "id, org_id, slug, name, created_at, updated_at"
+const projectColumns = "id, org_id, slug, name, created_at, updated_at, default_incident_impact"
 
 func scanProject(row pgx.Row) (domain.Project, error) {
 	var p domain.Project
-	err := row.Scan(&p.ID, &p.OrgID, &p.Slug, &p.Name, &p.CreatedAt, &p.UpdatedAt)
+	err := row.Scan(&p.ID, &p.OrgID, &p.Slug, &p.Name, &p.CreatedAt, &p.UpdatedAt, &p.DefaultIncidentImpact)
 	return p, err
 }
 
@@ -131,4 +131,50 @@ func collectProjects(rows pgx.Rows) ([]domain.Project, error) {
 		return nil, fmt.Errorf("store: iterate projects: %w", err)
 	}
 	return out, nil
+}
+
+// SetProjectDefaultIncidentImpact sets the impact this project's monitor auto-incidents open with
+// (FR-042 §4.4). The row is locked, an unchanged value commits nothing (no updated_at, no audit),
+// and a change writes its audit row in the SAME transaction, so an unattributed write cannot
+// survive. A file-managed project takes it like any other: the default is not declarable in
+// Monitoring-as-Code (D14), so there is no file value to contradict.
+func (s *Store) SetProjectDefaultIncidentImpact(ctx context.Context, projectID string,
+	impact domain.IncidentImpact, actor AuditActor) (domain.Project, error) {
+	if !impact.Valid() {
+		return domain.Project{}, fmt.Errorf("store: invalid project default incident impact %q", impact)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Project{}, fmt.Errorf("store: begin set project default impact: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	cur, err := scanProject(tx.QueryRow(ctx,
+		`SELECT `+projectColumns+` FROM projects WHERE id = $1 FOR UPDATE`, projectID))
+	if noRows(err) || isInvalidTextRepresentation(err) {
+		return domain.Project{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.Project{}, fmt.Errorf("store: lock project: %w", err)
+	}
+	if cur.DefaultIncidentImpact == impact {
+		if err := tx.Commit(ctx); err != nil {
+			return domain.Project{}, fmt.Errorf("store: commit set project default impact: %w", err)
+		}
+		return cur, nil
+	}
+	updated, err := scanProject(tx.QueryRow(ctx,
+		`UPDATE projects SET default_incident_impact = $2, updated_at = now() WHERE id = $1 RETURNING `+projectColumns,
+		projectID, string(impact)))
+	if err != nil {
+		return domain.Project{}, fmt.Errorf("store: set project default impact: %w", err)
+	}
+	target := incidentAuditTarget(actor, fmt.Sprintf("%s %s→%s", updated.Slug, cur.DefaultIncidentImpact, impact))
+	if err := insertProjectAudit(ctx, tx, projectID, actor, ProjectAuditDefaultIncidentImpact, target); err != nil {
+		return domain.Project{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Project{}, fmt.Errorf("store: commit set project default impact: %w", err)
+	}
+	return updated, nil
 }

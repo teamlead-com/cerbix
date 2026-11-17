@@ -54,7 +54,7 @@ func TestEveryPrincipalIncidentWriteIsAudited(t *testing.T) {
 	inc, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: projID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened by hand", "ops@example.com", actor)
+	}, domain.ImpactBasisManual, "opened by hand", "ops@example.com", actor)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -106,8 +106,8 @@ func TestEveryPrincipalIncidentWriteIsAudited(t *testing.T) {
 func TestAMachineWriteIsNotAudited(t *testing.T) {
 	st, ctx, orgID, projID := auditIncidentFixture(t)
 	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
-		ProjectID: projID, Title: "auto", Status: domain.IncidentInvestigating,
-		Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+		ProjectID: projID, MonitorID: fixtureMonitor(t, st, ctx, projID), Title: "auto",
+		Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 	}, "monitor went down", "system")
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -131,7 +131,7 @@ func TestARepeatedAcknowledgementIsANoOpAndAuditsNothingTwice(t *testing.T) {
 	inc, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: projID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened", "bot", actor)
+	}, domain.ImpactBasisManual, "opened", "bot", actor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,14 +174,14 @@ func TestAnUnattributableWriteDoesNotHappen(t *testing.T) {
 		if _, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 			ProjectID: projID, Title: "manual", Status: domain.IncidentInvestigating,
 			Impact: domain.ImpactMajor, Source: domain.SourceManual,
-		}, "opened", "ops", actor); err == nil {
+		}, domain.ImpactBasisManual, "opened", "ops", actor); err == nil {
 			t.Fatalf("actor %+v was accepted", actor)
 		}
 	}
 	_, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: projID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened", "ops", AuditActor{})
+	}, domain.ImpactBasisManual, "opened", "ops", AuditActor{})
 	if err == nil {
 		t.Fatal("a zero-valued actor must be refused before any statement")
 	}
@@ -216,7 +216,7 @@ func TestARolledBackCreateLeavesNoIncidentAndNoAuditRow(t *testing.T) {
 	_, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: projID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened", "ops", AuditActor{ViaToken: true, Label: "token:test"})
+	}, domain.ImpactBasisManual, "opened", "ops", AuditActor{ViaToken: true, Label: "token:test"})
 	if err == nil {
 		t.Fatal("the planted failure did not surface")
 	}
@@ -242,7 +242,7 @@ func TestNoBodyEverReachesTheAuditTrail(t *testing.T) {
 	inc, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: projID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opening "+planted, "ops", actor)
+	}, domain.ImpactBasisManual, "opening "+planted, "ops", actor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestAPostmortemAuditsCreatedThenUpdated(t *testing.T) {
 	inc, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: projID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened", "ops", actor)
+	}, domain.ImpactBasisManual, "opened", "ops", actor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestThePostmortemResolvesTheIncidentUnderItsOwnTransaction(t *testing.T) {
 	inc, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: projID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened", "ops", actor)
+	}, domain.ImpactBasisManual, "opened", "ops", actor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +417,7 @@ func TestNoMachineWriterAudits(t *testing.T) {
 		}
 		inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 			ProjectID: proj.ID, MonitorID: mon.ID, Title: "api is down",
-			Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+			Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 		}, "monitor api went down", "system")
 		if err != nil {
 			t.Fatal(err)
@@ -466,8 +466,8 @@ func TestNoMachineWriterAudits(t *testing.T) {
 		org, _ := st.CreateOrganization(ctx, "acme", "Acme")
 		proj, _ := st.CreateProject(ctx, org.ID, "api", "API")
 		inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
-			ProjectID: proj.ID, Title: "auto", Status: domain.IncidentInvestigating,
-			Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+			ProjectID: proj.ID, MonitorID: fixtureMonitor(t, st, ctx, proj.ID), Title: "auto",
+			Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 		}, "opened", "system")
 		if err != nil {
 			t.Fatal(err)
@@ -495,7 +495,7 @@ func TestNoMachineWriterAudits(t *testing.T) {
 		}
 		if _, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 			ProjectID: proj.ID, MonitorID: mon.ID, Title: "api is down",
-			Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+			Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 		}, "opened", "system"); err != nil {
 			t.Fatal(err)
 		}
@@ -522,7 +522,7 @@ func TestNoMachineWriterAudits(t *testing.T) {
 		}
 		if _, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 			ProjectID: proj.ID, MonitorID: mon.ID, Title: "api is down",
-			Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+			Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 		}, "opened", "system"); err != nil {
 			t.Fatal(err)
 		}
@@ -601,7 +601,7 @@ func TestAConcurrentDuplicateFiringLosesBenignly(t *testing.T) {
 			_, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 				ProjectID: projID, Title: "high latency", Status: domain.IncidentInvestigating,
 				Impact: domain.ImpactCritical, Source: domain.SourceAPI, ExternalKey: "fp-1",
-			}, "fired", "alertmanager", actor)
+			}, domain.ImpactBasisAlertmanager, "fired", "alertmanager", actor)
 			errs <- err
 		}()
 	}
@@ -637,7 +637,7 @@ func TestAnAcknowledgementThatWaitsStillStampsForward(t *testing.T) {
 	inc, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: projID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened", "ops", actor)
+	}, domain.ImpactBasisManual, "opened", "ops", actor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -697,7 +697,7 @@ func TestAnAuditRowLandsInTheIncidentsOwnOrganization(t *testing.T) {
 	if _, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: projA.ID, Title: "project-level", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened", "ops", actor); err != nil {
+	}, domain.ImpactBasisManual, "opened", "ops", actor); err != nil {
 		t.Fatal(err)
 	}
 	// An incident anchored to a SERVICE that is then deleted: the anchor is gone, the project is not,
@@ -709,7 +709,7 @@ func TestAnAuditRowLandsInTheIncidentsOwnOrganization(t *testing.T) {
 	anchored, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: projA.ID, ServiceID: svc.ID, Title: "service", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened", "ops", actor)
+	}, domain.ImpactBasisManual, "opened", "ops", actor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -763,7 +763,7 @@ func TestAuditRowsOutliveTheIncidentAndItsProject(t *testing.T) {
 	if _, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: projID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened", "ops", actor); err != nil {
+	}, domain.ImpactBasisManual, "opened", "ops", actor); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projID); err != nil {
@@ -811,7 +811,7 @@ func TestTheActorTripleMatchesThePrincipalKind(t *testing.T) {
 			if _, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 				ProjectID: projID, Title: k.name, Status: domain.IncidentInvestigating,
 				Impact: domain.ImpactMajor, Source: domain.SourceManual,
-			}, "opened", "ops", k.actor); err != nil {
+			}, domain.ImpactBasisManual, "opened", "ops", k.actor); err != nil {
 				t.Fatal(err)
 			}
 			var gotUser *string
@@ -841,7 +841,7 @@ func TestTheActorTripleMatchesThePrincipalKind(t *testing.T) {
 	if _, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: projID, Title: "by a user about to leave", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened", "ops", AuditActor{ActorUserID: user.ID, Label: "ops@example.com"}); err != nil {
+	}, domain.ImpactBasisManual, "opened", "ops", AuditActor{ActorUserID: user.ID, Label: "ops@example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, user.ID); err != nil {
@@ -874,7 +874,7 @@ func TestAnAuditInsertFailureAbortsTheMutation(t *testing.T) {
 	_, err := st.CreateIncidentByPrincipal(ctx, domain.Incident{
 		ProjectID: projID, Title: "manual", Status: domain.IncidentInvestigating,
 		Impact: domain.ImpactMajor, Source: domain.SourceManual,
-	}, "opened", "ops", AuditActor{ViaToken: true, Label: "token:test"})
+	}, domain.ImpactBasisManual, "opened", "ops", AuditActor{ViaToken: true, Label: "token:test"})
 	if err == nil {
 		t.Fatal("the mutation committed although its audit row could not be written")
 	}

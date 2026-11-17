@@ -58,6 +58,12 @@ type fakeStore struct {
 	// its principal, which is the property FR-026 exists for.
 	auditActors []string
 
+	// projectDefaultActors records the actor of every project default-impact write.
+	projectDefaultActors []store.AuditActor
+
+	// createBases records the impact-basis source every PRINCIPAL create stated (FR-042 I14).
+	createBases []domain.ImpactBasisSource
+
 	// createComponentErr, when set, is what CreateComponent returns instead of a row. It exists so
 	// a test can drive the handler's error CLASSIFICATION: an expected refusal and an
 	// infrastructure failure must not answer alike (reviewer P1, iter-0181).
@@ -96,6 +102,8 @@ type fakeStore struct {
 	graphErr             error
 	impacts              map[string][]domain.ServiceImpactLink
 	impactsErr           error
+	impactBases          map[string]*domain.ImpactBasis
+	impactBasisErr       error
 	memberSnapshots      map[string][]domain.IncidentMember // FR-022: present iff the key exists
 	memberSnapshotErr    error
 	graphActors          []store.GraphActor
@@ -254,9 +262,9 @@ func seededStore() *fakeStore {
 	o1 := domain.Organization{ID: "o1", Slug: "acme", Name: "Acme"}
 	o2 := domain.Organization{ID: "o2", Slug: "globex", Name: "Globex"}
 	fs.orgs[o1.ID], fs.orgs[o2.ID] = o1, o2
-	p1 := domain.Project{ID: "p1", OrgID: "o1", Slug: "api", Name: "API"}
-	p2 := domain.Project{ID: "p2", OrgID: "o1", Slug: "webhook", Name: "Webhook"}
-	p3 := domain.Project{ID: "p3", OrgID: "o2", Slug: "file", Name: "File"}
+	p1 := domain.Project{ID: "p1", OrgID: "o1", Slug: "api", Name: "API", DefaultIncidentImpact: domain.ImpactMajor}
+	p2 := domain.Project{ID: "p2", OrgID: "o1", Slug: "webhook", Name: "Webhook", DefaultIncidentImpact: domain.ImpactMajor}
+	p3 := domain.Project{ID: "p3", OrgID: "o2", Slug: "file", Name: "File", DefaultIncidentImpact: domain.ImpactMajor}
 	for _, p := range []domain.Project{p1, p2, p3} {
 		fs.projects[p.ID] = p
 		fs.byOrg[p.OrgID] = append(fs.byOrg[p.OrgID], p)
@@ -325,7 +333,7 @@ func (f *fakeStore) CreateProject(_ context.Context, orgID, slug, name string) (
 			return domain.Project{}, store.ErrConflict
 		}
 	}
-	p := domain.Project{ID: "np", OrgID: orgID, Slug: slug, Name: name}
+	p := domain.Project{ID: "np", OrgID: orgID, Slug: slug, Name: name, DefaultIncidentImpact: domain.ImpactMajor}
 	f.projects[p.ID] = p
 	return p, nil
 }
@@ -334,6 +342,16 @@ func (f *fakeStore) GetProject(_ context.Context, id string) (domain.Project, er
 	if !ok {
 		return domain.Project{}, store.ErrNotFound
 	}
+	return p, nil
+}
+func (f *fakeStore) SetProjectDefaultIncidentImpact(_ context.Context, projectID string, impact domain.IncidentImpact, actor store.AuditActor) (domain.Project, error) {
+	p, ok := f.projects[projectID]
+	if !ok {
+		return domain.Project{}, store.ErrNotFound
+	}
+	f.projectDefaultActors = append(f.projectDefaultActors, actor)
+	p.DefaultIncidentImpact = impact
+	f.projects[projectID] = p
 	return p, nil
 }
 func (f *fakeStore) DeleteProject(_ context.Context, orgID, projectID string) error {
@@ -889,7 +907,8 @@ func (f *fakeStore) GetMaintenanceWindow(_ context.Context, id string) (domain.M
 	return mw, nil
 }
 
-func (f *fakeStore) CreateIncidentByPrincipal(ctx context.Context, inc domain.Incident, openingBody, author string, actor store.AuditActor) (domain.Incident, error) {
+func (f *fakeStore) CreateIncidentByPrincipal(ctx context.Context, inc domain.Incident, basis domain.ImpactBasisSource, openingBody, author string, actor store.AuditActor) (domain.Incident, error) {
+	f.createBases = append(f.createBases, basis)
 	f.auditActors = append(f.auditActors, string(store.IncidentAuditCreate)+"|"+actor.Label)
 	if f.createIncidentErr != nil {
 		return domain.Incident{}, f.createIncidentErr
@@ -3532,6 +3551,17 @@ func (f *fakeStore) ListIncidentImpacts(_ context.Context, projectID, incidentID
 		return nil, nil // tenant-scoped: a foreign scope reads nothing
 	}
 	return f.impacts[incidentID], nil
+}
+
+func (f *fakeStore) IncidentImpactBasis(_ context.Context, projectID, incidentID string) (*domain.ImpactBasis, error) {
+	inc, ok := f.incidents[incidentID]
+	if !ok || inc.ProjectID != projectID {
+		return nil, store.ErrNotFound
+	}
+	if f.impactBasisErr != nil {
+		return nil, f.impactBasisErr
+	}
+	return f.impactBases[incidentID], nil
 }
 
 // ── FR-024: the reliability gate ─────────────────────────────────────────────────────────────

@@ -59,7 +59,7 @@ func TestAdvanceEscalations(t *testing.T) {
 	}
 	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: mon.ID, Title: "down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+		Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 	}, "auto opened", "system")
 	if err != nil {
 		t.Fatalf("create incident: %v", err)
@@ -151,7 +151,7 @@ func TestAdvanceEscalationsSkipsDisabledMonitor(t *testing.T) {
 	}
 	if _, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: mon.ID, Title: "down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+		Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 	}, "auto opened", "system"); err != nil {
 		t.Fatalf("incident: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestCreateIncidentRejectsSecondOpenAuto(t *testing.T) {
 	auto := func() (domain.Incident, error) {
 		return st.CreateIncidentBySystem(ctx, domain.Incident{
 			ProjectID: proj.ID, MonitorID: mon.ID, Title: "down",
-			Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+			Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 		}, "auto", "system")
 	}
 	first, err := auto()
@@ -201,12 +201,10 @@ func TestCreateIncidentRejectsSecondOpenAuto(t *testing.T) {
 		t.Fatalf("second open auto incident err=%v, want ErrAlreadyOpen", err)
 	}
 	// A manual incident on the same monitor is not blocked by the auto-only index.
-	if _, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: mon.ID, Title: "manual",
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMinor, Source: domain.SourceManual,
-	}, "manual", "alice"); err != nil {
-		t.Fatalf("manual incident should be allowed: %v", err)
-	}
+	})
 	// Resolve the first → a new auto-incident is allowed again.
 	if _, err := st.AddIncidentUpdateBySystem(ctx, domain.IncidentUpdate{
 		IncidentID: first.ID, Status: domain.IncidentResolved, Body: "recovered", Author: "system",
@@ -308,7 +306,7 @@ func TestAdvanceEscalationsRepeatLast(t *testing.T) {
 	}
 	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: mon.ID, Title: "down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+		Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 	}, "auto", "system")
 	if err != nil {
 		t.Fatalf("incident: %v", err)
@@ -366,7 +364,7 @@ func TestAdvanceEscalationsRequiresDownStatus(t *testing.T) {
 	}
 	if _, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: proj.ID, MonitorID: mon.ID, Title: "down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+		Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 	}, "auto opened", "system"); err != nil {
 		t.Fatalf("incident: %v", err)
 	}

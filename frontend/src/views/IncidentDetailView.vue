@@ -27,7 +27,7 @@ import {
   transportFailure,
 } from "@/lib/changesTimeline";
 import { utcClockLabel } from "@/lib/wallclock";
-import { forwardStatuses, impactBadge, relTime, statusBadge, systemNoteKind } from "@/lib/incident";
+import { forwardStatuses, impactBadge, impactBasisForm, impactPhrase, relTime, statusBadge, systemNoteKind } from "@/lib/incident";
 import { PM_SECTIONS, emptySections, parsePostmortem, renderSections, serializePostmortem } from "@/lib/postmortem";
 import { sealedLabel } from "@/lib/services";
 
@@ -70,6 +70,9 @@ const impacts = computed<ImpactLink[]>(() => {
 });
 const impactsUnavailable = computed(() => !!incident.value?.impacts_unavailable);
 const probableRoots = computed(() => impacts.value.filter((l) => l.role === "probable_root"));
+// FR-042 / NFR-035 (spec §4.6, mock §3): why the impact is what it is — one of six forms. Only this
+// authenticated detail carries the basis (D15), which is why acknowledge() below must carry it over.
+const basis = computed(() => impactBasisForm(incident.value?.impact_basis, incident.value?.impact_basis_unavailable));
 const affected = computed(() => impacts.value.filter((l) => l.role === "affected"));
 
 // FR-025 D7 (D-0210 item 4, mock screen 4): the changes that PRECEDED this incident — the
@@ -170,12 +173,16 @@ async function acknowledge() {
     // The acknowledge response is the BASE incident — it carries no impacts and no
     // impacts_unavailable ([298] P1-1). Assigning it wholesale would silently erase the
     // enrichment the detail was loaded with, so merge the base fields into what we have
-    // and keep the impact state this endpoint knows nothing about.
+    // and keep the impact state this endpoint knows nothing about. The same holds for the
+    // impact BASIS (FR-042 §4.6, D15): the acknowledge response never carries it, so without the
+    // carry-over the line under the header would turn into "basis not recorded" after a click.
     if (!res.error && res.data && incident.value) {
       incident.value = {
         ...res.data,
         impacts: incident.value.impacts,
         impacts_unavailable: incident.value.impacts_unavailable,
+        impact_basis: incident.value.impact_basis,
+        impact_basis_unavailable: incident.value.impact_basis_unavailable,
       } as Incident;
     }
   } finally {
@@ -391,7 +398,7 @@ watch(
         <div class="flex flex-wrap items-center gap-[10px]">
           <h1 class="text-[22px] font-semibold tracking-tight">{{ incident.title }}</h1>
           <span class="rounded-full px-[9px] py-[2px] text-[11.5px] font-medium" :class="statusBadge(incident.status).cls">{{ statusBadge(incident.status).label }}</span>
-          <span class="rounded-full px-[9px] py-[2px] text-[11.5px] font-medium" :class="impactBadge(incident.impact).cls">{{ impactBadge(incident.impact).label }}</span>
+          <span class="rounded-full px-[9px] py-[2px] text-[11.5px] font-medium" :class="impactBadge(incident.impact).cls" data-testid="incident-impact-badge">{{ impactBadge(incident.impact).label }}</span>
           <span class="rounded-xs border border-border px-[6px] py-px font-mono text-[10.5px] uppercase tracking-[0.04em] text-ink-3">{{ incident.source }}</span>
           <IncidentSubjectChip
             :service-id="incident.service_id"
@@ -413,6 +420,35 @@ watch(
           <span v-if="incident.resolved_at">resolved <span class="font-mono text-ink-2">{{ relTime(incident.resolved_at) }}</span></span>
           <span v-if="incident.external_key" class="rounded-xs border border-border bg-inset px-[6px] py-px font-mono text-[11px]" :title="'External correlation key'">{{ incident.external_key }}</span>
         </div>
+        <!-- The impact basis (FR-042 §4.6, mock §3 D-10): its own row under the meta row, above the
+             impact-link chips, starting with the impact PHRASE so it reads as a sentence and never
+             prints a bare "None". "basis unavailable" wears the dashed outline of the "impact links
+             unavailable" chip, so a failed read does not look like one more fact (D-14). -->
+        <p
+          class="mt-1.5 text-[12.5px] leading-normal text-ink-3"
+          :class="basis.kind === 'unavailable' ? 'inline-block rounded-sm border border-dashed border-border-strong px-2 py-0.5' : ''"
+          data-testid="incident-impact-basis"
+        >
+          <!-- A link only while the service still exists (§4.6); otherwise the snapshot name, and
+               "(deleted)" says why the one name that is not a link is not one (D-12). -->
+          <span class="font-medium text-ink-2">{{ impactPhrase(incident.impact) }}</span> —
+          <template v-if="basis.kind === 'service_mapping'">declared by service
+            <RouterLink v-if="incident.service_id" :to="{ name: 'service', params: { id: incident.service_id } }" class="text-accent hover:underline">{{ basis.serviceName }}</RouterLink>
+            <template v-else>{{ basis.serviceName }} <span class="text-ink-3" data-testid="incident-impact-basis-deleted">(deleted)</span></template>
+            for state <span class="font-mono text-[12px] text-ink-2">{{ basis.state }}</span>{{ " " }}
+            <!-- D7's condition: the frozen mapping is visible on the incident page (D-11). The space above
+                 is explicit because the compiler strips whitespace before a comment, and the block span is
+                 only a line break VISUALLY: copy/paste and screen readers would read "downmapping". -->
+            <span class="mt-0.5 block font-mono text-[11.5px] text-ink-3" data-testid="incident-impact-basis-mapping">{{ basis.mapping }}</span>
+          </template>
+          <template v-else-if="basis.kind === 'project_default'">
+            <RouterLink :to="{ name: 'settings', query: { tab: 'incidents' } }" class="text-accent hover:underline">project default</RouterLink> for monitor incidents
+          </template>
+          <template v-else-if="basis.kind === 'manual'">set by the author when the incident was created</template>
+          <template v-else-if="basis.kind === 'alertmanager'">from the alert's severity label</template>
+          <template v-else-if="basis.kind === 'not_recorded'">basis not recorded (opened before impact classification)</template>
+          <template v-else>basis unavailable</template>
+        </p>
       </div>
 
       <!-- Impact chips (FR-021 §14.4): every impacted upstream service is a candidate —
@@ -510,7 +546,7 @@ watch(
       <section v-if="incident" class="mb-5 rounded border border-border bg-surface shadow-card">
         <div class="border-b border-border px-4 py-[13px] text-[13px] font-semibold">Timeline</div>
         <ol class="flex flex-col">
-          <!-- A system-authored note (⚡ Context:, ⏸ Suppressed:, 🕸 Impact:, 🚀 Changes:) is detected by
+          <!-- A system-authored note (⚡ Context:, ⏸ Suppressed:, 🕸 Impact:, 🚀 Changes:, ⬆ Impact raised:) is detected by
                its PREFIX — the marker that is also the server's idempotency guard — and every one renders
                the same way: the body in mono; the changes note carries the change glyph in the gutter. -->
           <li

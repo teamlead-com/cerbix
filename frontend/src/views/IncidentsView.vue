@@ -6,7 +6,7 @@ import AppShell from "@/components/AppShell.vue";
 import IncidentSubjectChip from "@/components/IncidentSubjectChip.vue";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
-import { forwardStatuses, relTime } from "@/lib/incident";
+import { forwardStatuses, impactBadge, impactPhrase, relTime } from "@/lib/incident";
 import { renderSections } from "@/lib/postmortem";
 
 type Incident = components["schemas"]["Incident"];
@@ -79,6 +79,8 @@ const STATUS: Record<string, Cls> = {
 function st(s?: string): Cls {
   return STATUS[s ?? ""] ?? { chip: "text-ink-3 bg-surface-2", dot: "bg-ink-3", label: s ?? "—" };
 }
+// The operator list keeps its OWN outlined colour table (unifying it with lib/incident.ts is out of
+// FR-042's scope); only the WORDS come from the shared helpers, so the list never prints the raw enum.
 const IMPACT: Record<string, string> = {
   minor: "text-degraded border-degraded/30",
   major: "text-down border-down/40",
@@ -246,11 +248,13 @@ watch(() => ws.projectId, load);
               :class="inc.id === selectedID ? 'border-accent shadow-[0_0_0_1px_var(--accent-weak)]' : 'border-border hover:border-border-strong'"
               @click="select(inc.id!)"
             >
-              <div class="flex items-center gap-2">
+              <!-- flex-wrap (FR-042 mock D-16): "NOT SPECIFIED" beside a status chip and a subject chip
+                   exceeds the 320 px card, so the row wraps instead of squeezing the chips. -->
+              <div class="flex flex-wrap items-center gap-2">
                 <span class="inline-flex h-[22px] items-center gap-[6px] rounded-full px-[7px] text-[11.5px] font-semibold" :class="st(inc.status).chip">
                   <span class="h-[7px] w-[7px] rounded-full" :class="st(inc.status).dot"></span>{{ st(inc.status).label }}
                 </span>
-                <span class="rounded-xs border px-[7px] py-px text-[10.5px] font-bold uppercase tracking-[0.05em]" :class="impactCls(inc.impact)">{{ inc.impact }}</span>
+                <span class="rounded-xs border px-[7px] py-px text-[10.5px] font-bold uppercase tracking-[0.05em]" :class="impactCls(inc.impact)" data-testid="incident-list-impact">{{ impactBadge(inc.impact).label }}</span>
                 <IncidentSubjectChip
                   :service-id="inc.service_id"
                   :service-slug="serviceSlugs[inc.service_id ?? '']"
@@ -276,7 +280,7 @@ watch(() => ws.projectId, load);
                 <span class="inline-flex h-[22px] items-center gap-[6px] rounded-full px-[7px] text-[11.5px] font-semibold" :class="st(selected.status).chip">
                   <span class="h-[7px] w-[7px] rounded-full" :class="st(selected.status).dot"></span>{{ st(selected.status).label }}
                 </span>
-                <span class="rounded-xs border px-[7px] py-px text-[10.5px] font-bold uppercase tracking-[0.05em]" :class="impactCls(selected.impact)">{{ selected.impact }} impact</span>
+                <span class="rounded-xs border px-[7px] py-px text-[10.5px] font-bold uppercase tracking-[0.05em]" :class="impactCls(selected.impact)" data-testid="incident-selected-impact">{{ impactPhrase(selected.impact) }}</span>
                 <IncidentSubjectChip
                   :service-id="selected.service_id"
                   :service-slug="serviceSlugs[selected.service_id ?? '']"

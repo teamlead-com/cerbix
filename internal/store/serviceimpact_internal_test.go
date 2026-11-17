@@ -71,7 +71,7 @@ func (f impactFixture) open(t *testing.T, st *Store, ctx context.Context, name s
 	t.Helper()
 	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
 		ProjectID: f.projectID, MonitorID: f.mon[name], Title: name + " is down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
+		Status: domain.IncidentInvestigating, Source: domain.SourceAuto,
 	}, name+" failed", "auto")
 	if err != nil {
 		t.Fatalf("open incident %s: %v", name, err)
@@ -432,13 +432,10 @@ func waitForAdvisoryWaiter(t *testing.T, st *Store) {
 // witness source the [278] bound exists for.
 func (f impactFixture) openManual(t *testing.T, st *Store, ctx context.Context, name, title string) domain.Incident {
 	t.Helper()
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
+	inc := openManualFixture(t, st, ctx, domain.Incident{
 		ProjectID: f.projectID, MonitorID: f.mon[name], Title: title,
 		Status: domain.IncidentInvestigating, Impact: domain.ImpactMinor, Source: domain.SourceManual,
-	}, title, "t")
-	if err != nil {
-		t.Fatalf("open manual incident %s: %v", title, err)
-	}
+	})
 	return inc
 }
 
@@ -807,13 +804,7 @@ func TestNeighbourHealthMatchesSingleServiceOwner(t *testing.T) {
 // treats a monitor's membership.
 func (f impactFixture) openService(t *testing.T, st *Store, ctx context.Context, name string) domain.Incident {
 	t.Helper()
-	inc, err := st.CreateIncidentBySystem(ctx, domain.Incident{
-		ProjectID: f.projectID, ServiceID: f.svc[name], Title: name + " is down",
-		Status: domain.IncidentInvestigating, Impact: domain.ImpactMajor, Source: domain.SourceAuto,
-	}, "service "+name+" is down", "auto")
-	if err != nil {
-		t.Fatalf("open service incident %s: %v", name, err)
-	}
+	inc := openServiceFixture(t, st, ctx, f.projectID, f.svc[name], name+" is down", domain.ImpactMajor)
 	return inc
 }
 

@@ -94,7 +94,6 @@ func (rc *Reconciler) openAutoIncident(ctx context.Context, mon domain.Monitor, 
 		MonitorID: mon.ID,
 		Title:     mon.Name + " is down",
 		Status:    domain.IncidentInvestigating,
-		Impact:    domain.ImpactMajor,
 		Source:    domain.SourceAuto,
 	}
 	// Retry a transient failure: for an escalation-policy monitor the on-call ladder pages

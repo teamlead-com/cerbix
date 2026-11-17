@@ -199,7 +199,7 @@ func gateOpenIncident(t *testing.T, st *Store, ctx context.Context, f gateFixtur
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
-	inc, _, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout is down", 2, &f.revisionID)
+	inc, _, err := st.OpenServiceIncidentTx(ctx, tx, f.serviceID, f.projectID, "checkout is down", domain.ServiceAlertDown, domain.DefaultImpactMapping(), 2, &f.revisionID)
 	if err != nil {
 		t.Fatalf("open incident: %v", err)
 	}

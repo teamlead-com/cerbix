@@ -249,4 +249,6 @@ type InstanceSettings struct {
 	Alerting        Alerting        `json:"alerting"`
 	MonitorDefaults MonitorDefaults `json:"monitor_defaults"`
 	Mail            MailSettings    `json:"mail"`
+	// Telephony is database only (D36): no config-file counterpart.
+	Telephony TelephonySettings `json:"telephony"`
 }

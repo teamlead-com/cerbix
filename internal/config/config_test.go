@@ -497,3 +497,12 @@ func TestProviderOrphanGraceZeroIsImmediate(t *testing.T) {
 		t.Fatalf("absent orphan_grace = %s, want 30s default", g)
 	}
 }
+
+// D36: telephony settings live in the database only. A `telephony` block in the YAML is not a seed
+// that is silently ignored — it is an unknown key, refused like any other.
+func TestTelephonyHasNoYAMLSeed(t *testing.T) {
+	_, err := Parse([]byte("telephony:\n  enabled: true\n  provider: twilio\n"))
+	if err == nil || !strings.Contains(err.Error(), "field telephony not found") {
+		t.Fatalf("Parse(telephony block) = %v, want the unknown-field refusal", err)
+	}
+}

@@ -11,6 +11,10 @@ import (
 	"github.com/teamlead-com/cerbix/internal/store"
 )
 
+// reencryptExitRowsSkipped: every table was processed, but some phone numbers could not be rehashed
+// now and stay under the previous key (FR-041a pre-review 2): keep that key and run again.
+const reencryptExitRowsSkipped = 3
+
 type reencryptOptions struct {
 	ConfigPath string
 }
@@ -36,7 +40,8 @@ func newReencryptCommand(execute reencryptExecutor) *cobra.Command {
 	}
 	cmd.Flags().SortFlags = false
 	addStringFlag(cmd, &opts.ConfigPath, "config", "", "path", "path to config YAML", true)
-	setHelpSection(cmd, helpAnnotationExitCodes, "0  Stored secrets re-encrypted.\n1  Configuration, database, key, or rewrite failure.\n2  CLI usage error.")
+	setHelpSection(cmd, helpAnnotationExitCodes, "0  Stored secrets re-encrypted.\n1  Configuration, database, key, or rewrite failure.\n2  CLI usage error.\n"+
+		"3  Completed, but some phone numbers were skipped: keep the previous key and run again.")
 	return cmd
 }
 
@@ -72,12 +77,22 @@ func executeReencrypt(opts reencryptOptions, stdout, stderr io.Writer) error {
 		return printedExit(1)
 	}
 	defer st.Close()
-	st.WithCipher(cipher)
-	webhooks, channels, err := st.ReencryptSecrets(ctx)
+	st.WithCipher(cipher).WithLogger(logger)
+	res, err := st.ReencryptSecrets(ctx)
 	if err != nil {
 		logging.Critical(logger, "reencrypt_failed", "error", err.Error())
 		return printedExit(1)
 	}
-	logger.Info("reencrypt_complete", "webhooks", webhooks, "channels", channels)
+	logger.Info("reencrypt_complete", "webhooks", res.Webhooks, "channels", res.Channels,
+		"phone_numbers_released", res.PhoneNumbersReleased, "phone_rehashes_skipped", res.PhoneRehashesSkipped)
+	if res.PhoneRehashesSkipped > 0 {
+		// Every table was processed, but the skipped rows (each logged by user id) are still under the
+		// previous key: dropping it now would leave those numbers undecryptable and stop every later
+		// run at their decrypt. Exit 3 — not 0, not a failure — says "keep the key, run again"; the
+		// skips are transient (a row in use), so the next run normally exits 0.
+		logger.Warn("reencrypt_phone_rehashes_skipped", "count", res.PhoneRehashesSkipped,
+			"hint", "keep the previous key configured and run cerbix reencrypt again")
+		return printedExit(reencryptExitRowsSkipped)
+	}
 	return nil
 }

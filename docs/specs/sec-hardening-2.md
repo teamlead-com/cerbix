@@ -40,8 +40,8 @@
 | --- | --- | --- | --- | --- |
 | H-1 | P0 | A bearer JWT minted by the realm for ANY client authenticates as the human whose `sub` it carries | `internal/auth/auth.go:242`, `internal/auth/middleware.go` (pre-iter-0209 `principalFromJWT`, now `internal/auth/machine.go`), `internal/store/users.go:35-67` (at `b21b45c`) | D-0034 |
 | H-2 | P0 | The WebSocket prober writes an unvalidated target into a raw socket and accepts any TLS certificate; the RabbitMQ management URL is built by concatenation from `config.path` | pre-iter-0210 `wsTarget` and the concatenated handshake in `internal/prober/websocket.go`, `rabbitMgmtURL` in `internal/prober/rabbitmq.go`; the userinfo check at `internal/domain/monitor.go:391`; the parsers are now in `internal/domain/targets.go` | — |
-| H-3 | P1 | Reads gated by `InOrg` alone ignore a token's action allow-list and return `unlisted_token` to every reader | `internal/api/handlers_statuspage.go:58-69`, `internal/api/handlers_feed.go:19-25`, `internal/authz/authz.go:273-283`, `internal/api/handlers.go:54-89` | D-0139 preamble |
-| H-4 | P1 | No request-forgery defence beyond `SameSite=Lax`; a state-changing `GET /auth/logout` | `internal/auth/auth.go:374-384`, `internal/api/handlers.go:603-628`, `internal/auth/handlers.go:31-41` | — |
+| H-3 | P1 | Reads gated by `InOrg` alone ignore a token's action allow-list and return `unlisted_token` to every reader | `internal/api/handlers_statuspage.go:58-69`, `internal/api/handlers_feed.go:19-25`, `internal/authz/authz.go:273-283`, `internal/api/handlers.go:55-90` | D-0139 preamble |
+| H-4 | P1 | No request-forgery defence beyond `SameSite=Lax`; a state-changing `GET /auth/logout` | `internal/auth/auth.go:374-384`, `internal/api/handlers.go:643-668`, `internal/auth/handlers.go:31-41` | — |
 | H-5 | P1 | A password reset does not revoke the account's sessions | `internal/store/users_reset.go`, `internal/auth/handlers_reset.go:76-126` | D-0139 item 3 |
 | H-6 | P1 | Unbounded bodies and passwords reach Argon2id; `reset/confirm` hashes before any limiter or token check | `internal/auth/local.go:72-74`, `internal/auth/handlers_reset.go:78-110`, `internal/auth/ratelimit.go` | — |
 | H-13 | P1 | A credential header follows a redirect to another host: always for the shared prober client (synthetic `{{secret:…}}` headers), and on any two-hop chain for the canary prober, whose guard compares with the previous hop while `net/http` restores headers from the first | `internal/prober/prober.go:63-68`, `internal/prober/synthetic.go:68-72`, `internal/prober/canary.go:196-208` (at `24d0823`) | D-0218 (D3c1: three points, listed in H-13) |
@@ -51,7 +51,7 @@
 | H-9b | P2 | No `X-Content-Type-Options`, `X-Frame-Options` or CSP on any surface | `internal/web/web.go:28-53`, `frontend/index.html` | — |
 | H-10 | P2 | `branding.support_url` accepts any string and is rendered as `<a :href>` | `internal/domain/settings.go:35-56`, `frontend/src/views/LoginView.vue` | — |
 | H-11 | P2 | `/metrics` and the raw `readyz` error text are unauthenticated on the application port | pre-iter-0212 `readyz` and the single mux in `httpsrv.New` (now `internal/httpsrv/server.go:146`) | — |
-| H-12 | P2 | `/readyz` ignores `brokerUp` although the registry tracks it | `internal/metrics/metrics.go:948-953` | — |
+| H-12 | P2 | `/readyz` ignores `brokerUp` although the registry tracks it | `internal/metrics/metrics.go:949-954` | — |
 | H-14 | P2 | Subscribers of a page later made `internal` keep receiving incident mail | `internal/store/subscribers.go:96-103` (no visibility predicate) | — |
 
 Severity: P0 — an authentication or tenant boundary is crossed, or arbitrary bytes reach the private
@@ -616,7 +616,7 @@ for 1, 2 and 4 (each carries a migration); `make spa-snapshot` after any fronten
 
 - `secrets.dispatch_envelope` absent from `docker/config.prod.yaml` — **not a defect**: that file is
   `role=all`, whose dispatcher is in-process; no credential crosses a broker.
-- The last-org-admin check (`internal/api/handlers.go:357-366`) reads then writes without a lock —
+- The last-org-admin check (`internal/api/handlers.go:397-406`) reads then writes without a lock —
   **confirmed, left parked (P3)**: needs two org admins demoting each other in the same instant, and
   a global admin restores the role.
 

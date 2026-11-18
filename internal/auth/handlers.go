@@ -246,10 +246,17 @@ func (a *Authenticator) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"redirect_to": dest})
 }
 
-// sanitizeRedirect only permits local, non-protocol-relative paths.
+// sanitizeRedirect only permits local, non-protocol-relative paths. A backslash is refused because
+// a browser reads `/\host` as `//host`, and a control character because the value ends up in a
+// Location header (FR-041a D21: the return path now carries operator-supplied links).
 func sanitizeRedirect(target string) string {
-	if strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "//") {
-		return target
+	if !strings.HasPrefix(target, "/") || strings.HasPrefix(target, "//") {
+		return "/"
 	}
-	return "/"
+	for _, r := range target {
+		if r == '\\' || r < 0x20 || r == 0x7f {
+			return "/"
+		}
+	}
+	return target
 }

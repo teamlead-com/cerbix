@@ -59,7 +59,7 @@
 | T-5 | P2 | A partial update of a synthetic monitor is refused with 400 `synthetic: config.scenario is required`: the handler validates the monitor it read without the writer-only scenario. The SPA's Pause/Resume button hits it. A correctness defect, found while checking T-1d | `internal/api/handlers_monitors.go:42`, `:724` |
 | T-2 | P2 | Alert delivery follows redirects with the library's policy. On 307/308 it sends the incident body and its HMAC signature to another host. On any redirect it sends the previous URL, token included, in `Referer`. A 301/302/303 counts as delivered although the body was dropped. The pull agent's client does the same with its `Authorization` header | `internal/prober/guard.go:167-181` (at `7744e95`), `internal/notify/notify.go:46-49` (at `7744e95`), `internal/notify/notify.go:255-272`, `webhook.New` (`internal/webhook/webhook.go`), `webhook.Dispatcher.post` (`internal/webhook/webhook.go`), `internal/agent/agent.go:97` (at `7744e95`) |
 | T-3 | P2 | A mail subject is written into the message as is. Any name or title that reaches it with CR/LF adds headers or replaces the body: a monitor, service or project name, an incident title (an Alertmanager `summary` among them) or a status-page title. The mail goes from the instance's own sender to channel recipients and public status-page subscribers. Every scheduled SLA report already puts its raw line breaks into the subject | `notify.Dispatcher.sendMail` (before iter-0213), `internal/mailer/mailer.go:249-254` (at `7744e95`) |
-| T-4 | P2 | A delivery that fails before a response quotes its full URL in the error text: a Telegram bot token, a Slack webhook path, a tokened webhook URL. The API treats those values as write-only, yet the text is stored in the outbox's `last_error`, written to the log, and served by the dead-letter API | `internal/notify/notify.go:239`, `:244`, `internal/webhook/webhook.go:80`, `:87` (these four at `7744e95`), `internal/outbox/outbox.go:324-345` |
+| T-4 | P2 | A delivery that fails before a response quotes its full URL in the error text: a Telegram bot token, a Slack webhook path, a tokened webhook URL. The API treats those values as write-only, yet the text is stored in the outbox's `last_error`, written to the log, and served by the dead-letter API | `internal/notify/notify.go:239`, `:244`, `internal/webhook/webhook.go:80`, `:87` (these four at `7744e95`), `internal/outbox/outbox.go:328-349` |
 
 **Severity scale** (`sec-hardening-2`'s):
 - **P0** — an authentication or tenant boundary is crossed.
@@ -458,7 +458,7 @@ things.
      - **AMQP.** A job stays in its region's queue until consumed or until its per-message TTL
        expires. The TTL is the monitor's `interval_seconds` (`internal/dispatch/amqp.go:577-580`).
      - **Pull.** A row stays in `pull_jobs` until claimed or until `expires_at`, also the monitor's
-       interval (`internal/scheduler/scheduler.go:2115`, `internal/store/pulljobs.go:143`).
+       interval (`internal/scheduler/scheduler.go:2155`, `internal/store/pulljobs.go:143`).
      - **The bound.** The interval is at most 86 400 s (`maxIntervalSeconds`,
        `internal/domain/monitor.go:438`).
      - **Only beta rows are affected:** monitors whose stored config lacks a defaulted key.
@@ -468,7 +468,7 @@ things.
        the executor restarts. Two consecutive refusals set `credential_ready=false`
        (`internal/dispatch/health.go:33-52`, `internal/worker/worker.go:105-112`,
        `internal/agent/agent.go:127-134`). The scheduler then stops handing that region credentialed
-       jobs, as `no_capable_executor` (`internal/scheduler/scheduler.go:1937-1951`). With no job
+       jobs, as `no_capable_executor` (`internal/scheduler/scheduler.go:1976-1990`). With no job
        there is no success to clear the streak. Only a restart sets readiness from the keyring again
        (`agent.go:109-113`, `worker.go:51`).
      - **With the mapping,** each such job produces one `probe_error` `unsupported_version` for its
@@ -621,7 +621,7 @@ This is the visible proof of S15 on a live stack. The old assertion encoded the 
 ### 3.1 The clients and who uses them
 
 **Delivery.** `Guard.HTTPClient` (`internal/prober/guard.go:167-181` at `7744e95`) is used only for delivery
-(`internal/cli/cli.go:560-564`, D-0141).
+(`internal/cli/cli.go:586-591`, D-0141).
 - It dials every hop through the `notification_egress` guard, which denies private addresses by
   default.
 - Its `CheckRedirect` only caps the chain at 10. Every other redirect rule is the library's.
@@ -633,7 +633,7 @@ This is the visible proof of S15 on a live stack. The old assertion encoded the 
 | Deliverer | Channel | URL | What it sends |
 | --- | --- | --- | --- |
 | `webhook.Dispatcher.post` (`webhook.Dispatcher.post` (`internal/webhook/webhook.go`)) | org/project webhook | `Webhook.URL`, any http(s) (`internal/domain/webhook.go:25-37`) | POST JSON `IncidentEvent`: incident id, project id, monitor/service ids, title, status, impact, timestamps, acknowledger's id and name, and the update text. Headers `X-Cerbix-Event` and `X-Cerbix-Signature` (HMAC-SHA256 of the body under the hook's secret) |
-| `notify.Dispatcher.post` (`internal/notify/notify.go:255-272`) | `webhook` channel | `config.url`, any http(s) (`internal/domain/notification.go:112-119`). The domain says these URLs "embed the auth token in the path" (`:51`) | POST JSON: monitor transition, alert text or SLA report (event, monitor id and name, project id, text) |
+| `notify.Dispatcher.post` (`internal/notify/notify.go:255-272`) | `webhook` channel | `config.url`, any http(s) (`internal/domain/notification.go:151-158`). The domain says these URLs "embed the auth token in the path" (`:77`) | POST JSON: monitor transition, alert text or SLA report (event, monitor id and name, project id, text) |
 | the same | `slack` channel | `config.url` (an incoming-webhook URL whose path is the secret) | POST JSON `{"text": …}` |
 | the same | `telegram` channel | `https://api.telegram.org/bot<bot_token>/sendMessage` (`:198`, `:316`, `:341`, `:364`): **the token is in the URL path** | POST JSON `{"chat_id", "text"}` |
 | `notify.Dispatcher.sendMail` | `email` channel | SMTP through `EgressDialContext`: no HTTP, no redirect | — |
@@ -713,10 +713,10 @@ front of it.
   event.
   - So while one channel of a monitor answers a redirect, every other channel of that monitor
     receives the same alert again on each attempt, up to 10 (`maxAttempts`,
-    `internal/outbox/outbox.go:24`), until the event dead-letters.
+    `internal/outbox/outbox.go:25`), until the event dead-letters.
   - The same holds for the webhooks of one incident event, and for that event's status-page
     subscribers. The incident fan-out returns the webhooks' error and only logs the subscribers'
-    (`internal/cli/cli.go:1118-1125`), so a redirecting webhook makes every retry mail the
+    (`internal/cli/cli.go:1156-1163`), so a redirecting webhook makes every retry mail the
     subscribers again.
   - This is today's behaviour for any failing channel; A adds redirects to the failures. The runbook
     says so, and says to fix the URL or disable the channel. Per-channel delivery state is out of
@@ -792,12 +792,12 @@ build request: parse "https://hooks.example/x?token=SECRET\x7f": net/url: invali
 | Place | Where | Who reads it |
 | --- | --- | --- |
 | the deliverers' return value, joined per channel or hook as `channel <id>: …` / `webhook <id>: …` | `internal/notify/notify.go:56-185`, `internal/webhook/webhook.go:70-76` | the outbox worker |
-| `outbox_events.last_error` | `FailOutbox` (`internal/outbox/outbox.go:324`, `internal/store/outbox.go:317`). Kept until the event is delivered or replayed (`internal/store/outbox.go:211`, `:280`, `:297`) | anyone who reads the database |
-| the log lines `outbox_delivery_retry` and `outbox_dead` | `internal/outbox/outbox.go:345`, `:334` | anyone who reads the process log, outside the database's access control |
+| `outbox_events.last_error` | `FailOutbox` (`internal/outbox/outbox.go:328`, `internal/store/outbox.go:317`). Kept until the event is delivered or replayed (`internal/store/outbox.go:211`, `:280`, `:297`) | anyone who reads the database |
+| the log lines `outbox_delivery_retry` and `outbox_dead` | `internal/outbox/outbox.go:349`, `:338` | anyone who reads the process log, outside the database's access control |
 | `GET /api/v1/admin/outbox/dead`, shown in Admin → Outbox | `internal/api/handlers_outbox.go:25-41` returns `ListDeadOutbox` rows unchanged | global admins |
 
 **What leaks.** A channel's `url` (Slack, webhook) and `bot_token` (Telegram) are write-only in the
-API. They are in `domain.SecretChannelConfigKeys` (`internal/domain/notification.go:50-54`) and
+API. They are in `domain.SecretChannelConfigKeys` (`internal/domain/notification.go:76-80`) and
 blanked by `Redacted()`: a project viewer never reads them, and an editor re-enters them. Through
 `last_error` they reach every global admin; through the log, anyone who can read it. An org webhook
 URL with a token in its path or query leaks the same way.
@@ -895,7 +895,7 @@ concatenation and send the message through `mailer.SendMailContext`:
 | --- | --- | --- | --- | --- | --- |
 | Channel email: every alert text in the table below | `notify.sendMail`; the subject **is** the alert text (`:226` at `7744e95` writes `text` twice) | the channel's `from` | the channel's `to` list | the alert text, whole | see below |
 | Status-page subscriber incident mail | `subscribe.render` (`internal/subscribe/subscribe.go:67`) → `mailer.Send` | the instance mail sender (Settings → Mail) | each confirmed subscriber | `[<status>] <Incident.Title>` | project editors (incident title), **and anyone holding a project's Alertmanager token**: an alert's `summary` annotation becomes the incident title (`internal/api/handlers_alertmanager.go:148`) |
-| Subscription confirmation | `internal/api/handlers_subscribe.go:67-70`, queued (`TopicSubscriberConfirm`), sent at `internal/outbox/outbox.go:877` | the instance mail sender | the address typed into the public subscribe form | `Confirm your subscription to <StatusPage.Title>` (`:69`) | whoever may edit the status page; `StatusPage.Validate` requires only a non-blank title (`internal/domain/statuspage.go:199`) |
+| Subscription confirmation | `internal/api/handlers_subscribe.go:67-70`, queued (`TopicSubscriberConfirm`), sent at `internal/outbox/outbox.go:943` | the instance mail sender | the address typed into the public subscribe form | `Confirm your subscription to <StatusPage.Title>` (`:69`) | whoever may edit the status page; `StatusPage.Validate` requires only a non-blank title (`internal/domain/statuspage.go:199`) |
 | Password reset | `internal/auth/handlers_reset.go:65-69` | the instance mail sender | the account's email | constant | nobody |
 
 The channel alert texts, each delivered as the whole subject of a channel mail:
@@ -903,10 +903,10 @@ The channel alert texts, each delivered as the whole subject of a channel mail:
 | Text | Rendered by | Delivered at | Values from the database | Who writes them, and what is checked |
 | --- | --- | --- | --- | --- |
 | Monitor transition and reminder: `🔴 <name> is DOWN.` / recovery | `notify.Message` (`internal/notify/notify.go:275`) | `notify.Deliver` | `Monitor.Name` | project editors (API, UI, monitoring-as-code): non-blank only (`internal/domain/monitor.go:231`) |
-| Escalation step | `domain.EscalationStepAlert.Message` (`internal/domain/outbox.go:314`) | `internal/outbox/outbox.go:865` | the monitor's or service's name (`Subject()`) | project editors: monitor name as above; no service-name rule refuses a control byte either |
-| Service alert (live and burn) | `domain.ServiceAlert.Message` (`internal/domain/servicealert.go:368`) | `internal/outbox/outbox.go:766` | `ServiceName` | project editors (API, monitoring-as-code); no rule refuses a control byte |
-| **SLA report**: `📊 Weekly SLA report — <project>` then one line per window | `domain.SLAReport.Message` (`internal/domain/outbox.go:341`) | `internal/outbox/outbox.go:821` | `Project.Name` | org admins: non-blank only (`internal/api/handlers.go:230-233`). **And the text is multi-line by construction**: every scheduled report puts raw line breaks into the subject, with no attacker involved |
-| Region worker lost / regained | `domain.RegionWorkerAlert.Message` (`internal/domain/outbox.go:263`) | `internal/outbox/outbox.go:834` | the region name, twice. `%q` escapes the first; the second, in `--region %s`, is written raw | whoever sets a monitor's region. Bounded to `^[a-z0-9-]{1,40}$` (`internal/domain/monitor.go:645`) at the monitor's write (`:409`) and in the config (`internal/config/secrets.go:111`, `:163`), so today it cannot carry a control byte. Listed because the builder must not rely on that |
+| Escalation step | `domain.EscalationStepAlert.Message` (`internal/domain/outbox.go:318`) | `internal/outbox/outbox.go:926` | the monitor's or service's name (`Subject()`) | project editors: monitor name as above; no service-name rule refuses a control byte either |
+| Service alert (live and burn) | `domain.ServiceAlert.Message` (`internal/domain/servicealert.go:368`) | `internal/outbox/outbox.go:800` | `ServiceName` | project editors (API, monitoring-as-code); no rule refuses a control byte |
+| **SLA report**: `📊 Weekly SLA report — <project>` then one line per window | `domain.SLAReport.Message` (`internal/domain/outbox.go:345`) | `internal/outbox/outbox.go:880` | `Project.Name` | org admins: non-blank only (`internal/api/handlers.go:231-234`). **And the text is multi-line by construction**: every scheduled report puts raw line breaks into the subject, with no attacker involved |
+| Region worker lost / regained | `domain.RegionWorkerAlert.Message` (`internal/domain/outbox.go:267`) | `internal/outbox/outbox.go:893` | the region name, twice. `%q` escapes the first; the second, in `--region %s`, is written raw | whoever sets a monitor's region. Bounded to `^[a-z0-9-]{1,40}$` (`internal/domain/monitor.go:645`) at the monitor's write (`:409`) and in the config (`internal/config/secrets.go:111`, `:163`), so today it cannot carry a control byte. Listed because the builder must not rely on that |
 
 **The SLA report today** *(run)*. The report text was formatted exactly as `notify.sendMail` formats
 it, passed through `net/smtp`'s `DATA` writer, and parsed back with `net/mail`.
@@ -932,7 +932,7 @@ it, passed through `net/smtp`'s `DATA` writer, and parsed back with `net/mail`.
 - **Subscriber address.** It needs only an `@` that is neither first nor last
   (`internal/domain/statuspage.go:298-307` at `7744e95`).
 - **Email channel and mail settings.** They need only non-blank `to` and `from`
-  (`internal/domain/notification.go:125-128`, `internal/domain/settings.go:214-225`, both at `7744e95`).
+  (`NotificationChannel.Validate` in `internal/domain/notification.go`; `internal/domain/settings.go:214-225` at `7744e95`).
 - **What gets stored as a result.** A display-name form (`Ops <ops@example.com>`), a list in one
   subscriber field, or a non-ASCII address is stored. Each then fails at the SMTP server on every
   send. `mailFrom` writes `MAIL FROM:<%s>` and `net/smtp` writes `RCPT TO:<%s>`, so a display name
@@ -1023,8 +1023,8 @@ One message builder in `internal/mailer` serves both senders, so neither concate
   - **When Settings → Mail is already saved in the database**, the startup check can refuse a value
     that no longer applies.
     - **Why the seed is dead then.** The seed applies only while the database's mail group is
-      unconfigured (`settings.Service.resolve`, `internal/settings/service.go:91-92`). The first save
-      through Settings → Mail marks the group configured (`SaveMail`, `:191-200`), and from then on
+      unconfigured (`settings.Service.resolve`, `internal/settings/service.go:96-97`). The first save
+      through Settings → Mail marks the group configured (`SaveMail`, `:220-229`), and from then on
       the YAML block is never read.
     - **Why the check cannot see that.** `Config.Validate()` runs inside `config.Parse`
       (`internal/config/config.go:522`), before any database exists for the process. So it cannot
@@ -1051,7 +1051,7 @@ One message builder in `internal/mailer` serves both senders, so neither concate
       - `subscribe.Deliver` keeps sending to the remaining recipients and returns only the first
         error (`internal/subscribe/subscribe.go:49-54`);
       - the incident fan-out logs that error as `subscriber_email_failed` and does not fail the event
-        (`internal/cli/cli.go:1118-1125`).
+        (`internal/cli/cli.go:1156-1163`).
 
       Revision 3 said that the event failed and the outbox re-mailed every valid subscriber. That
       was wrong, and it is corrected here; the behaviour the owner confirmed is unchanged. The

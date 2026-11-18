@@ -183,15 +183,53 @@ var candidateCoverageSQL = `
 // participant, and the resolver falls back to the project's enabled channels when the current
 // rotation names a dead one (§16.6's "a deleted or empty target falls back"). So anything armed here
 // has somewhere to land.
-const routablePredicate = `(
-		    EXISTS (SELECT 1 FROM oncall_schedules os
-		             JOIN notification_channels pc
-		               ON pc.project_id = os.project_id AND pc.enabled
-		              AND os.participants @> to_jsonb(pc.id::text)
-		            WHERE os.id = s.oncall_schedule_id AND os.project_id = s.project_id)
-		    OR EXISTS (SELECT 1 FROM notification_channels nc
-		                WHERE nc.project_id = s.project_id AND nc.enabled)
+//
+// A live channel is an enabled one that is also a route under D31 rule 1 (FR-041a §4.6): a phone
+// channel that cannot deliver is not one (phoneroute.go). The rule is TRUE for the four other types,
+// which are judged exactly as before (P14). It is a variable rather than a constant only because the
+// rule's text is built by phoneRouteSQL.
+//
+// Its two halves are named so each can be asked on its own; the predicate is their disjunction.
+var routablePredicate = routablePredicateWithout("")
+
+// routablePredicateWithout is routablePredicate with one channel left out of both halves: the channel
+// whose id is the SQL expression without ("" leaves none out, which is routablePredicate itself). A
+// phone channel's `only_route_for` (FR-041a §4.3) is the paging services routable by the first and
+// not by the second, so the warning and the routing read one text and cannot disagree.
+func routablePredicateWithout(without string) string {
+	return `(
+		    ` + routableSchedule(without) + `
+		    OR ` + routableProjectChannels(without) + `
 		)`
+}
+
+// routableScheduleSQL is the schedule half: a participant of the service's schedule that is a live
+// channel of this project.
+var routableScheduleSQL = routableSchedule("")
+
+func routableSchedule(without string) string {
+	return `EXISTS (SELECT 1 FROM oncall_schedules os
+		             JOIN notification_channels pc
+		               ON pc.project_id = os.project_id AND pc.enabled AND ` + phoneRouteSQL("pc") + channelLeftOut("pc", without) + `
+		              AND os.participants @> to_jsonb(pc.id::text)
+		            WHERE os.id = s.oncall_schedule_id AND os.project_id = s.project_id)`
+}
+
+// routableProjectChannelsSQL is the project half: any live channel of the service's project.
+var routableProjectChannelsSQL = routableProjectChannels("")
+
+func routableProjectChannels(without string) string {
+	return `EXISTS (SELECT 1 FROM notification_channels nc
+		                WHERE nc.project_id = s.project_id AND nc.enabled AND ` + phoneRouteSQL("nc") + channelLeftOut("nc", without) + `)`
+}
+
+// channelLeftOut is the clause that leaves the channel without out of a half's channels aliased alias.
+func channelLeftOut(alias, without string) string {
+	if without == "" {
+		return ""
+	}
+	return " AND " + alias + ".id <> " + without
+}
 
 // §16.1's live policy clause, as TWO questions, because they fail for different reasons and an
 // operator needs the difference.

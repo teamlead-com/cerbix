@@ -12,12 +12,12 @@ import (
 // A missing row yields all-zero (unconfigured) groups — the caller then applies the
 // config bootstrap / defaults.
 func (s *Store) GetInstanceSettings(ctx context.Context) (domain.InstanceSettings, error) {
-	var branding, authPolicy, alerting, monDefaults, mail []byte
+	var branding, authPolicy, alerting, monDefaults, mail, telephony []byte
 	err := s.pool.QueryRow(ctx,
-		`SELECT branding, auth_policy, alerting, monitor_defaults, mail FROM instance_settings WHERE id = true`).
-		Scan(&branding, &authPolicy, &alerting, &monDefaults, &mail)
+		`SELECT branding, auth_policy, alerting, monitor_defaults, mail, telephony FROM instance_settings WHERE id = true`).
+		Scan(&branding, &authPolicy, &alerting, &monDefaults, &mail, &telephony)
 	if noRows(err) {
-		return domain.InstanceSettings{}, nil
+		return domain.InstanceSettings{Telephony: domain.DefaultTelephonySettings()}, nil
 	}
 	if err != nil {
 		return domain.InstanceSettings{}, fmt.Errorf("store: get instance settings: %w", err)
@@ -42,6 +42,10 @@ func (s *Store) GetInstanceSettings(ctx context.Context) (domain.InstanceSetting
 		return domain.InstanceSettings{}, fmt.Errorf("store: decrypt mail password: %w", derr)
 	}
 	out.Mail.SMTPPassword = plain
+	// Telephony is decoded on its own: an unreadable telephony secret marks that group only.
+	if out.Telephony, err = s.decodeTelephony(telephony); err != nil {
+		return domain.InstanceSettings{}, err
+	}
 	return out, nil
 }
 

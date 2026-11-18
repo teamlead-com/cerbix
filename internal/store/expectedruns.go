@@ -504,7 +504,7 @@ type ExpectationReservation struct {
 // unchanged, it stopped it again on the next tick and every tick after.
 //
 // A rejected item is reported rather than merely dropped, because the caller is the only party that
-// can say which monitor it was and count it: this package has no logger and no metrics.
+// can say which monitor it was and count it: this package keeps no log line or metric for it.
 type ExpectationRejection struct {
 	MonitorID string
 	Reason    string

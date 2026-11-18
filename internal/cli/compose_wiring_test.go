@@ -352,6 +352,9 @@ func TestMakefileNonProductionStackFacade(t *testing.T) {
 		"geo-ready",
 	)
 
+	if rule := makeRule(t, makefile, "dev-down"); !strings.Contains(rule, "--profile sso --profile mail --profile phone down") {
+		t.Error("dev-down does not include the phone profile, so phonestub would survive a teardown")
+	}
 	for _, target := range []string{"dev-down", "geo-down"} {
 		rule := makeRule(t, makefile, target)
 		for _, destructive := range []string{" -v", "volume rm", "volume prune", "down --volumes", "--remove-orphans"} {
@@ -401,7 +404,8 @@ func TestMakefileDryRunTopologyExpansion(t *testing.T) {
 			target: "dev-up-single",
 			want: []string{
 				"--env-file docker/.env.dev -f docker/docker-compose.yml",
-				"--profile sso --profile mail up -d --wait",
+				"--profile sso --profile mail --profile phone config --quiet",
+				"--profile sso --profile mail --profile phone up -d --wait --wait-timeout 180 postgres rabbitmq mariadb keycloak mailpit phonestub",
 				"--profile single run --rm --no-deps cerbix migrate",
 				"--profile single up -d --no-deps cerbix",
 				"http://cerbix:8080/readyz",
@@ -414,6 +418,7 @@ func TestMakefileDryRunTopologyExpansion(t *testing.T) {
 			target: "dev-up-distributed",
 			want: []string{
 				"--env-file docker/.env.dev -f docker/docker-compose.yml",
+				"--profile sso --profile mail --profile phone up -d --wait --wait-timeout 180 postgres rabbitmq mariadb keycloak mailpit phonestub",
 				"--profile distributed run --rm --no-deps api migrate",
 				"--profile distributed up -d --no-deps scheduler api worker",
 				"http://api:8080/readyz",

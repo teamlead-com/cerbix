@@ -9749,3 +9749,133 @@ keys or 400), D20 (a log field, no metric). This record keeps what the build dec
 - **Known limits.** The source scans do not see SQL assembled with `+=`, `fmt.Sprintf`, `strings.Join` or
   a `strings.Builder`, `SELECT *`, column lists under other names, or a serialized incident; the
   behavioural regression covers what they miss on the paths it drives.
+
+## D-0283 — a phone channel is a route only when it can deliver; numbers are verified by code, kept as ciphertext, keyed hash and mask; telephony lives in the database and needs the at-rest key; phone deliveries are an operator's record, never public (FR-041a / NFR-034, iter-0216, 2026-11-18)
+
+**Context.** [`func-phone-alerts.md`](specs/func-phone-alerts.md), revision 6 approved by the owner on
+2026-11-17, with revisions 7, 8 and 9 approved during the build (2026-11-18); mock
+[`mock-phone-alerts-a.html`](design/mock-phone-alerts-a.html) approved on 2026-11-17. Before FR-041a an
+alert could reach a person only through a webhook, Slack, Telegram or email. Part (a) adds the `sms` and
+`voice` channel types, verified numbers, two providers, instance telephony settings, the delivery record,
+the incident short reference and the storm guard. The spec's decisions are the contract and are not
+repeated here: D2 (phone is a channel type), D3 (one provider interface; Twilio and a generic HTTP SMS
+gateway), D7 (a number belongs to a user, verified by code; a shared number lives on the channel), D16
+(no new outbox topic), D18 (phone only for alerts that ask a person to act), D19 (one accepted call per
+event and channel), D21 (`incidents.ref`), D26 (the storm guard in part (a)), D27 (mixed versions: a
+barrier and a runbook), D28 (who may create a phone channel), D29 (telephony needs the at-rest key), D31
+(a phone channel that cannot deliver is not a route), D32 (a monitor's incident is not raced), D33 (a
+delivery is reserved before the call), D34 (the provider's code, not its text), D35 (ciphertext, keyed
+hash and mask), D36 (telephony in the database only). This record keeps what the build decided inside
+that contract.
+
+**Decision.**
+1. **Telephony settings live in the database only (D36).** `instance_settings` holds the group as a
+   jsonb document (`telephony`) plus the typed columns the SQL predicates read
+   (`telephony_enabled`, `telephony_provider`), all written in one statement (R1); secrets inside the
+   document are AEAD ciphertext bound to their field. There is no YAML key and no seed: absent means
+   disabled. A save with a blank secret keeps the stored one; `generic_http.headers_clear` removes the
+   headers. Enabling telephony, storing a credential or storing a number is refused while
+   `security.encryption_key` is missing (D29), and the settings read says so
+   (`encryption_key_configured`). A save that would leave paging services without a route answers 409
+   with the list (at most 50, then a total) unless confirmed (R10).
+2. **D31 rule 1 is one SQL fragment.** `phoneRouteReasonTemplate` in `internal/store/phoneroute.go`
+   states "deliverable by configuration" once: recipient deleted, number unverified, channel disabled,
+   telephony off, voice the provider cannot place, recipient no longer eligible, no verified number —
+   in the order a person fixes them, the first failing clause being the channel's `deliverable.reason`
+   (R11). The channel DTO reads the reason; `routablePredicate`, service recipient resolution, step
+   resolution and the send-time check embed the boolean form. For the four other channel types the
+   reason is NULL and the fragment is TRUE, so they are judged exactly as before (P14). One text, so the
+   DTO never calls a channel a route that a predicate refuses.
+3. **A delivery is reserved before the provider is called (D33).** A `sending` row is inserted —
+   `ON CONFLICT DO NOTHING` on `(outbox_event_id, channel_id)` — and committed before any request; the
+   answer updates it. A retry that meets a `sending` row younger than 60 s returns a retryable error;
+   older, it closes the row as `outcome_unknown` without calling. The 60 s run from `updated_at`. The
+   scheduler leader closes stale `sending` rows every 15 s for the events no retry comes back to,
+   skipping locked rows (review P1-3). A call gets at most 5 s and never more than the delivery's
+   remaining budget; the phone channels of one event are called four at a time. The storm guard counts
+   `sending` and `outcome_unknown` rows under the number's lock; its refusals are rows
+   (`storm_limited`, the limit named in `notes`).
+4. **The keyed hash.** `secret.Cipher` gains `KeyedHash` and `KeyedHashes`:
+   hex(HMAC-SHA-256(sub-key, label ‖ 0x00 ‖ value)), the sub-key derived from each at-rest key with the
+   fixed label `cerbix/keyed-hash/v1`, so the AES-GCM key is never a MAC key. Every write hashes under
+   the primary key; every lookup (uniqueness, the storm guard, the verification lock) matches the hashes
+   under every configured key, so a rotation in progress finds the old rows. A nil cipher fails closed.
+   A number is stored three ways (D35): AEAD ciphertext bound to its user or channel (R2), the keyed
+   hash, and the mask — `+`, the country calling code, `•••••`, the last 4 digits (R3), the only form
+   the API, the SPA and the logs ever show. Input is E.164 once spaces, `-`, `.`, `(` and `)` are
+   stripped: `^\+[1-9][0-9]{7,14}$` (R4). No API response, log line or delivery row carries a number
+   in full.
+5. **`telephony_can_place_calls` is a generated column** (revision 8, review P1-1): false for
+   `generic_http` and for Twilio whose `from` is a Messaging Service SID (`MG…`). It is D3's one
+   condition "the provider can place calls", read by channel creation and enabling, `deliverable`, the
+   route predicates, the 409 of a save and the send. Generated from the same row, it cannot disagree
+   with the provider and `from` it describes, and a save's own transaction reads the proposed value.
+6. **The hourly code limit counts the requester; `phone_verifications.requested_by` holds it** (revision
+   8, review P2-3). A code lives 10 minutes and allows 5 attempts; a requester (a user id, or an API
+   token's `apitoken:<id>`) gets 3 codes an hour across every number they verify — their own and the
+   channels' — and a number gets 10 a day across every subject. Refused sends spend the hour too. Sends
+   of one requester are serialised by a requester lock, and the number's verification lock covers its
+   hash under every key (P2-5). A verified channel gets no code (P2-3); a code spent by its attempts no
+   longer holds the number (P2-4). An unverified number with no running code yields to a new claimant.
+   Code rows are kept 24 hours for the limits and purged hourly (R6). `requested_by` is not in §8's
+   sketch; the owner accepted it with the revision-8 report.
+7. **A code by a call** (revision 9). The three sends take `via: sms | voice` (absent or `null` is SMS;
+   anything else 400 `via_invalid`); `GET /api/v1/me` carries `telephony_can_call` = telephony on
+   **and** the provider can place calls. A call the provider cannot place is refused with 400
+   `voice_unsupported_by_provider` after the number's state answers and before a code is issued, so
+   nothing is stored, spent or sent. The call speaks "This is your cerbix verification code." and the
+   six digits one by one, twice, with no keypress asked; the introduction is English whatever the voice
+   language, as alert calls are. `via` is not stored: one code, one row, the same limits, no fallback
+   between the ways, no delivery row and no storm count. The SPA offers the call beside every SMS send
+   only while `telephony_can_call` is true.
+8. **`cerbix reencrypt` exits 3 when it skipped a phone number.** It re-encrypts the telephony secrets
+   and both kinds of numbers and recomputes their hashes. Two people holding one number under two keys
+   (two replicas on different primaries during a rotation) are settled by the yield rule (verified over
+   unverified; the earlier verification; a running code; the earlier write; the smaller user id) and
+   logged as `user_phone_released`. A collision it cannot settle while a row is in use is logged as
+   `user_phone_rehash_skipped` and left under the old key; the command still processes every other
+   table and exits **3**: completed, rows skipped — keep the previous key and run again. `0` still
+   means everything was re-encrypted, `1` a failure, `2` a usage error. A run whose every attempt loses
+   its compare-and-set fails.
+9. **Phone deliveries are an operator's record.** The incident's phone activity and a channel's last 50
+   deliveries are authenticated reads (`project:read`); nothing reaches the public status page, the
+   timeline, a feed or a webhook (D22). A row stores the HTTP status, the provider code matching
+   `[A-Za-z0-9_.-]{1,32}` and the attempts — never provider text (D34), and never "timeout" or
+   "retrying" (§14 point 4).
+10. **The SPA (mock as drawn, the §14 tables where they differ).** Every refusal reads the server's
+    sentence under the action that failed; reasons read in words. "Monitor recovery" is one label in
+    every list. The incident Phone panel is shown with a delivery or with telephony on, and a failed read
+    shows "could not be read" whatever the switch says. Delivery times render through
+    `instantClockDayLabel` in `lib/wallclock.ts`, which names the UTC offset (D-0235). An SSO sign-in
+    returns to the page that asked for it.
+
+**Rejected.**
+- **A YAML seed copied into the database at start** (second external review, P1-2): a predicate cannot
+  read YAML, and a value cached per process would differ between the process that evaluates and the
+  one that delivers (D36).
+- **Composite foreign keys on `phone_deliveries` and an index on `created_at`** (review P1-3, not taken):
+  a schema change of their own, and a daily purge of a small table.
+- **Refusing a channel code while another person's verification of that number is running** (review
+  P2-3, not taken): the owner accepted the residual risk.
+- **A fallback from a refused call to an SMS** (revision 9): the answer says what happened to the one send
+  that was asked for.
+- **Storing the way a code went**: the store never needed it, and the limits stay the same by
+  construction.
+- **A per-channel delivery record for text channels**, to stop a retried event repeating them: a change
+  of the outbox for every project, outside FR-041a.
+
+**Consequences.**
+- **Upgrade and mixed versions (D27).** Migration 00120 adds the tables and columns; `incidents.ref` has
+  a database DEFAULT, so an older binary's inserts keep working. A process that predates FR-041 and
+  delivers the outbox (`all`, `api`, `scheduler`) fails every event that names a phone channel, and the
+  event's other channels are re-delivered until it is dead-lettered. So: enable telephony only after
+  every outbox-delivering role runs this release; disable the phone channels before rolling back. A
+  phone channel cannot be created while telephony is off.
+- **Key rotation automation** must treat exit 3 of `cerbix reencrypt` as "keep the previous key, run
+  again", neither as success nor as failure.
+- **Known limitation.** When the phone provider is unreachable, the event is retried and the text
+  channels receive it again, just as when any text channel fails. A phone channel the provider accepted is not sent again for that event (D19).
+- **Unchanged (NFR-034).** A project without a phone channel delivers, suppresses and escalates exactly
+  as before; the P14 golden, captured on the tree before FR-041a, holds on the production wiring too.
+- **Not done.** FR-041b (inbound endpoints, acknowledgement, snooze, voice retry) and FR-041c (quotas,
+  fallback, quiet hours, per-project provider override).

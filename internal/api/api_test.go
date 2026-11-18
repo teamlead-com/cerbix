@@ -160,19 +160,40 @@ type fakeStore struct {
 	slaReports         map[string]bool // project id -> weekly report enabled
 	oidcSettings       *domain.OIDCSettings
 	instanceSettings   domain.InstanceSettings
-	maintenance        map[string]domain.MaintenanceWindow
-	incidents          map[string]domain.Incident
-	escPolicies        map[string]domain.EscalationPolicy
-	oncall             map[string]domain.OnCallSchedule
-	overrides          map[string]domain.OnCallOverride
-	pullJobs           map[string][]fakePullRow
-	pullSeq            int
-	acked              []string
-	pullTests          map[string]fakePullTest
-	agentHeartbeats    map[string]string
-	agentTokens        map[string]domain.AgentToken
-	backfilled         []domain.Heartbeat
-	incUpdates         map[string][]domain.IncidentUpdate
+	telephonyNoKey     bool                              // EncryptionKeyConfigured reports false
+	telephonyRefusal   *domain.ServicesWithoutRouteError // SaveTelephonySettings answers it unless confirmed
+	telephonySaves     []domain.TelephonySaveOptions     // every SaveTelephonySettings call
+	// FR-041a §4.2 — a person's own number. The fake keeps the plaintext so a test can prove the
+	// handlers never echo it; the store's own tests cover the code machinery.
+	telephonyOn      bool                           // TelephonyEnabled reports it
+	phones           map[string]*fakePhone          // user id -> phone
+	phoneCode        string                         // the code SetUserPhone issues ("" = "482193")
+	phoneSetErr      error                          // SetUserPhone answers it when set
+	phoneVerifyErr   error                          // VerifyUserPhone answers it when set
+	phoneGetErr      error                          // GetUserPhone answers it when set
+	telephonyErr     error                          // TelephonyEnabled answers it when set
+	phoneSendErr     error                          // SendUserPhoneCode answers it when set
+	voiceLanguage    string                         // TelephonyVoiceLanguage reports it ("" = en-US)
+	voiceLanguageErr error                          // TelephonyVoiceLanguage answers it when set
+	canCall          bool                           // TelephonyCanCall reports it (FR-041a revision 9)
+	canCallErr       error                          // TelephonyCanCall answers it when set
+	onlyRoute        map[string]domain.OnlyRouteFor // PhoneChannelsOnlyRouteFor's scripted lists
+	onlyRouteErr     error                          // PhoneChannelsOnlyRouteFor answers it when set
+	pc               *fakePhoneChannels             // FR-041a phone channels (api_phonechannels_test.go)
+	pr               *fakePhoneReads                // FR-041a refs and phone deliveries (api_phoneread_test.go)
+	maintenance      map[string]domain.MaintenanceWindow
+	incidents        map[string]domain.Incident
+	escPolicies      map[string]domain.EscalationPolicy
+	oncall           map[string]domain.OnCallSchedule
+	overrides        map[string]domain.OnCallOverride
+	pullJobs         map[string][]fakePullRow
+	pullSeq          int
+	acked            []string
+	pullTests        map[string]fakePullTest
+	agentHeartbeats  map[string]string
+	agentTokens      map[string]domain.AgentToken
+	backfilled       []domain.Heartbeat
+	incUpdates       map[string][]domain.IncidentUpdate
 	// lastUpdateStatus is the status the HANDLER passed down, verbatim — "" for a plain comment.
 	lastUpdateStatus string
 	postmortems      map[string]domain.Postmortem
@@ -813,6 +834,156 @@ func (f *fakeStore) UpsertMonitorDefaults(_ context.Context, d domain.MonitorDef
 }
 func (f *fakeStore) UpsertMail(_ context.Context, m domain.MailSettings) error {
 	f.instanceSettings.Mail = m
+	return nil
+}
+func (f *fakeStore) EncryptionKeyConfigured() bool { return !f.telephonyNoKey }
+
+func (f *fakeStore) TelephonyEnabled(context.Context) (bool, error) {
+	if f.telephonyErr != nil {
+		return false, f.telephonyErr
+	}
+	return f.telephonyOn, nil
+}
+
+type fakePhone struct {
+	number   string
+	verified bool
+	language *string
+	code     string
+}
+
+func (p *fakePhone) view() domain.UserPhone {
+	return domain.UserPhone{NumberMasked: domain.MaskPhone(p.number), Verified: p.verified, Language: p.language}
+}
+
+// SetUserPhone models the store's contract: key, E.164, a person, one number per person, the
+// verified re-PUT no-op, replacing clears verification and keeps the language.
+func (f *fakeStore) SetUserPhone(_ context.Context, userID, number string) (domain.UserPhone, string, error) {
+	if f.phoneSetErr != nil {
+		return domain.UserPhone{}, "", f.phoneSetErr
+	}
+	if f.telephonyNoKey {
+		return domain.UserPhone{}, "", domain.ErrPhoneKeyMissing
+	}
+	n, err := domain.NormalizeE164(number)
+	if err != nil {
+		return domain.UserPhone{}, "", err
+	}
+	u, ok := f.users[userID]
+	if !ok {
+		return domain.UserPhone{}, "", store.ErrNotFound
+	}
+	if u.Kind == domain.UserKindMachine {
+		return domain.UserPhone{}, "", domain.ErrPhoneNotHuman
+	}
+	if f.phones == nil {
+		f.phones = map[string]*fakePhone{}
+	}
+	cur := f.phones[userID]
+	if cur != nil && cur.number == n && cur.verified {
+		return cur.view(), "", nil
+	}
+	for id, p := range f.phones {
+		if id != userID && p.number == n {
+			return domain.UserPhone{}, "", domain.ErrPhoneNumberInUse
+		}
+	}
+	code := f.phoneCode
+	if code == "" {
+		code = "482193"
+	}
+	next := &fakePhone{number: n, code: code}
+	if cur != nil {
+		next.language = cur.language
+	}
+	f.phones[userID] = next
+	return next.view(), code, nil
+}
+
+func (f *fakeStore) VerifyUserPhone(_ context.Context, userID, code string) (domain.UserPhone, error) {
+	p := f.phones[userID]
+	if p == nil {
+		return domain.UserPhone{}, store.ErrNotFound
+	}
+	if f.phoneVerifyErr != nil {
+		return domain.UserPhone{}, f.phoneVerifyErr
+	}
+	if p.code == "" {
+		return domain.UserPhone{}, domain.ErrPhoneCodeExpired
+	}
+	if code != p.code {
+		return domain.UserPhone{}, domain.ErrPhoneCodeIncorrect
+	}
+	p.verified, p.code = true, ""
+	return p.view(), nil
+}
+
+func (f *fakeStore) DeleteUserPhone(_ context.Context, userID string) error {
+	if f.phones[userID] == nil {
+		return store.ErrNotFound
+	}
+	delete(f.phones, userID)
+	return nil
+}
+
+func (f *fakeStore) SetUserPhoneLanguage(_ context.Context, userID string, language *string) (domain.UserPhone, error) {
+	p := f.phones[userID]
+	if p == nil {
+		return domain.UserPhone{}, store.ErrNotFound
+	}
+	p.language = language
+	return p.view(), nil
+}
+
+func (f *fakeStore) GetUserPhone(_ context.Context, userID string) (*domain.UserPhone, error) {
+	if f.phoneGetErr != nil {
+		return nil, f.phoneGetErr
+	}
+	p := f.phones[userID]
+	if p == nil {
+		return nil, nil
+	}
+	v := p.view()
+	return &v, nil
+}
+
+func (f *fakeStore) VerifiedUserPhoneNumber(_ context.Context, userID string) (string, error) {
+	p := f.phones[userID]
+	if p == nil || !p.verified {
+		return "", store.ErrNotFound
+	}
+	if f.telephonyNoKey { // the number is ciphertext; opening it needs the key (D29)
+		return "", domain.ErrPhoneKeyMissing
+	}
+	return p.number, nil
+}
+
+// SaveTelephonySettings models the store's contract (§4.1): refused without a key, blank secrets
+// keep, headers_clear removes the map and conflicts with new headers, and the scripted 409 list is
+// answered unless the write is confirmed. Routability itself is the store's own test.
+func (f *fakeStore) SaveTelephonySettings(_ context.Context, ts domain.TelephonySettings, opts domain.TelephonySaveOptions) error {
+	f.telephonySaves = append(f.telephonySaves, opts)
+	if f.telephonyNoKey {
+		return domain.ErrEncryptionKeyMissing
+	}
+	if opts.HeadersClear && len(ts.GenericHTTP.Headers) > 0 {
+		return domain.ErrTelephonyHeadersConflict
+	}
+	if f.telephonyRefusal != nil && !opts.ConfirmUnroutable {
+		return f.telephonyRefusal
+	}
+	stored := f.instanceSettings.Telephony
+	if ts.Twilio.AuthToken == "" {
+		ts.Twilio.AuthToken, ts.AuthTokenUnreadable = stored.Twilio.AuthToken, stored.AuthTokenUnreadable
+	}
+	switch {
+	case opts.HeadersClear:
+		ts.GenericHTTP.Headers = nil
+	case len(ts.GenericHTTP.Headers) == 0:
+		ts.GenericHTTP.Headers, ts.HeadersUnreadable = stored.GenericHTTP.Headers, stored.HeadersUnreadable
+	}
+	ts.Configured = true
+	f.instanceSettings.Telephony = ts
 	return nil
 }
 func (f *fakeStore) UpsertOIDCSettings(_ context.Context, s domain.OIDCSettings) error {

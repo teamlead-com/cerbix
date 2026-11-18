@@ -24,6 +24,9 @@ const prefix = "enc:v1:"
 // value it cannot read).
 type Cipher struct {
 	aeads []cipher.AEAD // aeads[0] is the primary (encryption) key
+	// macKeys[i] is the keyed-hash sub-key derived from key i (keyedhash.go); the
+	// AES-GCM key itself is never used as a MAC key.
+	macKeys [][]byte
 }
 
 // New builds a Cipher from one or more 32-byte (AES-256) keys. The first key is
@@ -47,6 +50,7 @@ func New(keys ...[]byte) (*Cipher, error) {
 			return nil, fmt.Errorf("secret: new gcm: %w", err)
 		}
 		c.aeads = append(c.aeads, aead)
+		c.macKeys = append(c.macKeys, deriveMACKey(key))
 	}
 	return c, nil
 }

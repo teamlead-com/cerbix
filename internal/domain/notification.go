@@ -23,7 +23,7 @@ const (
 // Valid reports whether t is a known channel type.
 func (t ChannelType) Valid() bool {
 	switch t {
-	case ChannelWebhook, ChannelSlack, ChannelTelegram, ChannelEmail:
+	case ChannelWebhook, ChannelSlack, ChannelTelegram, ChannelEmail, ChannelSMS, ChannelVoice:
 		return true
 	default:
 		return false
@@ -33,6 +33,11 @@ func (t ChannelType) Valid() bool {
 // NotificationChannel is a per-project delivery target that monitors can be
 // linked to. Config holds the type-specific settings (a URL, or bot_token +
 // chat_id for Telegram).
+//
+// The fields after CreatedAt belong to the phone types (sms, voice; FR-041a §4.3) and are typed
+// columns, not config keys. Every one is omitempty, so the JSON of the four other types is byte for
+// byte what it was. A phone channel's number is never a field here: the store keeps its ciphertext,
+// and a reader sees the mask (D35).
 type NotificationChannel struct {
 	ID        string            `json:"id"`
 	ProjectID string            `json:"project_id"`
@@ -41,6 +46,27 @@ type NotificationChannel struct {
 	Config    map[string]string `json:"config"`
 	Enabled   bool              `json:"enabled"`
 	CreatedAt time.Time         `json:"created_at"`
+
+	// Recipient is the mode, PhoneRecipientUser or PhoneRecipientNumber, fixed at creation.
+	Recipient string `json:"recipient,omitempty"`
+	// RecipientUserID is the person a `user` channel phones; empty once that user is deleted.
+	RecipientUserID string `json:"recipient_user_id,omitempty"`
+	// NumberMasked and NumberVerified describe a `number` channel's own number.
+	NumberMasked   string `json:"number_masked,omitempty"`
+	NumberVerified *bool  `json:"number_verified,omitempty"`
+	// DisabledReason says why the server disabled the channel: DeliverableRecipientDeleted or
+	// DeliverableNumberUnverified.
+	DisabledReason string `json:"disabled_reason,omitempty"`
+	// Deliverable is whether the channel is a route now (D31 rule 1, R11). Server only.
+	Deliverable *ChannelDeliverable `json:"deliverable,omitempty"`
+	// RecipientDisplayName is a `user` channel's recipient by display name, never an email: null
+	// once the user is deleted, absent for a `number` channel and the four other types (§4.3).
+	RecipientDisplayName RecipientName `json:"recipient_display_name,omitzero"`
+	// OnlyRouteFor and OnlyRouteForTotal are the paging services for which this phone channel is
+	// the only route (§4.3), at most 50 of them, and how many there are. Set by the API on the
+	// channels it answers with; nil — absent — on the four other types.
+	OnlyRouteFor      *[]ServiceWithoutRoute `json:"only_route_for,omitempty"`
+	OnlyRouteForTotal *int                   `json:"only_route_for_total,omitempty"`
 }
 
 // SecretChannelConfigKeys are the channel config values that carry a credential
@@ -109,7 +135,19 @@ func (c NotificationChannel) Validate() error {
 	if !c.Type.Valid() {
 		return fmt.Errorf("notification channel: unknown type %q", c.Type)
 	}
+	if !IsPhoneChannelType(c.Type) && (c.Recipient != "" || c.RecipientUserID != "" || c.NumberMasked != "" ||
+		c.NumberVerified != nil || c.DisabledReason != "") {
+		return fmt.Errorf("notification channel: recipient and number belong to sms and voice channels only")
+	}
 	switch c.Type {
+	case ChannelSMS, ChannelVoice:
+		// What a phone channel holds is typed fields, never config keys (§4.3).
+		if len(c.Config) > 0 {
+			return fmt.Errorf("notification channel: %s carries no config", c.Type)
+		}
+		if c.Recipient != PhoneRecipientUser && c.Recipient != PhoneRecipientNumber {
+			return fmt.Errorf("notification channel: %s requires recipient user or number", c.Type)
+		}
 	case ChannelWebhook, ChannelSlack:
 		u := strings.TrimSpace(c.Config["url"])
 		if u == "" {

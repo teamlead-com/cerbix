@@ -131,12 +131,12 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 	var out []claimed
 	for rows.Next() {
 		var e domain.OutboxEvent
-		var due, created time.Time
-		if err := rows.Scan(&e.ID, &e.Topic, &e.Payload, &e.Attempts, &e.ClaimToken, &due, &created,
+		var due time.Time
+		if err := rows.Scan(&e.ID, &e.Topic, &e.Payload, &e.Attempts, &e.ClaimToken, &due, &e.CreatedAt,
 			&e.LeaseUntil, &e.ClaimedAt); err != nil {
 			return nil, fmt.Errorf("store: scan outbox: %w", err)
 		}
-		out = append(out, claimed{e, due, created})
+		out = append(out, claimed{e, due})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: iterate outbox: %w", err)
@@ -156,8 +156,8 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 		switch {
 		case !out[i].due.Equal(out[j].due):
 			return out[i].due.Before(out[j].due)
-		case !out[i].created.Equal(out[j].created):
-			return out[i].created.Before(out[j].created)
+		case !out[i].CreatedAt.Equal(out[j].CreatedAt):
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
 		default:
 			return out[i].ID < out[j].ID
 		}
@@ -169,12 +169,12 @@ func (s *Store) ClaimDueOutbox(ctx context.Context, limit int) ([]domain.OutboxE
 	return events, nil
 }
 
-// claimed carries the two timestamps the claim orders by. They are not part of the domain event: the
-// dispatcher has no business knowing when a row became due, only what to do with it.
+// claimed carries the due time the claim orders by first. It is not part of the domain event: the
+// dispatcher has no business knowing when a row became due, only what to do with it. The second key,
+// created_at, is the event's own (domain.OutboxEvent.CreatedAt).
 type claimed struct {
 	domain.OutboxEvent
-	due     time.Time
-	created time.Time
+	due time.Time
 }
 
 // ReleaseOutboxClaim gives a claim back UNATTEMPTED: the attempt it consumed is refunded and the row

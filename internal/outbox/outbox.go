@@ -15,6 +15,7 @@ import (
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/telephony"
 )
 
 const (
@@ -54,6 +55,7 @@ type Store interface {
 	MarkServiceAlertDelivered(ctx context.Context, a domain.ServiceAlert) error
 	MarkServiceAlertUndeliverable(ctx context.Context, a domain.ServiceAlert) error
 	RecordSuppression(ctx context.Context, eventID, monitorID, projectID, topic string, owners []store.DelegationOwner) error
+	PhoneStore // what the phone half of a delivery reads beside the payload (FR-041a; phone.go)
 }
 
 // WebhookDeliverer delivers an incident event to a project's webhooks.
@@ -74,6 +76,7 @@ type NotifyDeliverer interface {
 	// channel in it may since have been deleted or disabled: that is not an error and not
 	// success, and §16.6b requires it to be counted rather than silently absorbed.
 	DeliverChannelsReporting(ctx context.Context, channelIDs []string, text string) (domain.ChannelDelivery, error)
+	PhoneDeliverer // the sms and voice channels, which the text methods skip (FR-041a D16; phone.go)
 }
 
 // MailSender delivers a plain-text email (status-page subscription confirmations).
@@ -142,6 +145,7 @@ type Worker struct {
 	changeWindow  time.Duration
 	changeNoteMax int
 	changeMetrics ChangeCorrelationMetrics
+	phone         phoneConfig // FR-041a: the phone half's links (phone.go)
 }
 
 // WithChangeCorrelation sets FR-025 D7's bounds (`change.correlation_window`,
@@ -191,7 +195,7 @@ func New(st Store, webhooks WebhookDeliverer, notifs NotifyDeliverer, metrics Me
 	return &Worker{
 		store: st, webhooks: webhooks, notifs: notifs, metrics: metrics, logger: logger,
 		changeWindow: defaultChangeCorrelationWindow, changeNoteMax: defaultChangeCorrelationNoteMax,
-		changeMetrics: noopChangeMetrics{},
+		changeMetrics: noopChangeMetrics{}, phone: defaultPhoneConfig(),
 	}
 }
 
@@ -687,7 +691,14 @@ func (w *Worker) deliver(ctx, settleCtx context.Context, e domain.OutboxEvent) e
 				return nil
 			}
 		}
-		return w.notifs.Deliver(ctx, monitor, mt.Cur == domain.StatusUp, mt.Recovery())
+		var phoneErr error
+		textErr := w.alongside(ctx, e, func(textCtx context.Context) error {
+			return w.notifs.Deliver(textCtx, monitor, mt.Cur == domain.StatusUp, mt.Recovery())
+		}, w.monitorPhoneIDs(monitor.ID), func(ids []string, _ bool) {
+			ps, perr := w.monitorPhone(ctx, e, monitor, ids)
+			_, phoneErr = w.sendPhone(ctx, ps, perr)
+		})
+		return joinPhone(textErr, phoneErr)
 
 	case domain.TopicSLOBurnAlert:
 		var a domain.SLOBurnAlert
@@ -719,7 +730,14 @@ func (w *Worker) deliver(ctx, settleCtx context.Context, e domain.OutboxEvent) e
 		if a.Firing && w.dependencySuppressed(ctx, monitor) {
 			return nil
 		}
-		return w.notifs.DeliverText(ctx, monitor, a.Message(monitor.Name))
+		var phoneErr error
+		textErr := w.alongside(ctx, e, func(textCtx context.Context) error {
+			return w.notifs.DeliverText(textCtx, monitor, a.Message(monitor.Name))
+		}, w.monitorPhoneIDs(monitor.ID), func(ids []string, _ bool) {
+			ps, perr := w.monitorPhone(ctx, e, monitor, ids)
+			_, phoneErr = w.sendPhone(ctx, ps, perr)
+		})
+		return joinPhone(textErr, phoneErr)
 
 	case domain.TopicServiceAlert:
 		var a domain.ServiceAlert
@@ -763,8 +781,47 @@ func (w *Worker) deliver(ctx, settleCtx context.Context, e domain.OutboxEvent) e
 			w.condemn(settleCtx, a)
 			return nil
 		}
-		res, err := w.notifs.DeliverChannelsReporting(ctx, a.Recipients, a.Message())
-		if missing := res.Requested - res.Resolved; missing > 0 {
+		// The phone half gets the snapshot's phone recipients. Its Resolved and Delivered are ADDED;
+		// Requested is not, being the snapshot's length either way (FR-041a D16). An alert D18 does not
+		// phone still has its phone recipients counted as there when they are routes (D31: Resolved
+		// follows rule 1 and nothing else) — they were not told, by design, and are not missing; when
+		// they cannot be counted, the two counts below would be false and are not recorded. Any failure
+		// before the phone half has counted them is that case (FR-041a review P2-7): the phone-id read
+		// behind a failed text read, the message's preparation, the delivery record's read. So is a
+		// failed TEXT read itself, whatever the fallback answered (FR-041a owner answer 3, review C
+		// m-4): it resolved none of the text recipients because it did not answer, not because they
+		// are gone — and the event fails for it and is retried.
+		var res, phoneRes domain.ChannelDelivery
+		var phoneErr error
+		countsKnown := true
+		var textRead bool
+		textRead, err = w.alongsideRead(ctx, e, func(textCtx context.Context) error {
+			var terr error
+			res, terr = w.notifs.DeliverChannelsReporting(textCtx, a.Recipients, a.Message())
+			return terr
+		}, w.phoneIDsAmong(a.Recipients), func(ids []string, known bool) {
+			countsKnown = known
+			if len(ids) == 0 {
+				return
+			}
+			if _, phoned := telephony.PhoneKindFor(e.Topic, e.Payload); phoned {
+				ps, prepErr := w.servicePhone(ctx, e, a, ids)
+				phoneRes, phoneErr = w.sendPhone(ctx, ps, prepErr)
+				if prepErr != nil || errors.Is(phoneErr, domain.ErrPhoneRoutesUncounted) {
+					countsKnown = false
+				}
+			} else if n, rerr := w.notifs.PhoneRoutes(ctx, ids); rerr != nil {
+				w.logger.Warn("service_alert_phone_routes_failed", "service_id", a.ServiceID, "error", rerr.Error())
+				countsKnown = false
+			} else {
+				phoneRes.Resolved = n
+			}
+		})
+		if !textRead {
+			countsKnown = false
+		}
+		res.Resolved, res.Delivered, err = res.Resolved+phoneRes.Resolved, res.Delivered+phoneRes.Delivered, joinPhone(err, phoneErr)
+		if missing := res.Requested - res.Resolved; missing > 0 && countsKnown {
 			// §16.4a: a snapshot recipient whose channel has been deleted is COUNTED, never
 			// silently replaced by whoever is on call now — replacing it would page a stranger
 			// and leave the person who heard the onset holding it.
@@ -776,7 +833,9 @@ func (w *Worker) deliver(ctx, settleCtx context.Context, e domain.OutboxEvent) e
 			// Enqueued, attempted, and heard by nobody. Terminal on purpose — no retry reaches a
 			// channel that is gone — but it must NOT look like an announcement from here on, or the
 			// service would go on covering members for an onset that reached no one (D-0179).
-			w.metrics.RecordServiceAlertUndeliverable(string(a.Signal))
+			if countsKnown {
+				w.metrics.RecordServiceAlertUndeliverable(string(a.Signal))
+			}
 			w.condemn(settleCtx, a)
 			return nil
 		}
@@ -862,7 +921,14 @@ func (w *Worker) deliver(ctx, settleCtx context.Context, e domain.OutboxEvent) e
 		if w.notifs == nil {
 			return errors.New("no notification deliverer configured")
 		}
-		return w.notifs.DeliverChannels(ctx, a.ChannelIDs, a.Message())
+		var phoneErr error
+		textErr := w.alongside(ctx, e, func(textCtx context.Context) error {
+			return w.notifs.DeliverChannels(textCtx, a.ChannelIDs, a.Message())
+		}, w.phoneIDsAmong(a.ChannelIDs), func(ids []string, _ bool) {
+			ps, perr := w.stepPhone(ctx, e, a, ids)
+			_, phoneErr = w.sendPhone(ctx, ps, perr)
+		})
+		return joinPhone(textErr, phoneErr)
 
 	case domain.TopicSubscriberConfirm:
 		var sc domain.SubscriberConfirm

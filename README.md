@@ -84,6 +84,7 @@ cerbix itself acts only on its own alerts, incidents, escalations, and status pa
   culprit, never suppresses and never hides.
 - **On-call / escalation** — escalation ladders, on-call rotations with vacation
   overrides, and acknowledge-to-stop.
+- **SMS and voice-call alerts** — `sms` and `voice` channels ring a verified number through Twilio (or a generic HTTP gateway for SMS), beside webhook, Slack, Telegram and email.
 - **Reliable delivery** — a transactional outbox (retry/backoff/dead-letter),
   confirmations, re-notify, instance-wide silence.
 - **Auth** — OIDC (any provider) + local argon2id login, 2FA/TOTP, self-service password

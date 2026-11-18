@@ -63,9 +63,10 @@ build output).
 ### E2E (from repo root) — Playwright in docker, against a LIVE stack
 
 ```bash
-# Canonical single-stack gate starts the required SSO and mail dependencies:
-make dev-up
-make dev-test                         # 90 pass + 1 skip (no file-managed monitor in this stack) as of iter-0211.
+# Canonical single-stack gate starts the required SSO and mail dependencies, plus the provider stub
+# `phonestub` (compose profile `phone`, :8026) that e2e/tests/phone-alerts.spec.ts sends through:
+make dev-up                           # also runs e2e/seed/e2e-phone-reset.sql: deletes the dev admin's phone number
+make dev-test                         # 101 pass + 1 skip (no file-managed monitor in this stack) as of iter-0216.
                                       # The dev stack runs with `ledger.carrier_enabled: true` (D-0244) and the
                                       # target DERIVES CERBIX_LEDGER_CARRIER from docker/config.dev.yaml, so the
                                       # generation-4 path is exercised by the ordinary gate rather than by hand.
@@ -83,7 +84,7 @@ Tests create `e2e-`prefixed entities and clean them up — dev stacks only.
 ```bash
 make dev-init              # once, fresh base broker volume only
 make dev-build             # multi-stage SPA + Go image
-make dev-up                # role=all :8080 + SSO + mail
+make dev-up                # role=all :8080 + SSO + mail + phonestub :8026
 make dev-test              # browser suite; idle-provider MaC UI assertion may skip
 make dev-down              # stop single before switching topology
 make dev-up-distributed    # scheduler + api :8082 + worker; one explicit migration first

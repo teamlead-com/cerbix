@@ -650,7 +650,8 @@ func resolveServiceRecipientsTx(
 			// one outcome §16.1 exists to prevent.
 			//
 			// §16.6 already says what to do instead: a deleted or empty target falls back to the
-			// project's channels. A DISABLED one is the same fact wearing a different hat.
+			// project's channels. A DISABLED one is the same fact wearing a different hat, and so is a
+			// phone channel that cannot deliver (D31 rule 1, FR-041a §4.6) — in both queries below.
 			if ch := sc.OnCall(at); ch != "" {
 				// A participant that is not a channel id at all is CORRUPTION, not the ordinary
 				// "the channel was deleted" that §16.6 falls back for. Falling back would repair a
@@ -665,8 +666,9 @@ func resolveServiceRecipientsTx(
 				}
 				var live bool
 				if err := tx.QueryRow(ctx, `
-					SELECT true FROM notification_channels
-					 WHERE id::text = $1 AND project_id = $2 AND enabled`, ch, projectID).Scan(&live); err != nil {
+					SELECT true FROM notification_channels c
+					 WHERE c.id::text = $1 AND c.project_id = $2 AND c.enabled AND `+phoneRouteSQL("c"),
+					ch, projectID).Scan(&live); err != nil {
 					if !noRows(err) {
 						return nil, fmt.Errorf("store: verify on-call channel: %w", err)
 					}
@@ -680,8 +682,8 @@ func resolveServiceRecipientsTx(
 		// returning an empty route: the arming rule refuses to suppress when neither exists, so the
 		// only thing an empty answer here would buy is a silent alert.
 	}
-	rows, err := tx.Query(ctx,
-		`SELECT id FROM notification_channels WHERE project_id = $1 AND enabled ORDER BY id`, projectID)
+	rows, err := tx.Query(ctx, `SELECT c.id FROM notification_channels c
+		 WHERE c.project_id = $1 AND c.enabled AND `+phoneRouteSQL("c")+` ORDER BY c.id`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("store: read project channels: %w", err)
 	}

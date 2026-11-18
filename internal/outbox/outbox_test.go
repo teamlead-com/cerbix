@@ -14,6 +14,7 @@ import (
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 	"github.com/teamlead-com/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/telephony"
 )
 
 func burnAlert(t *testing.T, monitorID string, firing bool) []byte {
@@ -90,6 +91,8 @@ type fakeStore struct {
 	changeLinkCtxErr   error
 	changeLinkDeadline time.Time
 	changeLinkBounded  bool
+
+	phoneFake // FR-041a: the phone half's reads (phone_fakes_test.go)
 }
 
 func (f *fakeStore) LinkPrecedingChanges(ctx context.Context, incidentID string, window time.Duration, noteMax int) (store.ChangeCorrelation, error) {
@@ -257,14 +260,42 @@ type fakeNotify struct {
 	sawDeadline     bool
 	deadline        time.Time
 	burnBudget      bool
+	phoneCalls      []fakePhoneCall
+	// phone answers DeliverPhone; nil answers {Requested: len(ids)} and no error. phoneRoutes is what
+	// PhoneRoutes counts.
+	phone          func(ids []string, alert telephony.PhoneAlert, ev domain.PhoneEventRef) (domain.ChannelDelivery, error)
+	phoneRoutes    int
+	phoneRoutesErr error
+	routeCalls     [][]string
+	// The phone channels the dispatcher's reads would leave out, recorded in the text call's context
+	// as the real dispatcher records them: those linked to each monitor, and the ids of a snapshot or
+	// step that are phone channels.
+	monitorPhones map[string][]string
+	phoneIDs      map[string]bool
 }
 
-func (f *fakeNotify) Deliver(_ context.Context, m domain.Monitor, up bool, recovery *domain.RecoverySnapshot) error {
+// seePhones records, as notify's dispatchStore does, the phone channels a text read leaves out, and
+// that the read answered: the fake's err is a failed SEND, never a failed read.
+func (f *fakeNotify) seePhones(ctx context.Context, monitorID string, ids []string) {
+	for _, id := range f.monitorPhones[monitorID] {
+		domain.RecordPhoneChannelSeen(ctx, id)
+	}
+	for _, id := range ids {
+		if f.phoneIDs[id] {
+			domain.RecordPhoneChannelSeen(ctx, id)
+		}
+	}
+	domain.RecordChannelReadCompleted(ctx) // after the ids, as the dispatcher records them
+}
+
+func (f *fakeNotify) Deliver(ctx context.Context, m domain.Monitor, up bool, recovery *domain.RecoverySnapshot) error {
+	f.seePhones(ctx, m.ID, nil)
 	f.monitor, f.up, f.recovery, f.called = m, up, recovery, f.called+1
 	return f.err
 }
 
-func (f *fakeNotify) DeliverText(_ context.Context, m domain.Monitor, text string) error {
+func (f *fakeNotify) DeliverText(ctx context.Context, m domain.Monitor, text string) error {
+	f.seePhones(ctx, m.ID, nil)
 	f.monitor, f.text, f.called = m, text, f.called+1
 	return f.err
 }
@@ -274,7 +305,8 @@ func (f *fakeNotify) DeliverProjectText(_ context.Context, projectID, text strin
 	return f.err
 }
 
-func (f *fakeNotify) DeliverChannels(_ context.Context, channelIDs []string, text string) error {
+func (f *fakeNotify) DeliverChannels(ctx context.Context, channelIDs []string, text string) error {
+	f.seePhones(ctx, "", channelIDs)
 	f.channelIDs, f.text, f.called = channelIDs, text, f.called+1
 	return f.err
 }
@@ -290,6 +322,7 @@ func (f *fakeNotify) DeliverChannels(_ context.Context, channelIDs []string, tex
 func (f *fakeNotify) DeliverChannelsReporting(
 	ctx context.Context, channelIDs []string, text string,
 ) (domain.ChannelDelivery, error) {
+	f.seePhones(ctx, "", channelIDs)
 	f.channelIDs, f.text, f.called = channelIDs, text, f.called+1
 	if d, ok := ctx.Deadline(); ok {
 		f.sawDeadline, f.deadline = true, d
@@ -316,6 +349,33 @@ func (f *fakeNotify) DeliverChannelsReporting(
 		out.Delivered = out.Resolved
 	}
 	return out, f.err
+}
+
+// DeliverPhone records the phone call it is handed (FR-041a D16) and answers what `phone` says.
+func (f *fakeNotify) DeliverPhone(
+	ctx context.Context, channelIDs []string, alert telephony.PhoneAlert, ev domain.PhoneEventRef,
+) (domain.ChannelDelivery, error) {
+	call := fakePhoneCall{channelIDs: channelIDs, alert: alert, ev: ev}
+	if d, ok := ctx.Deadline(); ok {
+		call.deadline = d
+	}
+	f.phoneCalls = append(f.phoneCalls, call)
+	if f.phone != nil {
+		return f.phone(channelIDs, alert, ev)
+	}
+	return domain.ChannelDelivery{Requested: len(channelIDs)}, nil
+}
+
+func (f *fakeNotify) PhoneRoutes(_ context.Context, channelIDs []string) (int, error) {
+	f.routeCalls = append(f.routeCalls, channelIDs)
+	return f.phoneRoutes, f.phoneRoutesErr
+}
+
+type fakePhoneCall struct {
+	channelIDs []string
+	alert      telephony.PhoneAlert
+	ev         domain.PhoneEventRef
+	deadline   time.Time // zero: the context carried none
 }
 
 type fakeMetrics struct {

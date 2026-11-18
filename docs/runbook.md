@@ -1003,8 +1003,14 @@ regional keyrings requires `shared_trust_acknowledged: true`; this deliberately 
    that no `project_secrets` row remains under an old key; an exhausted convergence budget
    exits non-zero. Exact-ciphertext CAS prevents a concurrent secret rotation from being
    overwritten. The command also re-encrypts the older secret-bearing tables.
-4. Remove the old key only after the command succeeds and every core replica has the new
-   config. Run the command again after concurrent rotations if it reports non-convergence.
+   A person's phone number that two replicas accepted for two people under the two keys is
+   settled by the yield rule and logged as `user_phone_released` (user ids only). One that
+   cannot be settled while its row is in use is logged as `user_phone_rehash_skipped` and left
+   under the old key; the run still processes every other table and then exits `3`
+   (completed, rows skipped). Exit `3` means: keep the old key and run the command again.
+4. Remove the old key only after an exit `0` and once every core replica has the new config. Run
+   the command again after concurrent rotations if it reports non-convergence, and after any
+   exit `3`.
 
 ### Carrier generations: roll forward, and drain before support is dropped
 
@@ -1634,6 +1640,164 @@ the pass raised. There is no metric for rises: each is also an `incident_updates
 event. A rise that loses a race with an operator's write on the same incident fails that slice's pass
 (`service_alert_eval_failed`, SQLSTATE 40001) and lands on the next evaluation tick; one such line
 during an acknowledge is expected, repeated ones for the same services are not.
+
+## Phone alerts (FR-041a / NFR-034)
+
+Since iter-0216 an alert can ring a phone. The contract is
+[`func-phone-alerts.md`](specs/func-phone-alerts.md) (D-0283). Part (a) is built: the `sms` and
+`voice` channel types, verified numbers, one instance-wide provider, the delivery record, the incident
+short reference `/i/<ref>` and the storm guard. Acknowledge and snooze from the phone (FR-041b) and
+quotas, fallback and quiet hours (FR-041c) are not.
+
+Phone channels receive only the alerts that ask a person to act (spec D18): a monitor down or
+recovered, a service alert or recovery, an escalation step, a burn alert. Manual and Alertmanager
+incidents do not phone (D30).
+
+### Upgrading and rolling back
+
+- **Migration 00120** adds the telephony columns of `instance_settings`, the tables `user_phones`,
+  `phone_verifications` and `phone_deliveries`, the phone columns of `notification_channels`, and
+  `incidents.ref`. It backfills a ref for every existing incident. The ref has a database DEFAULT, so
+  an older binary's inserts keep working from the moment the migration runs. Nothing changes until a
+  global admin turns telephony on.
+- **Order (D27).** Turn telephony on only after **every role that delivers the outbox** — `all`, `api`
+  and `scheduler` — runs this release. A process that predates it does not know the `sms` and `voice`
+  types: it fails every event that names a phone channel, re-delivers the event's other channels on
+  every retry, and finally dead-letters it. The harm is duplicate messages, not lost ones.
+- **Before rolling back**, disable every phone channel; turning telephony off is not enough, because
+  an older binary still meets an enabled channel of an unknown type. The down migration is not needed for a rollback; running it
+  drops every number, channel column and delivery row.
+
+### Turning phone alerts on
+
+1. **The at-rest key is required (D29).** Telephony, its credentials and every number are stored
+   encrypted; with no `security.encryption_key` the Telephony page says so and every save is refused
+   (409 `encryption_key_missing`). There is **no YAML key** for telephony (D36): the settings live in
+   the database only, are absent until a global admin saves them, and absent means off.
+2. **Settings → Administration → Telephony** (global admin; `GET`/`PUT /api/v1/settings/telephony`):
+   - **Provider.** **Twilio** (Account SID, auth token, `from` as an E.164 number or a Messaging
+     Service SID) sends SMS and places calls — except that a Messaging Service SID (`MG…`) sends SMS
+     only. **Generic HTTP gateway** sends SMS only: URL, method, content type, headers, a body
+     template with `{{to}}`, `{{from}}` and `{{text}}` placeholders substituted as values, `from`,
+     and optionally `response_code_field`, the top-level JSON key that holds the gateway's error code
+     (without it a refusal is its HTTP status alone). A gateway that reports a failure inside a 2xx is
+     not supported. Provider calls go through the notification egress guard.
+   - **Messages.** `public_base_url` for the link in an SMS (empty: the mail settings' public URL);
+     the voice language (default `en-US`; each person may choose their own); SMS encoding
+     (`transliterate` or `unicode`) and the longest SMS (1–4 segments, default 2).
+   - **Storm limits** (default 5 per number per incident per hour, 20 per number per hour).
+   - Secrets are write-only: a blank field keeps the stored value; "Remove stored headers"
+     (`headers_clear`) removes the gateway's headers. A stored secret that cannot be read (wrong key)
+     reads "stored · cannot be read"; type it again.
+3. **A save that would leave paging services without a route** — turning telephony off, switching to
+   Generic HTTP or to a Messaging Service `from` while `voice` channels are a service's only route —
+   answers 409 with the list (at most 50, then a total). The page shows it and asks to confirm
+   ("Turn off anyway", "Switch anyway"); the API takes `confirm_unroutable: true`.
+4. **Send a test SMS** to your own verified number (Settings → Telephony, or
+   `POST /api/v1/settings/telephony/test-sms`). It is not an alert: no delivery row, no storm count. A
+   refusal is a 200 with `outcome: rejected` and the provider's status and code; `unreachable` carries
+   `transport_class`, one of the delivery classifier's closed set (for example `timeout`, `connection refused`,
+   `DNS lookup failed`, `destination refused by the delivery egress policy`). Add your number
+   under Account → Phone first.
+
+### Numbers and verification codes
+
+- **A person's number** is set under **Settings → Account → Phone** (`PUT /api/v1/me/phone`) and
+  confirmed with a six-digit code. **A fixed number** belongs to a `number` channel; only a project
+  admin creates one, it is created disabled, and it is enabled after its code is confirmed (D28).
+- **By SMS or by a call** (revision 9). Every send of a code takes `via: sms` (default) or
+  `via: voice`; the page offers "Call me with the code" while `GET /api/v1/me` says
+  `telephony_can_call` (telephony on and the provider can place calls). A call speaks "This is your
+  cerbix verification code." and the six digits, twice; the sentence is English whatever the voice
+  language. There is no fallback between the ways: a refused call (400
+  `voice_unsupported_by_provider`) issues no code and spends nothing.
+- **Limits.** A code lives 10 minutes and allows 5 attempts. The person who **asks** for codes gets
+  3 an hour across their own number and every channel they verify (`send_limited`, 429); a number
+  gets 10 a day across everyone. A new code ends the previous one. A verified channel is sent no code.
+  A number is unique across people; an unverified number with no running code yields to the next
+  person who claims it.
+- **Masked everywhere.** No page, API answer, log line or delivery row shows a number in full; the
+  mask is `+<cc>•••••<last4>`. A person who needs to change it types it again.
+
+### Reading a delivery
+
+The incident page's **Phone** panel (`GET /api/v1/incidents/{incidentID}/phone-activity`, oldest
+first) and a channel's **Deliveries** (`GET /api/v1/notification-channels/{channelID}/phone-deliveries`,
+the last 50, newest first) list every phone delivery; both need `project:read`, and nothing reaches the
+status page. Rows are kept 90 days.
+
+| Reason | What happened | What to do |
+| --- | --- | --- |
+| `sending` | reserved, the provider has not answered yet | wait; a row still `sending` after 60 s is closed as `outcome_unknown` |
+| `sent` | the provider accepted it | nothing — acceptance, not proof of delivery |
+| `provider_unreachable` | no usable answer (408, 429, 5xx, a network error, the budget ran out); the outbox retries the event | check the provider's status and the egress guard; `cerbix_phone_deliveries_total` |
+| `provider_rejected` | the provider answered no; final | read the provider code (Twilio's error code, or the gateway's `response_code_field`) |
+| `outcome_unknown` | a `sending` row found stale; not called again, so as not to ring twice | check the provider's own log for that minute |
+| `not_deliverable` | the recipient had no verified number, or could no longer open the project, when it was sent (the cause is in `notes`) | the person confirms a number, or the channel names someone else |
+| `voice_unsupported_by_provider` | a `voice` channel while the provider cannot place calls | use Twilio with a number as `from`, or an `sms` channel |
+| `telephony_disabled` | telephony was off | turn it on, or remove the channel |
+| `storm_limited` | the storm guard refused it; `notes` names the limit (`storm_per_incident` or `storm_per_number`) | a flapping monitor; fix it, or raise the limit |
+
+A row shows the HTTP status, the provider code and the number of attempts — never provider text, and
+never whether the outbox will try again. The link notes say why an SMS carried no link:
+`no_incident_ref` (sent before the incident opened), `no_public_url`, `link_omitted` (too long for the
+segment budget).
+
+### A phone channel that is "Not a route"
+
+A phone channel counts as a route — for service coverage, escalation steps and the "pages for" checks —
+only when it can deliver now (D31 rule 1). The channel list says why it is not: its recipient's account
+was deleted, its number is not confirmed, it is disabled, phone alerts are off, the provider cannot
+place calls, its recipient can no longer open the project, or its recipient has no verified number
+(`deliverable.reason`). A channel that is the only route of a paging service shows "Only route for"
+with the services (`only_route_for`).
+
+### Key rotation
+
+`cerbix reencrypt` covers the telephony secrets and every stored number, and recomputes the numbers'
+keyed hashes; see "Rotate the at-rest master" above. **Exit `3`** means the run completed but skipped a
+phone number it could not settle while its row was in use (`user_phone_rehash_skipped`): keep the
+previous key in `security.previous_keys` and run the command again. Automation that treats every
+non-zero exit as a failure, or `3` as success, must learn the difference. Until the run completes,
+lookups match a number under every configured key.
+
+### Metrics and logs
+
+- `cerbix_phone_deliveries_total{kind,provider,reason}` — finished phone deliveries; the leader's stale
+  sweep counts the rows it closes as `outcome_unknown`.
+- `cerbix_phone_quota_events_total{scope,kind,event}` — in part (a), the storm guard's `exceeded`.
+- Leader log lines: `stale_phone_deliveries_closed`, `phone_verifications_purged`,
+  `phone_deliveries_purged`. A failed code send logs `phone_code_send_failed` with the way and the
+  outcome, never the number.
+
+Suggested alert: `sum by (provider, reason) (increase(cerbix_phone_deliveries_total{reason!="sent"}[15m])) > 0`
+for `provider_unreachable`, `provider_rejected` and `outcome_unknown` — a phone that should ring and
+does not.
+
+### Known limitation: text channels receive a retried event again
+
+When the phone provider is unreachable, the event is retried and the text channels receive it again,
+just as when any text channel fails. A phone channel the provider accepted is not sent again for that event (D19). A phone channel
+left `provider_unreachable` is called again on the retry. Closing this needs a per-channel delivery record for text channels, a change of the
+outbox for every project, outside FR-041a.
+
+### The dev stack: the `phone` profile and the reset seed
+
+- **The provider stub.** `make dev-up` (and `make dev-up-distributed`) starts `phonestub`
+  (`node:22-alpine` running `docker/phone-stub/server.mjs`, compose profile `phone`, port 8026). It
+  answers like an SMS gateway, records every message — header **names** only, never their values — and
+  forwards nothing. Point Generic HTTP at `http://phonestub:8026/sms`; read what it received at
+  `GET http://localhost:8026/_stub/messages`, clear it with `DELETE`, queue one programmed answer with
+  `POST /_stub/next {status, body}`. `make dev-down` stops it with the rest.
+- **The reset seed.** `e2e/seed/e2e-phone-reset.sql` runs from `dev-ready-single`, so on **every**
+  `make dev-up` and before every `make dev-test` (targeted runs included): it removes the bootstrap
+  admin's own phone number and code rows (by subject and by requester) and the code rows of deleted
+  channels, on the dev database only. A number the dev admin added by hand is deleted each time. Without it a second run
+  within the hour meets 429 `send_limited`, because the hourly code limit counts the requester. A
+  direct `./e2e/run.sh tests/phone-alerts.spec.ts` skips it.
+- **What the E2E leaves.** `phone-alerts.spec.ts` turns telephony off again at the end, so the stack is
+  left `configured: true, enabled: false` ("never configured" cannot be restored through the API). It
+  refuses to run, writing nothing, when the stack's telephony names any gateway other than the stub.
 
 ## Service reliability operations (FR-021)
 

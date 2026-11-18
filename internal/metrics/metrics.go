@@ -119,6 +119,7 @@ type Registry struct {
 	// the retention pass sets and a deposed leader clears.
 	change         changeMetrics
 	auditRetention auditRetentionMetrics
+	phone          phoneMetrics // FR-041a phone delivery surface (phone.go): closed-label counters
 	now            func() time.Time
 }
 
@@ -1041,6 +1042,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	gate := r.gate.snapshot()
 	change := r.change.snapshot()
 	auditRetention := r.auditRetention.snapshot()
+	phone := r.phone.snapshot()
 	uptime := r.now().Sub(r.startTime).Seconds()
 	r.mu.RUnlock()
 	out := prometheusWriter{w: w}
@@ -1399,6 +1401,7 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	gate.write(&out)
 	change.write(&out)
 	auditRetention.write(&out)
+	phone.write(&out)
 
 	if len(fileProviders) > 0 {
 		out.println("# HELP cerbix_file_provider_leader Whether this process holds a file provider's reconcile leadership.")

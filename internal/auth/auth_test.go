@@ -305,6 +305,44 @@ func TestLoginSanitizesOpenRedirect(t *testing.T) {
 	}
 }
 
+// FR-041a D21: an SSO sign-in started from an incident link in an SMS returns to that link, and an
+// off-site return address is refused. The whole path: /auth/login stores the redirect on the flow and
+// /auth/callback sends the browser to it.
+func TestSSOReturnPathOfAnIncidentLink(t *testing.T) {
+	cases := []struct{ name, redirect, want string }{
+		{"incident link", "/i/X7K2P9QM", "/i/X7K2P9QM"},
+		{"incident link with a query", "/i/X7K2P9QM?from=sms", "/i/X7K2P9QM?from=sms"},
+		{"protocol-relative", "//evil.example/x", "/"},
+		{"absolute", "https://evil.example/i/X7K2P9QM", "/"},
+		{"backslash host", "/\\evil.example/x", "/"},
+		{"control character", "/i/X7K2P9QM\r\nSet-Cookie: x=1", "/"},
+		{"empty", "", "/"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fs := newFakeStore()
+			mock := newMockOIDC(t, "cerbix")
+			a := testAuthenticator(t, fs, mock)
+
+			rec := httptest.NewRecorder()
+			a.LoginHandler(rec, httptest.NewRequest(http.MethodGet, "/auth/login?redirect="+url.QueryEscape(c.redirect), nil))
+			loc, _ := url.Parse(rec.Header().Get("Location"))
+			state := loc.Query().Get("state")
+			flow, ok := fs.flows[state]
+			if !ok {
+				t.Fatal("auth flow not stored")
+			}
+			mock.sub, mock.email, mock.name, mock.nn = "kc-sub-i", "oncall@x.com", "On Call", flow.Nonce
+
+			rec = httptest.NewRecorder()
+			a.CallbackHandler(rec, httptest.NewRequest(http.MethodGet, "/auth/callback?state="+state+"&code=abc", nil))
+			if rec.Code != http.StatusFound || rec.Header().Get("Location") != c.want {
+				t.Fatalf("callback = %d, Location %q; want 302 to %q", rec.Code, rec.Header().Get("Location"), c.want)
+			}
+		})
+	}
+}
+
 func TestLogoutWithoutCookie(t *testing.T) {
 	fs := newFakeStore()
 	a := testAuthenticator(t, fs, newMockOIDC(t, "cerbix"))

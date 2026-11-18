@@ -871,3 +871,26 @@ func TestServiceAutoIncidentPathsCarryTheSameSequence(t *testing.T) {
 		}
 	}
 }
+
+// FR-041a D32/R15: the claim hands each event its row's created_at — the time a recovery's or a
+// service alert's phone link is measured from, which no payload carries.
+func TestClaimDueOutboxCarriesCreatedAt(t *testing.T) {
+	st, ctx := outboxTestStore(t)
+	if err := st.EnqueueOutbox(ctx, domain.TopicSLAReport, []byte(`{"project_id":"p"}`)); err != nil {
+		t.Fatal(err)
+	}
+	var want time.Time
+	if _, err := st.pool.Exec(ctx, `UPDATE outbox_events SET created_at = now() - interval '90 seconds'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT created_at FROM outbox_events`).Scan(&want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.ClaimDueOutbox(ctx, 10)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("claim: %v, %v", got, err)
+	}
+	if !got[0].CreatedAt.Equal(want) {
+		t.Fatalf("CreatedAt = %v; want the row's %v", got[0].CreatedAt, want)
+	}
+}

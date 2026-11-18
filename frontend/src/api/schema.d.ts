@@ -346,7 +346,7 @@ export interface paths {
         };
         /**
          * Current user and memberships
-         * @description Describes a user: a principal authenticated by a token (an API token or an OIDC machine identity) gets 403.
+         * @description Describes a user: a principal authenticated by a token (an API token or an OIDC machine identity) gets 403. Carries the user's phone as everyone sees it — the mask, never the number, the owner included (FR-041a D35) — or `phone: null`, `telephony_enabled`, whether the instance's telephony is on (a fact about the instance, not about any project), `telephony_can_call`, whether a verification code can be spoken by a call (telephony on and a provider that places calls), and `telephony_voice_language`, the instance's voice language — what a person's "instance default" language means. When a read of the phone part fails, the answer is still 200 with `phone: null`, `telephony_enabled: false`, `telephony_can_call: false` and `telephony_voice_language: null`.
          */
         get: {
             parameters: {
@@ -376,6 +376,337 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/phone": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Store the current user's phone number and send it a verification code
+         * @description FR-041a §4.2. Stores the number UNVERIFIED and sends it a six-digit code — by SMS, or with `via: voice` spoken by a call: one sentence saying what it is, then the digits one by one, twice, in the person's language when they set one, else the instance's voice language; nothing is asked of the listener. A code is the only thing cerbix delivers to an unverified number (P1); it writes no phone delivery and is outside the storm guard. It is the same code either way: it lives 10 minutes and allows 5 attempts; at most 3 codes per user per hour and 10 per number per day are sent, by SMS and by call together — the limits count codes, not messages. "Per user" is the person who asks for the code, across their own number and every `number` channel they verify. There is no fallback from one way to the other. One number per user: a new number replaces the old one and clears its verification, and keeps the language. A re-PUT of the number already verified is a no-op (no code); a re-PUT of the unverified number sends a new code and ends the previous one. A number another user has verified, or holds with a code still running, is refused, and the refusal counts as one of the caller's 3 codes of the hour; another user's unverified number whose code has run out, or was used up by 5 wrong attempts, is released to the caller. Nothing is stored while telephony is off or the at-rest key is missing, nor for `via: voice` while the provider cannot place calls (400 `voice_unsupported_by_provider`, decided before a code is issued: no allowance is spent). A token principal and a machine user get 403. A stored number whose code the provider did not take answers 502; the number stays stored unverified and a re-PUT sends a new code. Writes the instance-level audit row `user.phone.set` (target `user <id>`, never the number). Neither the response nor an error carries the number.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SetUserPhone"];
+                };
+            };
+            responses: {
+                /** @description The stored phone (masked). */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["UserPhone"];
+                    };
+                };
+                /** @description Nothing was stored — `number_invalid`: not an E.164 number after spaces, dashes, dots and parentheses are removed; `via_invalid`: `via` is neither `sms` nor `voice`; `voice_unsupported_by_provider`: `via: voice` while the provider cannot place calls. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                /** @description Nothing was stored — `telephony_disabled`, `encryption_key_missing` or `number_in_use`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                415: components["responses"]["UnsupportedMediaType"];
+                /** @description `send_limited`: nothing was stored. */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                /** @description Phone alerts are not available on this server. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description `provider_rejected` or `provider_unreachable`: the number is stored unverified, the code was not sent. */
+                502: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                /** @description The telephony provider's secret cannot be decrypted with the configured keys. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        post?: never;
+        /**
+         * Remove the current user's phone number
+         * @description Removes the number and ends its verification code. The user's `user`-mode phone channels stop being routes on their next delivery. Writes the audit row `user.phone.delete`. 403 for a token principal and a machine user.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed. */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/phone/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify the current user's phone number with the code it was sent
+         * @description A matching code marks the number verified and writes the audit row `user.phone.verify`. A wrong code counts as an attempt; after 5 the code is spent. Only the latest code sent is judged: a code that a newer send replaced is a wrong code (400 `code_incorrect`, the attempt counted against the newer code), not an expired one. Input that is not six digits is a 400 `code_incorrect` and is not counted. 403 for a token principal and a machine user.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["VerifyPhone"];
+                };
+            };
+            responses: {
+                /** @description The verified phone (masked). */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["UserPhone"];
+                    };
+                };
+                /** @description `code_incorrect`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description `encryption_key_missing`: the at-rest key is not configured, so the stored number cannot be opened. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                /** @description `code_expired` (the latest code expired or was used) or `code_attempts_exhausted`; request a new code. */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                415: components["responses"]["UnsupportedMediaType"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/phone/verify/send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a new verification code to the current user's stored number
+         * @description FR-041a §4.2. The body is empty or `{ "via" }`. Sends a new six-digit code to the number already STORED unverified — by SMS, or with `via: voice` spoken by a call in the person's language when they set one, else the instance's voice language — the API never returns a number, so after a reload the client has nothing to PUT again. Under exactly the limits of the first send, by SMS and by call together: at most 3 codes per user per hour (the PUT's code and the codes the user asked for `number` channels among them) and 10 per number per day; a new code ends the previous one. 400 `voice_unsupported_by_provider` for `via: voice` while the provider cannot place calls, before a code is issued. 409 `no_number` without a stored number and `number_already_verified` once it is verified; nothing is sent while telephony is off or the at-rest key is missing. A token principal and a machine user get 403. Writes no audit row. Neither the response nor an error carries the number.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["SendPhoneCode"];
+                };
+            };
+            responses: {
+                /** @description The code was sent (or the call placed). */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Nothing was sent — `via_invalid` or `voice_unsupported_by_provider`; an unreadable body carries no reason. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                /** @description Nothing was sent — `no_number`, `number_already_verified`, `telephony_disabled` or `encryption_key_missing`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                415: components["responses"]["UnsupportedMediaType"];
+                /** @description `send_limited`: nothing was sent. */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                /** @description Phone alerts are not available on this server. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description `provider_rejected` or `provider_unreachable`: the code was not sent; the number stays stored unverified. */
+                502: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                /** @description The telephony provider's secret cannot be decrypted with the configured keys. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/phone/preferences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Change the preferences of the current user's phone alerts
+         * @description Never touches the number or its verification (§4.2). An omitted field is unchanged; `language: null` returns to the instance's voice language. 404 without a stored number; 403 for a token principal and a machine user.
+         */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SetUserPhonePreferences"];
+                };
+            };
+            responses: {
+                /** @description The phone (masked). */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["UserPhone"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                415: components["responses"]["UnsupportedMediaType"];
+            };
+        };
         trace?: never;
     };
     "/api/v1/version": {
@@ -4325,7 +4656,10 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** List a project's incidents (newest first) */
+        /**
+         * List a project's incidents (newest first)
+         * @description Each item carries the incident's short `ref` (FR-041a D21). `ref` is a field of this authenticated list and of the detail only — never of the shared incident model the public page, the feeds, the webhooks and the outbox payloads embed.
+         */
         get: {
             parameters: {
                 query?: never;
@@ -4343,7 +4677,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["Incident"][];
+                        "application/json": components["schemas"]["IncidentListItem"][];
                     };
                 };
                 404: components["responses"]["NotFound"];
@@ -4474,6 +4808,98 @@ export interface paths {
                         "application/json": components["schemas"]["AuthedIncident"];
                     };
                 };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/incidents/by-ref/{ref}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The incident's short reference: 8 Crockford base32 characters. Case is ignored and the aliases I, L → 1 and O → 0 are accepted, so a link typed by hand resolves. */
+                ref: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Resolve an incident's short reference (project:read)
+         * @description FR-041a D21, the resolver behind the SPA route `/i/:ref`. 404 for a malformed, unknown or invisible reference — one answer for all three, so the endpoint does not confirm existence; 403 when the incident's project is visible but the caller lacks `project:read`.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description The incident's short reference: 8 Crockford base32 characters. Case is ignored and the aliases I, L → 1 and O → 0 are accepted, so a link typed by hand resolves. */
+                    ref: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["IncidentByRef"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/incidents/{incidentID}/phone-activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                incidentID: components["parameters"]["IncidentID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List an incident's phone deliveries (project:read)
+         * @description FR-041a §4.5, §5.5. Every sms and voice attempt made for the incident, oldest first (the order of the incident's timeline), with its reason. The number is its mask only (P3). The body carries `deliveries` only; the actions of part (b) join it later.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    incidentID: components["parameters"]["IncidentID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PhoneActivity"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
             };
         };
@@ -6738,11 +7164,15 @@ export interface paths {
                         "application/json": components["schemas"]["NotificationChannel"][];
                     };
                 };
+                403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
             };
         };
         put?: never;
-        /** Create a notification channel (editor+) */
+        /**
+         * Create a notification channel (editor+)
+         * @description An `sms` or `voice` channel (FR-041a §4.3) carries no `config`; it names its recipient mode, fixed at creation. `user` mode phones `recipient_user_id`, a person who reaches the project (a project or organization membership, or global admin); `number` mode phones its own `number`, which is write-only. Who may create which (D28): an editor only a `user` channel that phones themselves; a project admin, org admin or global admin any eligible recipient and `number` channels; an API token only `number` channels, with project:manage — which is enough without project:write, the four other types' permission; a viewer nothing. A project the caller cannot see is 404 before any of that. A `number` channel is created DISABLED (`disabled_reason: number_unverified`) whatever `enabled` says, and is verified through `/verify/send` and `/verify`; nothing is sent on create. Refused while telephony is off (409 `telephony_disabled`, D27), for `voice` while the provider in force places no calls (400 `voice_unsupported_by_provider`, D3), and without the at-rest key (409 `encryption_key_missing`, D29). A phone channel's create is audited as `notification_channel.create` (target `channel <id> · <type>`, never a number); the four other types are not audited.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -6767,9 +7197,26 @@ export interface paths {
                         "application/json": components["schemas"]["NotificationChannel"];
                     };
                 };
-                400: components["responses"]["BadRequest"];
+                /** @description Invalid. For a phone channel `reason` is `number_invalid`, `recipient_not_eligible`, `recipient_fixed` (a `number` on a `user` channel or a `recipient_user_id` on a `number` one — present, even empty) or `voice_unsupported_by_provider` when it is one of those. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                /** @description Nothing was created — `telephony_disabled` or `encryption_key_missing`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
                 415: components["responses"]["UnsupportedMediaType"];
             };
         };
@@ -6791,7 +7238,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete a notification channel (editor+) */
+        /**
+         * Delete a notification channel (editor+)
+         * @description An `sms` or `voice` channel follows D28 as an edit does, and its delete is audited as `notification_channel.delete`. A malformed id is a 404, as an unknown one.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -6816,7 +7266,10 @@ export interface paths {
         };
         options?: never;
         head?: never;
-        /** Edit a notification channel — name, config, enabled (editor+) */
+        /**
+         * Edit a notification channel — name, config, enabled (editor+)
+         * @description For an `sms` or `voice` channel: `name`, `enabled`, `recipient_user_id` (a `user` channel) or `number` (a `number` channel); `config` must be absent or empty and the recipient mode cannot change (400 `recipient_fixed`): a different `recipient`, or a field of the other mode — present, even empty — is refused before its value is judged. A `recipient` that repeats the mode changes nothing, so a body with nothing else is the 400 of an empty edit. The rights are D28's alone (a token with project:manage edits and deletes a `number` channel without project:write), after the project's visibility (404). D28 is judged against the channel as stored AND as patched: an editor edits only the `user` channel that phones themselves and cannot retarget it, nor retarget someone else's to themselves. Every edit of a `user` channel but switching it off needs a recipient who still reaches the project (400 `recipient_not_eligible`). A different number clears the verification and disables the channel in the same write. Switching a channel on is refused while telephony is off (409 `telephony_disabled`), for `voice` under a provider without calls (400 `voice_unsupported_by_provider`) and for an unverified number (409 `number_unverified`). Audited as `notification_channel.update`.
+         */
         patch: {
             parameters: {
                 query?: never;
@@ -6841,12 +7294,294 @@ export interface paths {
                         "application/json": components["schemas"]["NotificationChannel"];
                     };
                 };
-                400: components["responses"]["BadRequest"];
+                /** @description Invalid. For a phone channel `reason` is `number_invalid`, `recipient_not_eligible`, `recipient_fixed` or `voice_unsupported_by_provider` when it is one of those. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                /** @description Nothing was written — `telephony_disabled`, `encryption_key_missing` or `number_unverified`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
                 415: components["responses"]["UnsupportedMediaType"];
             };
         };
+        trace?: never;
+    };
+    "/api/v1/notification-channels/{channelID}/verify/send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                channelID: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a verification code to a number channel's number (project:manage)
+         * @description FR-041a §4.2. The body is empty or `{ "via" }`. Sends a six-digit code to the `number` channel's number — by SMS, or with `via: voice` spoken by a call in the instance's voice language — the only thing cerbix delivers to an unverified number (P1). The code lives 10 minutes and allows 5 attempts; at most 3 codes per hour are sent at the request of one caller — a person across their own number and every `number` channel they verify, an API token as itself — and 10 per number per day, by SMS and by call together; a new code ends the previous one. 400 for a channel that is not an `sms`/`voice` channel in `number` mode, `via_invalid`, and `voice_unsupported_by_provider` for `via: voice` while the provider cannot place calls (before a code is issued); 409 `number_already_verified` for a channel whose number is verified: it is sent no code.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    channelID: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["SendPhoneCode"];
+                };
+            };
+            responses: {
+                /** @description The code was sent (or the call placed). */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Nothing was sent — `via_invalid` or `voice_unsupported_by_provider`; a channel that is not in `number` mode, or an unreadable body, carries no reason. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Nothing was sent — `number_already_verified`, `telephony_disabled` or `encryption_key_missing`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                415: components["responses"]["UnsupportedMediaType"];
+                /** @description `send_limited`. */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                /** @description Phone alerts are not available on this server. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description `provider_rejected` or `provider_unreachable`: the code was not sent. */
+                502: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                /** @description The telephony provider's secret cannot be decrypted with the configured keys. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notification-channels/{channelID}/phone-deliveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                channelID: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * List a channel's last 50 phone deliveries (project:read)
+         * @description FR-041a §4.5. Newest first, each with the incident it concerned (`incident_id`, `incident_ref`; absent for a delivery with no incident). A channel of one of the four other types answers an empty list. Reasons and masked numbers only (P3, D34).
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    channelID: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PhoneActivity"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notification-channels/{channelID}/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                channelID: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify a number channel's number with the code it was sent (project:manage)
+         * @description A matching code marks the number verified, clears `disabled_reason: number_unverified` and writes the audit row `notification_channel.verify`; the channel stays disabled until it is switched on. A wrong code counts as an attempt; after 5 the code is spent. Only the latest code sent is judged: a code that a newer send replaced is a wrong code (400 `code_incorrect`, the attempt counted against the newer code). Input that is not six digits is a 400 `code_incorrect` and is not counted.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    channelID: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["VerifyPhone"];
+                };
+            };
+            responses: {
+                /** @description The verified channel. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["NotificationChannel"];
+                    };
+                };
+                /** @description `code_incorrect`; a channel that is not a `number` channel has no `reason`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description `encryption_key_missing`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                /** @description `code_expired` (the latest code expired or was used) or `code_attempts_exhausted`; request a new code. */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                415: components["responses"]["UnsupportedMediaType"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{projectID}/phone-recipients": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectID: components["parameters"]["ProjectID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List whom a user-mode phone channel of the project may phone (project:write)
+         * @description FR-041a §4.3: every human who reaches the project — a project membership, an organization-level membership of its organization, or global admin — with whether each has a verified number; never a number, not even masked. An editor gets only themselves and an API token nobody (D28).
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectID: components["parameters"]["ProjectID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PhoneRecipient"][];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/monitors/{monitorID}/notifications": {
@@ -7488,6 +8223,170 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/settings/telephony": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read telephony settings (global admin only, secrets redacted)
+         * @description FR-041a §4.1. Database only (D36): until a global admin saves it the group is absent, which reads as `configured: false`, `enabled: false` and the defaults. The two secrets — Twilio's auth token and the generic_http headers map — are never returned, only whether each is stored. `encryption_key_configured` says whether a save is possible at all (D29).
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TelephonySettingsView"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                /** @description Instance settings are not configurable in this deployment. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        /**
+         * Save telephony settings (global admin only)
+         * @description A whole-group write. A blank or omitted `twilio.auth_token`, and an empty or omitted `generic_http.headers`, keep what is stored; `generic_http.headers_clear: true` removes the stored headers and is refused together with new ones (400, reason `headers_conflict`). The body template is checked for its content type (400, reason `template_invalid`). Refused while `security.encryption_key` is unset (409, reason `encryption_key_missing`, D29). A write that leaves at least one paging service (`owns_paging`) without a route changes nothing and answers 409 with reason `services_without_route`, the services (at most 50, ordered by project name then slug) and their total; the same request with `confirm_unroutable: true` is saved. The list is computed in the transaction that would write the settings. A successful save writes the instance-level audit row `settings.telephony.update` (target `telephony`).
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SetTelephonySettings"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TelephonySettingsView"];
+                    };
+                };
+                /** @description Invalid settings; `reason` is `headers_conflict` or `template_invalid` when it is one of those. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                /** @description Nothing was saved: `encryption_key_missing` (an `EncryptionKeyMissingError`), or `services_without_route` (a `ServicesWithoutRouteError`). `reason` tells the two apart. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["EncryptionKeyMissingError"] | components["schemas"]["ServicesWithoutRouteError"];
+                    };
+                };
+                415: components["responses"]["UnsupportedMediaType"];
+                /** @description Instance settings are not configurable in this deployment. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/settings/telephony/test-sms": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send the test SMS to the calling admin's own verified number (global admin only)
+         * @description FR-041a §4.1. Sends the fixed text `[cerbix] Test message: phone alerts are working.` through the provider in force, only to the caller's own VERIFIED number. It is not an alert and leaves no delivery row. The answer is how the provider answered — a refusal is a 200 with `outcome: rejected` — never the provider's text and never the number.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The provider's answer. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TelephonyTestSMSResult"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                /** @description Nothing was sent — `telephony_disabled`, `no_verified_number` or `encryption_key_missing`. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReasonError"];
+                    };
+                };
+                /** @description Phone alerts are not available on this server. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description The telephony provider's secret cannot be decrypted with the configured keys. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/public/branding": {
         parameters: {
             query?: never;
@@ -8016,7 +8915,75 @@ export interface components {
             /** Format: date-time */
             computed_at: string;
         };
+        /** @description An incident of the authenticated list, with its short reference (FR-041a D21). */
+        IncidentListItem: components["schemas"]["Incident"] & {
+            /** @description Eight Crockford base32 characters; unique. Absent only when it could not be read. */
+            ref?: string;
+        };
+        IncidentByRef: {
+            /** Format: uuid */
+            incident_id: string;
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            org_id: string;
+        };
+        PhoneActivity: {
+            deliveries: components["schemas"]["PhoneDelivery"][];
+        };
+        PhoneDelivery: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            channel_id: string;
+            channel_name: string;
+            /**
+             * Format: uuid
+             * @description Only in a channel's list, and only when the incident still exists.
+             */
+            incident_id?: string;
+            /** @description Only with incident_id. */
+            incident_ref?: string;
+            /** @enum {string} */
+            kind: "sms" | "voice";
+            alert_kind: string;
+            /** @description The mask; null for a delivery that had no number (`not_deliverable`). Never the number. */
+            number_masked: string | null;
+            /** @enum {string} */
+            reason: "sending" | "sent" | "provider_unreachable" | "provider_rejected" | "outcome_unknown" | "not_deliverable" | "voice_unsupported_by_provider" | "telephony_disabled" | "storm_limited";
+            /** @description Annotations, not reasons: `no_incident_ref`, `no_public_url`, `link_omitted`, `no_verified_number`, `recipient_not_eligible`, and on a `storm_limited` row the limit that refused it — `storm_per_incident` (its monitor-counted form, and the service-counted form of a service's health or recovery alert whose incident was not found, included) or `storm_per_number`. The limit's value is never recorded. */
+            notes: string[];
+            /** @description HTTP status of the provider's answer. */
+            provider_status: number | null;
+            /** @description A code of the provider's, never its text (D34). */
+            provider_code: string | null;
+            provider_ref: string | null;
+            segments: number;
+            attempts: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+            /** @description The monitor or service the delivery was about, resolved at read; null when there is none or it was deleted. */
+            subject: components["schemas"]["PhoneDeliverySubject"] | null;
+            /**
+             * @description The paging state a service's health alert announced, stored with the delivery; null for every other alert.
+             * @enum {string|null}
+             */
+            service_state: "healthy" | "degraded" | "down" | "unknown" | "excluded" | null;
+            /** @description The 1-based escalation step that handed the alert over, stored with the delivery; null for every other alert. */
+            escalation_step: number | null;
+            /** @description The recipient's display name, resolved at read — never an email: a name holding an '@' is cut to the part before the first '@'. Null for a `number` channel, a deleted user, an empty name, or a name with nothing before its '@'. */
+            recipient_display_name: string | null;
+        };
+        PhoneDeliverySubject: {
+            /** @enum {string} */
+            kind: "monitor" | "service";
+            name: string;
+        };
         AuthedIncident: components["schemas"]["Incident"] & {
+            /** @description The short reference for the phone (FR-041a D21). Absent only when it could not be read. */
+            ref?: string;
             /** @description The mapping in force when the incident's impact was classified (FR-042 D15). Always serialized, in one of three encodings: an object (`source` says why the impact is what it is); `null` with no `impact_basis_unavailable` when the basis was never recorded (an incident older than the feature); `null` with `impact_basis_unavailable: true` when the read degraded. */
             impact_basis: components["schemas"]["ImpactBasis"] | null;
             /** @description Present and true when the basis read degraded. */
@@ -8596,6 +9563,14 @@ export interface components {
             memberships?: components["schemas"]["Membership"][];
             /** @description Whether two-factor authentication is active for this account. */
             totp_enabled?: boolean;
+            /** @description The user's phone (masked), or null without one (FR-041a §4.2). */
+            phone?: components["schemas"]["UserPhone"] | null;
+            /** @description Whether the instance's telephony is on. */
+            telephony_enabled?: boolean;
+            /** @description Whether a verification code can be spoken by a call now (FR-041a §4.2): telephony is on and its provider can place calls (D3) — false for `generic_http` and for `twilio` whose `from` is a Messaging Service SID; false when the phone part of this answer could not be read. */
+            telephony_can_call?: boolean;
+            /** @description The instance's voice language (FR-041a §4.1, §4.2), what a person's language `null` falls back to; null only when the phone part of this answer could not be read. */
+            telephony_voice_language?: string | null;
         };
         Organization: {
             /** Format: uuid */
@@ -9974,6 +10949,182 @@ export interface components {
             from?: string;
             public_base_url?: string;
         };
+        /** @description An error the SPA tells apart by its machine `reason` (FR-041a R7). `error` is a sentence for a person; `reason` is the stable code. A route that documents this schema sends `reason` on the refusals its description names, and `error` alone on any other answer with that status (an unreadable body, a missing field), so `reason` is optional. */
+        ReasonError: {
+            error: string;
+            /** @enum {string} */
+            reason?: "telephony_disabled" | "encryption_key_missing" | "voice_unsupported_by_provider" | "number_invalid" | "number_in_use" | "number_unverified" | "code_incorrect" | "code_expired" | "code_attempts_exhausted" | "send_limited" | "no_number" | "number_already_verified" | "recipient_not_eligible" | "recipient_fixed" | "headers_conflict" | "template_invalid" | "no_verified_number" | "provider_rejected" | "provider_unreachable" | "via_invalid";
+        };
+        /** @description The 409 of a telephony write refused while `security.encryption_key` is unset (D29). Nothing was saved. */
+        EncryptionKeyMissingError: {
+            error: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            reason: "encryption_key_missing";
+        };
+        /** @description A person's phone as everyone sees it, the owner included (FR-041a D35): the mask, never the number. */
+        UserPhone: {
+            /** @example +90•••••6869 */
+            number_masked: string;
+            verified: boolean;
+            /** @description BCP-47 tag of the person's alerts; null means the instance's voice language. */
+            language: string | null;
+        };
+        SetUserPhone: {
+            /**
+             * @description E.164 (`+` and 8–15 digits); spaces, dashes, dots and parentheses are ignored.
+             * @example +90 532 111 68 69
+             */
+            number: string;
+            via?: components["schemas"]["PhoneCodeVia"];
+        };
+        /**
+         * @description How a verification code goes (FR-041a §4.2): `sms` (also when absent or null), or `voice` — spoken by a call. Another value is 400 `via_invalid`.
+         * @default sms
+         * @enum {string|null}
+         */
+        PhoneCodeVia: "sms" | "voice" | null;
+        /** @description The optional body of a verify/send; an empty body means `via` is `sms`. */
+        SendPhoneCode: {
+            via?: components["schemas"]["PhoneCodeVia"];
+        };
+        VerifyPhone: {
+            code: string;
+        };
+        /** @description An omitted field is unchanged. */
+        SetUserPhonePreferences: {
+            /** @description BCP-47 tag such as `en-US`; null clears it. */
+            language?: string | null;
+        };
+        TelephonyTestSMSResult: {
+            /** @enum {string} */
+            outcome: "sent" | "rejected" | "unreachable";
+            /** @description The provider's HTTP status; 0 when it gave no answer. */
+            http_status: number;
+            /** @description The provider's error code (`^[A-Za-z0-9_.-]{1,32}$`), or empty. */
+            provider_code: string;
+            /**
+             * @description Present only when the provider was not reached (`outcome` unreachable, `http_status` 0): the class of the transport failure, from the closed set the delivery classifier has — never free text (§4.1). Absent when the provider answered.
+             * @enum {string}
+             */
+            transport_class?: "destination refused by the delivery egress policy" | "certificate not accepted" | "the server does not speak TLS" | "TLS handshake failed" | "timeout" | "DNS lookup failed" | "connection refused" | "connection failed";
+        };
+        /** @description The storm guard's per-hour bounds (§6.2). Zero or omitted in a write means the default. */
+        TelephonyStorm: {
+            /** @description Default 5. */
+            per_incident_per_hour?: number;
+            /** @description Default 20. */
+            per_number_per_hour?: number;
+        };
+        TelephonyTwilioView: {
+            account_sid?: string;
+            /** @description A token is stored. The token itself is never returned. */
+            auth_token_set?: boolean;
+            /** @description A token is stored but the configured keys cannot decrypt it: re-enter it, or restore the key and run cerbix reencrypt. A blank write keeps it. */
+            auth_token_unreadable?: boolean;
+            /** @description An E.164 number or a Messaging Service SID (SMS only). */
+            from?: string;
+        };
+        TelephonyGenericHTTPView: {
+            method?: string;
+            url?: string;
+            /** @description Headers are stored. Neither names nor values are returned. */
+            headers_set?: boolean;
+            /** @description Headers are stored but the configured keys cannot decrypt them: re-enter them, or restore the key and run cerbix reencrypt. A blank write keeps them. */
+            headers_unreadable?: boolean;
+            content_type?: string;
+            body_template?: string;
+            from?: string;
+            response_code_field?: string;
+        };
+        /** @description Redacted read model of the telephony settings (FR-041a §4.1). Never carries a secret. */
+        TelephonySettingsView: {
+            /** @description A global admin has saved the group; until then telephony is disabled (D36). */
+            readonly configured?: boolean;
+            /** @description security.encryption_key is set; without it the settings cannot be saved (D29). */
+            readonly encryption_key_configured?: boolean;
+            enabled?: boolean;
+            /** @enum {string} */
+            provider?: "" | "twilio" | "generic_http";
+            twilio?: components["schemas"]["TelephonyTwilioView"];
+            generic_http?: components["schemas"]["TelephonyGenericHTTPView"];
+            public_base_url?: string;
+            voice_language?: string;
+            /** @enum {string} */
+            sms_encoding?: "transliterate" | "unicode";
+            sms_max_segments?: number;
+            storm?: components["schemas"]["TelephonyStorm"];
+        };
+        SetTelephonyTwilio: {
+            account_sid?: string;
+            /** @description Omit or send empty to keep the stored token. */
+            auth_token?: string;
+            /** @description An E.164 number or a Messaging Service SID (MG…); the latter cannot place calls. */
+            from?: string;
+        };
+        SetTelephonyGenericHTTP: {
+            /** @enum {string} */
+            method?: "POST" | "PUT";
+            /** @description http(s) with a host, as a webhook URL. */
+            url?: string;
+            /** @description The whole map is secret. Omit or send empty to keep the stored map; a non-empty map replaces it. */
+            headers?: {
+                [key: string]: string;
+            };
+            /** @description Removes the stored headers. Refused together with non-empty headers. */
+            headers_clear?: boolean;
+            /** @enum {string} */
+            content_type?: "application/json" | "application/x-www-form-urlencoded";
+            /** @description Placeholders {{to}}, {{from}} and {{text}} only; {{to}} and {{text}} are required. JSON: every placeholder inside a string value. Form: name=value pairs. */
+            body_template?: string;
+            from?: string;
+            /** @description Optional top-level JSON key of the gateway's answer holding its error code. */
+            response_code_field?: string;
+        };
+        SetTelephonySettings: {
+            enabled: boolean;
+            /**
+             * @description Required when enabled.
+             * @enum {string}
+             */
+            provider?: "" | "twilio" | "generic_http";
+            twilio?: components["schemas"]["SetTelephonyTwilio"];
+            generic_http?: components["schemas"]["SetTelephonyGenericHTTP"];
+            /** @description https unless the host is loopback. Empty falls back to the mail public_base_url. */
+            public_base_url?: string;
+            /** @description A language tag; default en-US. */
+            voice_language?: string;
+            /**
+             * @description Default transliterate.
+             * @enum {string}
+             */
+            sms_encoding?: "" | "transliterate" | "unicode";
+            /** @description 1..4; 0 or omitted means the default 2. */
+            sms_max_segments?: number;
+            storm?: components["schemas"]["TelephonyStorm"];
+            /** @description Save even though the write leaves paging services without a route. */
+            confirm_unroutable?: boolean;
+        };
+        ServiceWithoutRoute: {
+            /** @description Project name. */
+            project: string;
+            /** @description Service name. */
+            service: string;
+            slug: string;
+        };
+        /** @description The 409 of a telephony write that would leave paging services without a route (§4.1). Nothing was saved. */
+        ServicesWithoutRouteError: {
+            error: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            reason: "services_without_route";
+            services_without_route: components["schemas"]["ServiceWithoutRoute"][];
+            services_without_route_total: number;
+        };
         /** @description Redacted read model for the OIDC settings API. The client secret is never returned, only whether one is stored. */
         OIDCSettingsView: {
             /** @description A DB override row exists (the config file is no longer in effect). */
@@ -10433,31 +11584,87 @@ export interface components {
             /** @default true */
             enabled: boolean;
         };
+        /** @description The fields after `created_at` belong to the `sms` and `voice` types (FR-041a §4.3) and are absent for the four others. A phone channel's number is never returned, not even to its author: `number_masked` and `number_verified` describe it. */
         NotificationChannel: {
             /** Format: uuid */
             id?: string;
             /** Format: uuid */
             project_id?: string;
             /** @enum {string} */
-            type?: "webhook" | "slack" | "telegram" | "email";
+            type?: "webhook" | "slack" | "telegram" | "email" | "sms" | "voice";
             name?: string;
-            /** @description Type-specific: url, or bot_token + chat_id. */
+            /** @description Type-specific: url, or bot_token + chat_id. Empty for sms and voice. */
             config?: {
                 [key: string]: string;
             };
             enabled?: boolean;
             /** Format: date-time */
             created_at?: string;
+            /**
+             * @description Recipient mode
+             * @enum {string}
+             */
+            recipient?: "user" | "number";
+            /**
+             * Format: uuid
+             * @description The person a `user` channel phones; absent once that user is deleted.
+             */
+            recipient_user_id?: string;
+            /** @description A `number` channel's number, masked (`+90•••••6869`). */
+            number_masked?: string;
+            /** @description Whether a `number` channel's number is verified. */
+            number_verified?: boolean;
+            /**
+             * @description Why the server disabled the channel.
+             * @enum {string}
+             */
+            disabled_reason?: "recipient_deleted" | "number_unverified";
+            deliverable?: components["schemas"]["ChannelDeliverable"];
+            /** @description A `user` channel's recipient by display name — never an email: a name holding an '@' is cut to the part before the first '@' — returned to every reader of the channel, also for a recipient who can no longer open the project; null once the user is deleted, and for an empty name or one with nothing before its '@'. Absent for a `number` channel (FR-041a §4.3). */
+            recipient_display_name?: string | null;
+            /** @description The paging services for which this phone channel is the ONLY route now — routable with it and not without it, by the route predicate of D31 — at most 50, ordered by project name then slug. Empty when it is nobody's only route (FR-041a §4.3). */
+            only_route_for?: components["schemas"]["ServiceWithoutRoute"][];
+            /** @description How many services `only_route_for` would list without its bound. */
+            only_route_for_total?: number;
+        };
+        /** @description Whether a phone channel is a route now (D31 rule 1): enabled, its recipient present, eligible and verified, telephony on, and not `voice` under a provider without calls. `reason` is the first of those that fails, absent for a route. */
+        ChannelDeliverable: {
+            route: boolean;
+            /** @enum {string} */
+            reason?: "disabled" | "telephony_disabled" | "voice_unsupported_by_provider" | "number_unverified" | "no_verified_number" | "recipient_not_eligible" | "recipient_deleted";
+        };
+        PhoneRecipient: {
+            /** Format: uuid */
+            user_id: string;
+            display_name: string;
+            email: string;
+            phone_verified: boolean;
         };
         CreateNotificationChannel: {
             /** @enum {string} */
-            type: "webhook" | "slack" | "telegram" | "email";
+            type: "webhook" | "slack" | "telegram" | "email" | "sms" | "voice";
             name: string;
-            config: {
+            /** @description Required by the four non-phone types; absent or empty for sms and voice. */
+            config?: {
                 [key: string]: string;
             };
-            /** @default true */
+            /**
+             * @description Ignored for a `number` channel, which is created disabled.
+             * @default true
+             */
             enabled: boolean;
+            /**
+             * @description sms and voice only.
+             * @enum {string}
+             */
+            recipient?: "user" | "number";
+            /**
+             * Format: uuid
+             * @description sms and voice, `user` mode only.
+             */
+            recipient_user_id?: string;
+            /** @description sms and voice, `number` mode only: E.164; spaces, dashes, dots and parentheses are removed. */
+            number?: string;
         };
         /** @description A partial edit. Every field is optional, but a body naming none of them is a 400. `type` is NOT editable — another type requires another config, which is a new channel; a body carrying one is refused as an unknown field. Secret config values (`url`, `bot_token`, `smtp_password`) are never returned by the API, so an omitted or empty secret KEEPS the stored value and only a non-empty one replaces it; every other key is stored exactly as sent, so an optional field is cleared by sending it empty. The merged config must still satisfy the channel type's required keys. */
         UpdateNotificationChannel: {
@@ -10466,6 +11673,18 @@ export interface components {
                 [key: string]: string;
             };
             enabled?: boolean;
+            /**
+             * @description sms and voice: accepted only when it is the stored mode (`recipient_fixed`).
+             * @enum {string}
+             */
+            recipient?: "user" | "number";
+            /**
+             * Format: uuid
+             * @description sms and voice, `user` mode: retarget the channel.
+             */
+            recipient_user_id?: string;
+            /** @description sms and voice, `number` mode: replace the number; clears the verification and disables the channel. */
+            number?: string;
         };
         /** @description A durably-queued outbound event (dead-letter view). */
         OutboxEvent: {

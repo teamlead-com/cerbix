@@ -1,6 +1,31 @@
 # func-phone-alerts — an alert that reaches a person: SMS and voice calls (FR-041 / NFR-034)
 
-> **STATUS: revision 5 — APPROVED by the owner on 2026-11-17; not implemented.** The approval
+> **STATUS: revision 9 — APPROVED by the owner on 2026-11-18. FR-041a is implemented in
+> [iter-0216](../iterations/iter-0216.md) / [D-0283](../decisions.md); FR-041b and FR-041c are not.** Revision 9 adds one thing the
+> owner asked for (§14, "Verification by a call"): a verification code can be **spoken by a call**
+> instead of sent by SMS, so that a number in a country the provider does not deliver SMS to can
+> still be verified and rung. Nothing else changed.
+>
+> Revision 8 (2026-11-18, approved by the owner) answers the external code review of that
+> backend (CHANGES REQUIRED, P0 0 / P1 3 / P2 9 / P3 4 — dispositions in §14). Three of its
+> findings need the specification to say something it did not: a `voice` channel is not a route
+> while Twilio's `from` is a Messaging Service SID (D31), the hourly limit on verification codes is
+> counted on the person who sends them, and the test SMS reports the class of a transport failure.
+> The rest are corrections of the code against the text as it stood.
+>
+> Revision 7 (2026-11-18, approved by the owner) added what planning the SPA of FR-041a showed
+> the built API lacks to draw the approved mock (§14, "SPA plan of FR-041a"): the recipient's name
+> and `only_route_for` on a channel, the subject, service state, escalation step and recipient's
+> name on a delivery, which storm limit refused it, the instance's voice language on
+> `GET /api/v1/me`, and a way to send a new code to a stored number. It also records what the
+> delivery record does **not** hold, so the SPA does not claim it. No decision changed.
+>
+> Revision 6 (2026-11-17, approved by the owner) added
+> what drawing the mock of FR-041a showed the API lacks (§14, "Mock of FR-041a"): a flag that the
+> at-rest key is configured, an explicit way to remove stored gateway headers, a confirmed save
+> when telephony settings would leave services without a route, `telephony_enabled` on
+> `GET /api/v1/me`, when the Phone panel is shown, and the return address through SSO login.
+> Nothing else changed; the mock `docs/design/mock-phone-alerts-a.html` is approved. The approval
 > covers the author's calls as well (D12, D14–D16, D18–D21, D31–D36, the snooze model). Implementation
 > follows FR-042 and starts with the mock of FR-041a. The confirming review pass
 > (2026-11-17, at `23184bf`) is APPROVED with no findings (§14). Revision 5 (2026-11-17) answers the third external
@@ -103,6 +128,14 @@ Two implementations ship:
   **effective** provider of its project is `generic_http` (400 with that reason), and FR-041b reply
   features report themselves unavailable rather than broken. Placeholder encoding is fixed by the
   body's content type (§4.4) — never raw concatenation.
+
+A provider **cannot place calls** in two cases, and every rule below that names "`voice` under
+`generic_http`" means both: the provider is `generic_http`, or it is `twilio` with a Messaging
+Service SID as `from` — a Messaging Service sends messages only, so such a call is refused before
+any request. The reason is the same, `voice_unsupported_by_provider`, in the channel's creation
+and enabling, in `deliverable`, in the route predicates (D31), in the 409 of §4.1 and at send. It
+is one condition held in the database beside `telephony_provider`, not a test repeated in each
+place.
 
 Further providers are added by implementing the interface; none is promised here.
 
@@ -364,7 +397,11 @@ revision 2 did not have: `GET /api/v1/incidents/by-ref/{ref}` returns the incide
 and organization under the same two-step as `getIncident` (invisible → 404, visible without
 `project:read` → 403); the SPA switches its active organization and project to them and redirects
 to `/incidents/:id`. An unauthenticated visitor gets the login page first, never an answer that
-confirms existence. `ref` is **not** a field of `domain.Incident`: that struct is the `incident`
+confirms existence, and lands on the link after signing in — **by SSO as well as by password**.
+Today only the password path returns: `frontend/src/views/LoginView.vue` sends the browser to
+`/auth/login?redirect=/` with the path fixed, although the server already accepts and sanitises
+the parameter (`sanitizeRedirect`, `internal/auth/handlers.go`). FR-041a passes the requested
+path there; without it the link in an SMS takes every SSO user to the home page. `ref` is **not** a field of `domain.Incident`: that struct is the `incident`
 object of every webhook payload and of `outbox_events.payload`, and adding a field there would
 change those bytes for every project (P14). It is returned by the authenticated incident detail and
 list responses only, the way FR-042 returns `impact_basis`.
@@ -391,7 +428,8 @@ So the rules are:
      a verified number;
    - **telephony is in effect** for its project: the effective telephony settings (the instance's
      in FR-041a, the project's override when FR-041c gives it one) are enabled, and for a `voice`
-     channel their provider is not `generic_http`. A channel that fails only this clause is still a
+     channel their provider can place calls (D3: not `generic_http`, and not `twilio` with a
+     Messaging Service SID as `from`). A channel that fails only this clause is still a
      route when (FR-041c) it names a live non-phone fallback channel — the fallback is where its
      alerts go (§6.3).
 
@@ -621,6 +659,13 @@ value — the contract `putMail` already has for `smtp_password` (`internal/api/
 `public_base_url` falls back to `mail.public_base_url` when unset; with neither, messages carry no
 link and the delivery row says so (`no_public_url`).
 
+"Blank keeps" leaves no way to remove stored headers from a gateway that no longer needs any. A
+write may therefore carry `generic_http.headers_clear: true`, which removes the stored map; sent
+together with a non-empty `headers` it is refused (400).
+
+The read also returns `encryption_key_configured`. Without it the form could learn that saving is
+impossible (D29) only from the refusal, after everything was typed.
+
 Saving the settings is refused while `security.encryption_key` is unset (D29). Switching `provider`
 to `generic_http` while `voice` channels exist is allowed and warned about: they stay, stop being
 routes (D31) and are not phoned (`voice_unsupported_by_provider`). Switching `enabled` off is
@@ -628,15 +673,50 @@ warned about in the same way. Both warnings name the services that the change le
 route** — computed with rule 1, so from FR-041c a phone channel with a live fallback is not among
 the reasons: those services become unroutable and their members page for themselves.
 
+**The warning is the save's own answer.** A `PUT` that would leave at least one service without a
+route, and does not carry `confirm_unroutable: true`, changes nothing and answers 409 with
+`services_without_route: [{ project, service, slug }]` (at most 50, and the total). The same
+request with the flag is saved. The list is computed in the transaction that would write the
+settings, so what the admin confirms is what is true at that moment; a separate "what would
+happen" read was refused because the answer could change between the read and the save.
+
 A **"Send test SMS"** action sends a fixed text to the calling admin's own **verified** number only.
+Its answer carries the outcome, the provider's HTTP status and code (D34) and, when the provider
+was not reached, `transport_class` — the class of the failure from the closed set the delivery
+classifier already has (a timeout, a DNS failure, a destination the egress policy refuses), never
+free text. The answer is synchronous, so the class is known here; a delivery row does not hold it
+(§4.5).
 
 ### 4.2 Verified numbers
 
-- `PUT /api/v1/me/phone` `{ "number": "+905…" }` stores it **unverified** and sends a 6-digit code
-  by SMS. `POST /api/v1/me/phone/verify` `{ "code": "…" }` marks it verified.
+- `PUT /api/v1/me/phone` `{ "number": "+905…", "via"? }` stores it **unverified** and sends a
+  6-digit code — by SMS, or spoken by a call when `via` is `voice` (below). `POST /api/v1/me/phone/verify` `{ "code": "…" }` marks it verified.
   `DELETE /api/v1/me/phone` removes it. `GET /api/v1/me` gains
   `phone: { number_masked, verified, language }` (D35), or `phone: null` without a number;
-  FR-041c adds `quiet_hours` to it.
+  FR-041c adds `quiet_hours` to it. It also gains `telephony_enabled` — whether the instance's
+  telephony is on — so that the Phone page and the incident page can say "phone alerts are off"
+  without waiting for a refusal. It is a boolean about the instance and says nothing about any
+  project. Beside it, `telephony_voice_language` is the instance's `voice_language` (§4.1), so the
+  language choice can say what "instance default" means to someone who cannot read the settings.
+- `POST /api/v1/me/phone/verify/send` sends a new code to the **stored** unverified number — the
+  API never returns a number, so after a page reload the caller has nothing to `PUT` again. Its
+  body is empty or `{ "via" }`; it is under the same limits as the first send, and answers 409
+  when there is no stored number or it is already verified.
+- **The code by a call.** Every send of a code — the `PUT`, `verify/send` here and a channel's
+  `verify/send` below — takes `via: "sms" | "voice"`, `sms` when absent. With `voice` the provider
+  calls the number and the code is **spoken**, digit by digit, twice, after one sentence saying
+  what it is; nothing is asked of the listener and no key is read (P9). The language is the
+  person's `language` when the code is for their own number and they have set one, otherwise the
+  instance's `voice_language`. It is the same code in every other respect — one hash, 10 minutes,
+  5 attempts — and it spends the same allowances: the limits count codes, not messages, so
+  choosing the other way is not a second allowance. `via: "voice"` is refused with
+  `voice_unsupported_by_provider` (400) while the provider cannot place calls (D3). There is no
+  fallback from one way to the other: the person chooses, and the answer says what happened to
+  that one send. Why it exists: an SMS is not deliverable everywhere a call is — a provider may
+  have a country's messaging switched off, or the country's operators may drop a foreign sender —
+  and a `voice` channel to such a number could never become a route (D31) if its number could only
+  be verified by SMS. `GET /api/v1/me` gains `telephony_can_call`, the instance's "can place
+  calls" (D3), so the form offers the call only when it can be made.
 - Language and quiet hours are **not** part of that write — replacing the number clears
   verification, and changing a language must not. `PATCH /api/v1/me/phone/preferences`
   `{ "language"?, "quiet_hours"? }` (quiet hours: FR-041c, §6.4).
@@ -645,14 +725,25 @@ A **"Send test SMS"** action sends a fixed text to the calling admin's own **ver
   client-credentials principal.
 - Code: 6 digits, stored as a hash, valid 10 min, 5 attempts, then invalid; sending is limited to
   3 codes per user per hour and 10 per number per day (a number cannot be bombed through many
-  accounts).
+  accounts). "Per user" is the person who **asks for the code**, across everything they verify —
+  their own number and every `number` channel: counted per channel, a new channel would be a new
+  allowance, and one account could spend a stranger's whole day of codes in seconds. A principal
+  that is not a person (an API token) is counted as itself. A code already used up by 5 wrong
+  attempts is not a running code: it neither holds a number against a new owner nor counts as one
+  in `cerbix reencrypt`.
 - A shared `number`-mode channel is verified the same way, by the person creating it:
   `POST /api/v1/notification-channels/{channelID}/verify/send` and
   `POST /api/v1/notification-channels/{channelID}/verify`. Such a channel is **created
   disabled** whatever the request says — the create endpoint's default of `enabled: true`
   (`internal/api/handlers_notifications.go`) does not apply to it — and cannot be enabled before it
   is verified. Changing its number clears the verification and disables it in the same statement.
-- Verification codes are the **only** text cerbix sends to an unverified number (P1).
+  A channel that is already verified is sent no code (409). Its `verify/send` takes `via` as
+  above; the spoken code is in the instance's `voice_language`.
+- A verification code, sent or spoken, is the **only** thing cerbix delivers to an unverified
+  number (P1). A code is not an alert: it writes no `phone_deliveries` row and is outside the
+  storm guard, whichever way it goes; its own limits are the ones above.
+- There is no "test call" beside the test SMS of §4.1: an admin whose number takes no SMS verifies
+  it by a call, and that call is the proof that calls work.
 
 ### 4.3 The channel types
 
@@ -669,6 +760,15 @@ Typed fields on the channel instead (§8), surfaced at the top level of the chan
 | `fallback_channel_id` | both | FR-041c, §6.3 | as written |
 | `disabled_reason` | both | server only | `recipient_deleted`, `number_unverified`, or absent |
 | `deliverable` | both | server only | whether the channel is a route (D31), with the reason when it is not |
+| `recipient_display_name` | user | server only | the recipient's display name — never an email; `null` once the user is deleted |
+| `only_route_for` | both | server only | the paging services for which this channel is the **only** route, in the item shape of `services_without_route` (§4.1), at most 50, with `only_route_for_total` |
+
+`recipient_display_name` is returned to everyone who can read the channel, a project viewer
+included, and for a recipient who can no longer open the project too: the channel list has to say
+whose phone a channel rings and whose number is missing, and the recipients endpoint below cannot
+serve that — it needs `project:write`, shows an editor only themselves and lists nobody who lost
+access. `only_route_for` is computed by the route predicate of D31, in SQL, so the warning of §9
+and the routing itself cannot disagree; the SPA does not recompute it.
 
 **Eligible recipient.** A user of kind `human` who reaches the channel's project in one of the
 three ways access is granted: a membership on the project, an organization-level membership of its
@@ -792,6 +892,25 @@ error code in `provider_code`. The voice retry (§5.4) and the Phone panel read 
 Read through `GET /api/v1/incidents/{incidentID}/phone-activity` (§5.5) and
 `GET /api/v1/notification-channels/{channelID}/phone-deliveries` (last 50; `project:read`; reasons
 and masked numbers only).
+
+**What a delivery says it was about.** A list of deliveries has to be readable without the
+incident beside it, so each delivery in both reads also carries:
+
+| Field | Value |
+| --- | --- |
+| `subject` | `{ kind: monitor \| service, name }`, resolved at read from the row's `monitor_id` / `service_id`; `null` when there is none or it was deleted |
+| `service_state` | the paging state a service alert announced; stored on the row at reservation, `null` otherwise |
+| `escalation_step` | the 1-based number of the escalation step that handed the alert over; stored on the row at reservation, `null` otherwise |
+| `recipient_display_name` | resolved at read from the row's `user_id`, as on the channel (§4.3); `null` for a `number` channel or a deleted user |
+
+A `storm_limited` row names the limit that refused it in `notes`: `storm_per_incident` (the
+monitor-counted form of §6.2 included) or `storm_per_number`. The limit's **value** is not
+recorded and not shown: it is a setting only a global admin reads, and it may have changed since.
+
+**What the record does not hold.** Neither the class of a transport failure (a timeout is a
+`provider_unreachable` like any other) nor whether the outbox will try the event again. The SPA
+therefore shows the provider's HTTP status and code and the number of attempts, and says neither
+"timeout" nor "retrying".
 
 ### 4.6 What the rest of the system sees
 
@@ -1020,7 +1139,10 @@ again 120 s later, at most once (P8). A retry is not a ladder step and does not 
 Acknowledgements and snoozes made from a phone are rows of `phone_actions` (§8): who, when, `sms`
 or `voice`, which delivery, the minutes of a snooze. With the incident's `phone_deliveries` they
 make the **Phone** panel of the incident page: every attempt with its reason, every action with its
-actor. `GET /api/v1/incidents/{incidentID}/phone-activity` (`project:read`) returns both lists. The public
+actor. `GET /api/v1/incidents/{incidentID}/phone-activity` (`project:read`) returns both lists.
+The panel is rendered when the incident has at least one delivery or action, or when
+`telephony_enabled` is true (§4.2); an instance that does not use telephony sees no empty panel on
+every incident page. The public
 status page, the incident timeline, the feeds, webhooks and subscriber mail carry none of it (D22,
 P19).
 
@@ -1046,7 +1168,8 @@ the operator opts in). At 100 % phone delivery for that scope stops with reason 
   delivery's `created_at` (UTC), not of the callback, and is **unconditional** — the minutes were
   spoken, so it is not refused for exceeding the limit; `used` never goes below zero. Without
   callbacks (no `public_base_url`) a call counts one minute — the settings say so beside the quota.
-- **What else counts.** Verification codes of users and the instance's test SMS count against the
+- **What else counts.** A verification code spoken by a call (§4.2) counts as one **call**, in
+  the scope its SMS would have counted in. Verification codes of users and the instance's test SMS count against the
   **instance** SMS quota; channel-number verification and a project override's test SMS (§6.5)
   against the project's. A reply to an inbound SMS counts against the scope of the route key the
   request arrived on (§5.1): the instance's, or the project's when the project has its own
@@ -1070,7 +1193,8 @@ times.
   Counting only finished rows would let every parallel worker take the last slot (P13). A call
   that ends `provider_unreachable` frees its slot.
 - "Per incident" needs an incident. A delivery for a monitor whose incident is not found yet (D32)
-  is counted against the **monitor**; one without any subject of that kind (a burn alert) only
+  is counted against the **monitor**; a service's health or recovery alert whose incident is not
+  found, against the **service**; one without any subject of that kind (a burn alert) only
   against the per-number limit.
 - In FR-041a there is no fallback channel: a storm-limited delivery is recorded, counted in the
   metric and shown in the Phone panel, and that is all (D26).
@@ -1158,7 +1282,7 @@ Marked with the part that needs it.
   monitor_id NULL, monitor_seq bigint NULL, service_id NULL, user_id NULL, number_hash,
   number_masked, kind sms|voice,
   alert_kind, reason, notes, provider_status NULL, provider_code NULL, provider_ref NULL, segments,
-  attempts, created_at, updated_at)`, and (b) `ack_code NULL`, `ack_open boolean NOT NULL DEFAULT
+  attempts, service_state NULL, escalation_step int NULL, created_at, updated_at)`, and (b) `ack_code NULL`, `ack_open boolean NOT NULL DEFAULT
   false`, `callback_status NULL`, `duration_s NULL`, `retry_at NULL`, `retry_claimed_at NULL`, `retry_of uuid NULL UNIQUE`,
   and (c) `fallback_status`. Retention 90 days. Indexes: unique `(outbox_event_id, channel_id)
   WHERE outbox_event_id IS NOT NULL` (D33) — `outbox_event_id` is a plain uuid, not a foreign key;
@@ -1201,13 +1325,13 @@ page's request contracts); the new request bodies need a registry of their own b
 
 | Part | Method and path | Permission | Notes |
 | --- | --- | --- | --- |
-| a | `GET`, `PUT /api/v1/settings/telephony` | global admin | secrets as `*_set` booleans; blank keeps |
+| a | `GET`, `PUT /api/v1/settings/telephony` | global admin | secrets as `*_set` booleans; blank keeps; `headers_clear`; `encryption_key_configured` on read; 409 with `services_without_route` unless `confirm_unroutable` (§4.1) |
 | a | `POST /api/v1/settings/telephony/test-sms` | global admin | to the caller's verified number |
-| a | `PUT`, `DELETE /api/v1/me/phone`; `POST /api/v1/me/phone/verify` | signed-in human | |
+| a | `PUT`, `DELETE /api/v1/me/phone`; `POST /api/v1/me/phone/verify`; `POST /api/v1/me/phone/verify/send` | signed-in human | `verify/send`: a new code to the stored number; `via: sms \| voice` on every send of a code (§4.2) |
 | a | `PATCH /api/v1/me/phone/preferences` | signed-in human | language (a); quiet hours (c) |
-| a | `GET /api/v1/me` | — | gains `phone: { number_masked, verified, language }`; `quiet_hours` from (c) |
+| a | `GET /api/v1/me` | — | gains `phone: { number_masked, verified, language }`, `telephony_enabled`, `telephony_can_call` and `telephony_voice_language`; `quiet_hours` from (c) |
 | a | `POST /api/v1/projects/{projectID}/notification-channels`; `PATCH`, `DELETE /api/v1/notification-channels/{channelID}` | D28 | the typed fields of §4.3 |
-| a | `POST /api/v1/notification-channels/{channelID}/verify/send`; `POST /api/v1/notification-channels/{channelID}/verify` | `project:manage` | `number` mode |
+| a | `POST /api/v1/notification-channels/{channelID}/verify/send`; `POST /api/v1/notification-channels/{channelID}/verify` | `project:manage` | `number` mode; `via` on the send (§4.2) |
 | a | `GET /api/v1/projects/{projectID}/phone-recipients` | `project:write` | §4.3 |
 | a | `GET /api/v1/notification-channels/{channelID}/phone-deliveries` | `project:read` | last 50 |
 | a | `GET /api/v1/incidents/{incidentID}/phone-activity` | `project:read` | deliveries; actions from (b) |
@@ -1241,7 +1365,8 @@ SPA — **a mock must be approved before any frontend code**; one mock per part:
    state, "not a route" with its reason, the warning when it is a service's only route; (c) the
    fallback channel.
 4. (a) Incident page: the **Phone** panel (§5.5); (b) acknowledgements and snoozes in it.
-5. (a) `/i/:ref`: the redirect, and what a signed-in user without access to the incident sees.
+5. (a) `/i/:ref`: the redirect, what a signed-in user without access to the incident sees, and the
+   return to the link after an SSO sign-in (D21).
 6. (c) Project settings → Telephony: the override, its test SMS, the project's usage.
 
 Metrics — labels are low-cardinality by rule (`internal/metrics/metrics.go`), so no project id is
@@ -1334,8 +1459,11 @@ that accepts outbound messages and calls and can send **signed** inbound request
 | a | Outbox — monitor race | DOWN delivered before the reconciler opens the incident, and after: same send, link present only in the second, `no_incident_ref` in the first; reservation and incident opening run concurrently on PostgreSQL in both orders: the row always ends with the incident's id; a row of an earlier outage and a burn-alert row of the same monitor are not attached; recovery delivered before and after the reconciler resolves: the same incident linked; a recovery with only an older resolved incident: no link, and no note when `auto_incident` is off; the stored event's payload bytes unchanged | P21, P14 |
 | a | Suppression | the P2 table, both channel types | P2 |
 | a | Storm guard | N concurrent deliveries to one number at the limit, on PostgreSQL under `-race`: exactly the allowed number of provider calls; per-incident and per-number limits; the monitor-as-subject case | P13 |
-| a | API | D28's matrix, create and update; `number` channel created disabled and unenablable before verification; number change clears it; nothing but a verification code is sent to an unverified number; the recipients endpoint for an editor and an admin; by-ref 404 before 403; no response carries a number; the audit rows of a phone channel's writes and none for a Slack channel's; deleting a user disables their channels with the reason | P1, P3, P22 |
-| a | Settings | secrets kept on a blank write; refusal without the at-rest key; no YAML seed; `cerbix reencrypt` covers the new ciphertexts and recomputes hashes; between the key change and the reencrypt a number is still matched and still unique | P22 |
+| a | API | D28's matrix, create and update; `number` channel created disabled and unenablable before verification; number change clears it; nothing but a verification code is sent to an unverified number; the recipients endpoint for an editor and an admin; by-ref 404 before 403; no response carries a number; the audit rows of a phone channel's writes and none for a Slack channel's; deleting a user disables their channels with the reason; `telephony_enabled` on `GET /api/v1/me`; (SPA) the Phone panel absent with telephony off and no deliveries; an SSO sign-in started from `/i/:ref` returns to it, and an off-site return address is refused | P1, P3, P22 |
+| a | Settings | secrets kept on a blank write; `headers_clear` removes the stored headers and is refused together with new ones; `encryption_key_configured` on read; a save that would leave a service without a route answers 409 with the list and changes nothing, and is saved with `confirm_unroutable`; refusal without the at-rest key; no YAML seed; `cerbix reencrypt` covers the new ciphertexts and recomputes hashes; between the key change and the reencrypt a number is still matched and still unique | P22 |
+| a | API — what the SPA draws | a channel read by a viewer carries `recipient_display_name` and no email, also for a recipient without access, and `null` after the user is deleted; `only_route_for` agrees with the route predicate for a channel that is, is not and stops being a service's only route; a delivery carries its subject, `service_state`, `escalation_step` and the recipient's name, and `subject: null` after the monitor is deleted; a `storm_limited` row names its limit in `notes` for each of the two limits; `telephony_voice_language` on `GET /api/v1/me`; `verify/send` sends to the stored number under the limits of the first send and answers 409 without a number or once verified | P3 |
+| a | Code review of the backend | a `voice` channel under `twilio` with a Messaging Service SID: refused at creation and enabling, `deliverable` false with the reason, not a route in both predicates, in the 409 of the settings save and at send; a token whose list is only `project:manage` creates, updates and deletes a `number` channel; the leader's stale pass against a cascading delete of a channel, a project and an organization: no deadlock, no 500; an event with a slow text channel and a phone channel: the call is placed within the first attempt; the hourly code limit across several `number` channels of one sender; no code to a verified channel; a code spent by 5 attempts does not hold a number; a retried delivery carries the second attempt's person, number and notes; a malformed id in the channel and incident routes answers 404; the incident's phone activity oldest first; `transport_class` on the test SMS for each class | P4, P5, P7, P13, P16, P20 |
+| a | Verification by a call | `via: voice` on each of the three sends: one call placed, no SMS, the code spoken twice digit by digit and no `<Gather>`; the code verifies as an SMS code does; a code by SMS and a code by a call spend one hourly and one daily allowance; refused with `voice_unsupported_by_provider` under `generic_http` and under `twilio` with a Messaging Service SID, with no code stored and no call; the person's language, then the instance's; no `phone_deliveries` row and no storm count; an unknown `via` is 400; `telephony_can_call` on `GET /api/v1/me` in both states and under a failed read; the number never in a log line of a failed call | P1, P3, P9 |
 | a | Store — `ref` | the default never returns a value in use; an insert that does not name the column succeeds, through `createIncident` and through `OpenServiceIncidentTx` | — |
 | a | Regression | a project without phone channels through an outage with a ladder: the P14 comparison, captured before the change and compared after | P14 |
 | b | Inbound | Twilio's published signature vectors; unknown key, inactive configuration and bad signature all 403 with no row touched; the URL built from `public_base_url` behind a rewritten `Host`; form parsing and the size limit; TwiML content type of every answer | P10 |
@@ -1479,3 +1607,102 @@ the monitor-wide rule of §5.2), and no retry for a `ref` collision (the two ins
 `incidents` have four callers, each with a retry above it; a failed evaluator batch rolls back
 whole and is recomputed on the next pass). One note for the builder, now in D32: the lock and the
 attachment belong to a monitor's auto-incident only.
+
+**Mock of FR-041a (2026-11-17, `docs/design/mock-phone-alerts-a.html`): approved by the owner.**
+The builder drew the five surfaces of part (a) and listed 23 decisions; the owner approved the
+mock. Seventeen decisions stand as drawn. Six needed something the specification did not have,
+and revision 6 adds it:
+
+| Mock decision | Resolution |
+| --- | --- |
+| 5 — stored gateway headers cannot be removed | `generic_http.headers_clear` (§4.1) |
+| 6 — the missing at-rest key is visible only as a refused save | `encryption_key_configured` on the settings read (§4.1) |
+| 7 — no way to list the services a change leaves without a route | the save answers 409 with the list unless confirmed (§4.1) |
+| 8 — a non-admin learns that telephony is off only from a refusal | `telephony_enabled` on `GET /api/v1/me` (§4.2) |
+| 16 — the Phone panel shown on every incident | shown with deliveries or with telephony on (§5.5) |
+| 19 — SSO login loses the return address | fixed in FR-041a (D21) |
+
+**SPA plan of FR-041a (2026-11-18): nine points, decided by the owner.** With the backend built
+(branch `phone-alerts`, `8ab52bd`), the builder planned the SPA against the approved mock and
+stopped: the mock shows things the API does not return. The owner took the builder's proposal on
+every point, and revision 7 records it. Nothing here changes a decision; the additions are read
+fields, one endpoint and two columns of a migration that is not merged yet.
+
+| Point | Resolution |
+| --- | --- |
+| 1 — the mock names the recipient in the channel list; the API returns only an id | `recipient_display_name` on the channel, name only, for every reader of the channel (§4.3) |
+| 2 — a delivery names no monitor, service, state, step or person | `subject`, `service_state`, `escalation_step`, `recipient_display_name` on a delivery (§4.5, §8) |
+| 3 — `storm_limited` does not say which limit | the limit in `notes`; the value is not shown (§4.5) |
+| 4 — the mock says "timeout", "within 5 s" and "retrying" | not recorded and not shown on a delivery: HTTP status, code and attempts only (§4.5). Revision 8 restores the class of a transport failure for the **test SMS** alone, whose answer has it (§4.1) |
+| 5 — the only-route warning has nothing to read | `only_route_for` on the channel, computed by the route predicate (§4.3) |
+| 6 — the instance's voice language is visible to a global admin only | `telephony_voice_language` on `GET /api/v1/me` (§4.2) |
+| 7 — no way to send a new code after a reload | `POST /api/v1/me/phone/verify/send` (§4.2) |
+| 8 — the mock names the placeholder in a template error | the server's sentence is shown as it is; no second check in the SPA |
+| 9 — answers the mock has no text for (unreadable secrets, 501/502/503 on a code send, the `reason`s of a refused number or recipient, a refused toggle, `deliverable.reason: disabled`) | the server's sentence under the action that failed, no new layout; `disabled` needs no mark beside the toggle |
+
+Where the mock and this table disagree, the table holds; the mock is not redrawn. The owner also
+allows one edit of this document at the closing of the iteration, as with FR-042: the STATUS line
+saying that FR-041a is implemented and FR-041b and FR-041c are not.
+
+**External code review of the FR-041a backend (2026-11-18, branch `phone-alerts` at `8ab52bd`):
+CHANGES REQUIRED, P0 0 / P1 3 / P2 9 / P3 4.** All sixteen findings are accepted; four proposals
+inside them are not taken. The owner agreed to the three that change behaviour (P1-1, P2-3, P3-3).
+
+| Finding | Disposition |
+| --- | --- |
+| P1-1 — a `voice` channel counts as a route while Twilio's `from` is a Messaging Service SID, and every call is refused | **Accepted.** D3 and D31 rule 1: one condition, "the provider can place calls" |
+| P1-2 — a token whose list is only `project:manage` is refused on a `number` channel's create, update and delete | **Accepted.** The code against D28 as written; no change here |
+| P1-3 — the leader's stale pass can deadlock with a cascading delete, which then answers 500 | **Accepted:** the pass skips locked rows, `phone_deliveries` gets an index on `project_id`, the purge works in batches. **Not taken:** composite foreign keys (a schema change of its own) and an index on `created_at` (a daily purge of a small table) |
+| P2-1 — text channels spend the event's time before the phone ones | **Accepted.** The phone half runs beside the text half, not after it. What remains is to be judged at the confirming pass: an event retried for an unreachable provider is delivered to its text channels again |
+| P2-2 — a settings save with a blank secret during `cerbix reencrypt` loses the re-encryption, exit 0 | **Accepted.** |
+| P2-3 — the hourly code limit is per channel, so `number` channels spend a stranger's daily allowance; a verified channel can be sent codes | **Accepted** for both, §4.2. **Not taken:** refusing a channel code while another user's verification of that number is running — the owner accepted that residual risk on 2026-11-18 |
+| P2-4 — a code spent by 5 attempts still holds the number | **Accepted.** §4.2 |
+| P2-5 — the verification lock takes one key's hash; a channel's re-hash moves another subject's code | **Accepted.** |
+| P2-6 — a retried row keeps the first attempt's person and notes | **Accepted.** |
+| P2-7 — a failed phone read is reported as a missing recipient; a service alert without an incident misses `no_incident_ref` and the per-incident limit | **Accepted.** The per-incident limit falls back to the service as it does to the monitor (§6.2) |
+| P2-8 — a code send or test SMS on another replica uses settings up to 30 s old | **Accepted.** |
+| P2-9 — a malformed id answers 500; edge cases of the channel PATCH | **Accepted.** |
+| P3-1 — a draft `generic_http` template blocks saving another provider | **Accepted.** |
+| P3-2 — the incident's phone activity is newest first, the mock oldest first | **Accepted.** Oldest first for the incident; the channel's last 50 stay newest first |
+| P3-3 — the test SMS drops the class of a transport failure | **Accepted.** §4.1; amends point 4 of the SPA plan above |
+| P3-4 — OpenAPI answers missing; a delivery to a channel deleted meanwhile fails the event | **Accepted.** |
+
+**Confirming code review pass (2026-11-18, branch `phone-alerts` at `e8367eb`, range
+`8ab52bd..e8367eb`): APPROVED, P0 0 / P1 0 / P2 0 / P3 0.** All sixteen findings are closed, each
+with a test the reviewer saw fail without its fix; the code of revisions 7 and 8 and migration
+00120 with its Down, in both storage modes, raised nothing new. Two questions were put to the
+reviewer and answered:
+
+- **Re-hashing the codes of those who no longer hold the number** (the builder's reading of P2-5)
+  is safe: a live holder not yet re-encrypted keeps its old hash, a former holder's code is spent,
+  superseded or ownerless, and the daily limit keeps counting each row once.
+- **The remainder of P2-1** is a known limitation, not a defect of part (a): an event retried
+  because the telephony provider was unreachable is delivered to its text channels again, exactly
+  as an event retried for one unanswering text channel always was. Phone channels do not repeat
+  (D33). Closing it means a per-channel delivery record for text channels — a change of the outbox
+  for every project, outside FR-041a; the runbook and the changelog say so.
+
+Not covered by either pass: a live provider, and the SPA.
+
+**Verification by a call (2026-11-18): asked for by the owner.** Trying the provider against real
+numbers showed a case the specification had no answer to: calls to a country were delivered while
+SMS to it was not available, so a person there could be rung but could never verify the number to
+be rung on. The owner chose to add the code by a call over switching that country's SMS on for the
+codes alone. Revision 9 adds `via` to the three sends of a code and `telephony_can_call` to
+`GET /api/v1/me` (§4.2), and nothing else: one code, the same limits, no fallback between the two
+ways, no test call. The SPA gains one secondary action beside each "send code" — to be called with
+the code instead — shown only while the instance can place calls; the mock is not redrawn for it.
+Who gets SMS and who gets calls stays what it was: the channels created for each person (§4.3).
+
+**Third code review pass (2026-11-18, branch `phone-alerts` at `aefb9c1`, range
+`e8367eb..aefb9c1`): APPROVED, P0 0 / P1 0 / P2 0 / P3 1.** It covered what the two earlier passes
+did not: the code of revision 9, the three backend edits made after the second pass, the SPA
+against this specification and the mock, each deviation from the mock the iteration report lists,
+the browser tests with their provider stub, and the iteration's documents. The one finding is in
+the documents — the iteration report, the status and the traceability row still cite the test
+count and the commits as they were before the owner's last three edits (a Remove action for an
+unverified number, one wording for a recipient with no name, the developer guide) — and is
+corrected when the iteration is closed. Before this pass the owner settled what the builder had
+left open: an unverified number can be removed from Account → Phone, with phone alerts on or off,
+which the mock does not draw; the Telephony screen's wording for a Messaging Service stays as
+built. Not covered by any pass: a live provider.

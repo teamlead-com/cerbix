@@ -11,12 +11,16 @@ import (
 
 // ReencryptSecrets rewrites EVERY stored secret under the current primary key:
 // webhook signing secrets, notification-channel config, the OIDC client secret,
-// the instance SMTP password, monitor config secrets, and user TOTP secrets are
-// each read (decrypted with the keyring, which includes previous keys) and written
-// back (encrypted with the primary). Run it after adding a new primary key and
-// moving the old one to previous_keys; afterwards the old key can be dropped. It is
-// a no-op when encryption is disabled. Returns the number of webhooks and channels
-// rewritten (the other secret-bearing columns are covered but not separately counted).
+// the instance SMTP password, the telephony provider secrets, users' phone numbers (and
+// their keyed hashes), monitor config secrets,
+// and user TOTP secrets are each read (decrypted with the keyring, which includes
+// previous keys) and written back (encrypted with the primary). Run it after adding a
+// new primary key and moving the old one to previous_keys; afterwards the old key can
+// be dropped — once a run reports no skipped phone rehash. It is a no-op when encryption
+// is disabled. The result counts the webhooks and channels rewritten (the other
+// secret-bearing columns are covered but not separately counted) and the phone-number
+// collisions a rolling rotation left (FR-041a pre-review 2): settled, or skipped for the
+// next run.
 // BackfillPushTokenEnc encrypts any push_token_enc still stored as plaintext (seeded by
 // migration 00053 from the old plaintext column). Unlike ReencryptSecrets — which only runs
 // via the `cerbix reencrypt` command — this runs at startup (readiness-gated) so a normal
@@ -68,18 +72,34 @@ func (s *Store) BackfillPushTokenEnc(ctx context.Context) (int, error) {
 	return converted, nil
 }
 
-func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, err error) {
+// ReencryptResult is what ReencryptSecrets did.
+type ReencryptResult struct {
+	Webhooks, Channels int
+	// PhoneNumbersReleased counts users whose row yielded a number another user also held under
+	// another key; PhoneRehashesSkipped counts the rows left under their old key and hash because
+	// the collision could not be settled now (a row in use). Each is logged by user id.
+	PhoneNumbersReleased, PhoneRehashesSkipped int
+}
+
+func (s *Store) ReencryptSecrets(ctx context.Context) (ReencryptResult, error) {
+	var res ReencryptResult
+	var err error
+	res.Webhooks, res.Channels, res.PhoneNumbersReleased, res.PhoneRehashesSkipped, err = s.reencryptSecrets(ctx)
+	return res, err
+}
+
+func (s *Store) reencryptSecrets(ctx context.Context) (webhooks, channels, phonesReleased, phonesSkipped int, err error) {
 	if s.cipher == nil {
-		return 0, 0, nil
+		return 0, 0, 0, 0, nil
 	}
 	if err := s.reencryptProjectSecrets(ctx); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 
 	// Webhooks: read (decrypt) + rewrite (encrypt under primary).
 	whRows, err := s.pool.Query(ctx, `SELECT id, secret FROM webhooks`)
 	if err != nil {
-		return 0, 0, fmt.Errorf("store: scan webhooks for reencrypt: %w", err)
+		return 0, 0, 0, 0, fmt.Errorf("store: scan webhooks for reencrypt: %w", err)
 	}
 	type kv struct{ id, val string }
 	var whs []kv
@@ -87,26 +107,26 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		var r kv
 		if err := whRows.Scan(&r.id, &r.val); err != nil {
 			whRows.Close()
-			return 0, 0, fmt.Errorf("store: scan webhook: %w", err)
+			return 0, 0, 0, 0, fmt.Errorf("store: scan webhook: %w", err)
 		}
 		whs = append(whs, r)
 	}
 	whRows.Close()
 	if err := whRows.Err(); err != nil {
-		return 0, 0, fmt.Errorf("store: iterate webhooks: %w", err)
+		return 0, 0, 0, 0, fmt.Errorf("store: iterate webhooks: %w", err)
 	}
 	for _, r := range whs {
 		plain, derr := s.cipher.Decrypt(r.val)
 		if derr != nil {
-			return webhooks, 0, fmt.Errorf("store: decrypt webhook %s: %w", r.id, derr)
+			return webhooks, 0, 0, 0, fmt.Errorf("store: decrypt webhook %s: %w", r.id, derr)
 		}
 		enc, eerr := s.cipher.Encrypt(plain)
 		if eerr != nil {
-			return webhooks, 0, fmt.Errorf("store: encrypt webhook %s: %w", r.id, eerr)
+			return webhooks, 0, 0, 0, fmt.Errorf("store: encrypt webhook %s: %w", r.id, eerr)
 		}
 		ct, uerr := s.pool.Exec(ctx, `UPDATE webhooks SET secret = $2 WHERE id = $1 AND secret = $3`, r.id, enc, r.val)
 		if uerr != nil {
-			return webhooks, 0, fmt.Errorf("store: rewrite webhook %s: %w", r.id, uerr)
+			return webhooks, 0, 0, 0, fmt.Errorf("store: rewrite webhook %s: %w", r.id, uerr)
 		}
 		if ct.RowsAffected() == 1 {
 			webhooks++
@@ -116,7 +136,7 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 	// Channels: read (decrypt each config value) + rewrite (encrypt under primary).
 	chRows, err := s.pool.Query(ctx, `SELECT id, config FROM notification_channels`)
 	if err != nil {
-		return webhooks, 0, fmt.Errorf("store: scan channels for reencrypt: %w", err)
+		return webhooks, 0, 0, 0, fmt.Errorf("store: scan channels for reencrypt: %w", err)
 	}
 	type chrow struct {
 		id  string
@@ -127,40 +147,40 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		var r chrow
 		if err := chRows.Scan(&r.id, &r.cfg); err != nil {
 			chRows.Close()
-			return webhooks, 0, fmt.Errorf("store: scan channel: %w", err)
+			return webhooks, 0, 0, 0, fmt.Errorf("store: scan channel: %w", err)
 		}
 		chs = append(chs, r)
 	}
 	chRows.Close()
 	if err := chRows.Err(); err != nil {
-		return webhooks, 0, fmt.Errorf("store: iterate channels: %w", err)
+		return webhooks, 0, 0, 0, fmt.Errorf("store: iterate channels: %w", err)
 	}
 	for _, r := range chs {
 		cfg := map[string]string{}
 		if len(r.cfg) > 0 {
 			if uerr := json.Unmarshal(r.cfg, &cfg); uerr != nil {
-				return webhooks, channels, fmt.Errorf("store: decode channel %s config: %w", r.id, uerr)
+				return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: decode channel %s config: %w", r.id, uerr)
 			}
 		}
 		enc := make(map[string]string, len(cfg))
 		for k, v := range cfg {
 			plain, derr := s.cipher.Decrypt(v)
 			if derr != nil {
-				return webhooks, channels, fmt.Errorf("store: decrypt channel %s %q: %w", r.id, k, derr)
+				return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: decrypt channel %s %q: %w", r.id, k, derr)
 			}
 			ev, eerr := s.cipher.Encrypt(plain)
 			if eerr != nil {
-				return webhooks, channels, fmt.Errorf("store: encrypt channel %s %q: %w", r.id, k, eerr)
+				return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: encrypt channel %s %q: %w", r.id, k, eerr)
 			}
 			enc[k] = ev
 		}
 		out, merr := json.Marshal(enc)
 		if merr != nil {
-			return webhooks, channels, fmt.Errorf("store: encode channel %s config: %w", r.id, merr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: encode channel %s config: %w", r.id, merr)
 		}
 		ct, uerr := s.pool.Exec(ctx, `UPDATE notification_channels SET config = $2 WHERE id = $1 AND config = $3::jsonb`, r.id, string(out), string(r.cfg))
 		if uerr != nil {
-			return webhooks, channels, fmt.Errorf("store: rewrite channel %s: %w", r.id, uerr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: rewrite channel %s: %w", r.id, uerr)
 		}
 		if ct.RowsAffected() == 1 {
 			channels++
@@ -174,17 +194,17 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 	if oerr == nil {
 		plain, derr := s.cipher.Decrypt(oidcSecret)
 		if derr != nil {
-			return webhooks, channels, fmt.Errorf("store: decrypt oidc client secret: %w", derr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: decrypt oidc client secret: %w", derr)
 		}
 		enc, eerr := s.cipher.Encrypt(plain)
 		if eerr != nil {
-			return webhooks, channels, fmt.Errorf("store: encrypt oidc client secret: %w", eerr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: encrypt oidc client secret: %w", eerr)
 		}
 		if _, uerr := s.pool.Exec(ctx, `UPDATE oidc_settings SET client_secret = $1 WHERE id = true AND client_secret = $2`, enc, oidcSecret); uerr != nil {
-			return webhooks, channels, fmt.Errorf("store: rewrite oidc client secret: %w", uerr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: rewrite oidc client secret: %w", uerr)
 		}
 	} else if !noRows(oerr) {
-		return webhooks, channels, fmt.Errorf("store: scan oidc settings for reencrypt: %w", oerr)
+		return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: scan oidc settings for reencrypt: %w", oerr)
 	}
 
 	// Instance mail SMTP password (nested in the mail JSONB group).
@@ -195,25 +215,39 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 			P string `json:"smtp_password"`
 		}
 		if uerr := json.Unmarshal(mailRaw, &mail); uerr != nil {
-			return webhooks, channels, fmt.Errorf("store: decode mail settings for reencrypt: %w", uerr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: decode mail settings for reencrypt: %w", uerr)
 		}
 		if mail.P != "" {
 			plain, derr := s.cipher.Decrypt(mail.P)
 			if derr != nil {
-				return webhooks, channels, fmt.Errorf("store: decrypt mail password: %w", derr)
+				return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: decrypt mail password: %w", derr)
 			}
 			enc, eerr := s.cipher.Encrypt(plain)
 			if eerr != nil {
-				return webhooks, channels, fmt.Errorf("store: encrypt mail password: %w", eerr)
+				return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: encrypt mail password: %w", eerr)
 			}
 			if _, uerr := s.pool.Exec(ctx,
 				`UPDATE instance_settings SET mail = jsonb_set(mail, '{smtp_password}', to_jsonb($1::text))
 				  WHERE id = true AND mail = $2::jsonb`, enc, string(mailRaw)); uerr != nil {
-				return webhooks, channels, fmt.Errorf("store: rewrite mail password: %w", uerr)
+				return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: rewrite mail password: %w", uerr)
 			}
 		}
 	} else if merr != nil && !noRows(merr) {
-		return webhooks, channels, fmt.Errorf("store: scan mail settings for reencrypt: %w", merr)
+		return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: scan mail settings for reencrypt: %w", merr)
+	}
+
+	// Telephony provider secrets (FR-041a D29): AAD-bound, rewritten with the group document as CAS.
+	if err := s.reencryptTelephonySecrets(ctx); err != nil {
+		return webhooks, channels, phonesReleased, phonesSkipped, err
+	}
+
+	// Users' phone numbers (FR-041a D35): ciphertext rewritten and keyed hash recomputed.
+	if phonesReleased, phonesSkipped, err = s.reencryptUserPhones(ctx); err != nil {
+		return webhooks, channels, phonesReleased, phonesSkipped, err
+	}
+	// Phone channels' own numbers (FR-041a D35): the same, bound to the channel.
+	if err := s.reencryptChannelNumbers(ctx); err != nil {
+		return webhooks, channels, phonesReleased, phonesSkipped, err
 	}
 
 	// Monitors: only the values in the encrypted-at-rest classification are ciphertext
@@ -223,7 +257,7 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 	// that from the start and the code did not do it.
 	monRows, err := s.pool.Query(ctx, `SELECT id, config FROM monitors`)
 	if err != nil {
-		return webhooks, channels, fmt.Errorf("store: scan monitors for reencrypt: %w", err)
+		return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: scan monitors for reencrypt: %w", err)
 	}
 	type monrow struct {
 		id  string
@@ -234,13 +268,13 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		var r monrow
 		if err := monRows.Scan(&r.id, &r.cfg); err != nil {
 			monRows.Close()
-			return webhooks, channels, fmt.Errorf("store: scan monitor: %w", err)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: scan monitor: %w", err)
 		}
 		mons = append(mons, r)
 	}
 	monRows.Close()
 	if err := monRows.Err(); err != nil {
-		return webhooks, channels, fmt.Errorf("store: iterate monitors: %w", err)
+		return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: iterate monitors: %w", err)
 	}
 	for _, r := range mons {
 		if len(r.cfg) == 0 {
@@ -248,7 +282,7 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		}
 		cfg := map[string]string{}
 		if uerr := json.Unmarshal(r.cfg, &cfg); uerr != nil {
-			return webhooks, channels, fmt.Errorf("store: decode monitor %s config: %w", r.id, uerr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: decode monitor %s config: %w", r.id, uerr)
 		}
 		changed := false
 		for k, v := range cfg {
@@ -257,11 +291,11 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 			}
 			plain, derr := s.cipher.Decrypt(v)
 			if derr != nil {
-				return webhooks, channels, fmt.Errorf("store: decrypt monitor %s %q: %w", r.id, k, derr)
+				return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: decrypt monitor %s %q: %w", r.id, k, derr)
 			}
 			ev, eerr := s.cipher.Encrypt(plain)
 			if eerr != nil {
-				return webhooks, channels, fmt.Errorf("store: encrypt monitor %s %q: %w", r.id, k, eerr)
+				return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: encrypt monitor %s %q: %w", r.id, k, eerr)
 			}
 			cfg[k] = ev
 			changed = true
@@ -271,10 +305,10 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 		}
 		out, merr := json.Marshal(cfg)
 		if merr != nil {
-			return webhooks, channels, fmt.Errorf("store: encode monitor %s config: %w", r.id, merr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: encode monitor %s config: %w", r.id, merr)
 		}
 		if _, uerr := s.pool.Exec(ctx, `UPDATE monitors SET config = $2 WHERE id = $1 AND config = $3::jsonb`, r.id, string(out), string(r.cfg)); uerr != nil {
-			return webhooks, channels, fmt.Errorf("store: rewrite monitor %s: %w", r.id, uerr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: rewrite monitor %s: %w", r.id, uerr)
 		}
 	}
 
@@ -282,32 +316,32 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 	// key would lock out every 2FA user once the old key is dropped.
 	totpRows, err := s.pool.Query(ctx, `SELECT id, totp_secret FROM users WHERE totp_secret <> ''`)
 	if err != nil {
-		return webhooks, channels, fmt.Errorf("store: scan totp secrets for reencrypt: %w", err)
+		return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: scan totp secrets for reencrypt: %w", err)
 	}
 	var totps []kv // reuses the {id,val} type declared for webhooks above
 	for totpRows.Next() {
 		var r kv
 		if err := totpRows.Scan(&r.id, &r.val); err != nil {
 			totpRows.Close()
-			return webhooks, channels, fmt.Errorf("store: scan totp secret: %w", err)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: scan totp secret: %w", err)
 		}
 		totps = append(totps, r)
 	}
 	totpRows.Close()
 	if err := totpRows.Err(); err != nil {
-		return webhooks, channels, fmt.Errorf("store: iterate totp secrets: %w", err)
+		return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: iterate totp secrets: %w", err)
 	}
 	for _, r := range totps {
 		plain, derr := s.cipher.Decrypt(r.val)
 		if derr != nil {
-			return webhooks, channels, fmt.Errorf("store: decrypt totp secret %s: %w", r.id, derr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: decrypt totp secret %s: %w", r.id, derr)
 		}
 		enc, eerr := s.cipher.Encrypt(plain)
 		if eerr != nil {
-			return webhooks, channels, fmt.Errorf("store: encrypt totp secret %s: %w", r.id, eerr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: encrypt totp secret %s: %w", r.id, eerr)
 		}
 		if _, uerr := s.pool.Exec(ctx, `UPDATE users SET totp_secret = $2 WHERE id = $1 AND totp_secret = $3`, r.id, enc, r.val); uerr != nil {
-			return webhooks, channels, fmt.Errorf("store: rewrite totp secret %s: %w", r.id, uerr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: rewrite totp secret %s: %w", r.id, uerr)
 		}
 	}
 
@@ -317,35 +351,35 @@ func (s *Store) ReencryptSecrets(ctx context.Context) (webhooks, channels int, e
 	// rotation for push endpoints.
 	ptRows, err := s.pool.Query(ctx, `SELECT id, push_token_enc FROM monitors WHERE push_token_enc IS NOT NULL`)
 	if err != nil {
-		return webhooks, channels, fmt.Errorf("store: scan push tokens for reencrypt: %w", err)
+		return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: scan push tokens for reencrypt: %w", err)
 	}
 	var pts []kv // reuses the {id,val} type declared for webhooks above
 	for ptRows.Next() {
 		var r kv
 		if err := ptRows.Scan(&r.id, &r.val); err != nil {
 			ptRows.Close()
-			return webhooks, channels, fmt.Errorf("store: scan push token: %w", err)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: scan push token: %w", err)
 		}
 		pts = append(pts, r)
 	}
 	ptRows.Close()
 	if err := ptRows.Err(); err != nil {
-		return webhooks, channels, fmt.Errorf("store: iterate push tokens: %w", err)
+		return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: iterate push tokens: %w", err)
 	}
 	for _, r := range pts {
 		plain, derr := s.cipher.Decrypt(r.val)
 		if derr != nil {
-			return webhooks, channels, fmt.Errorf("store: decrypt push token %s: %w", r.id, derr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: decrypt push token %s: %w", r.id, derr)
 		}
 		enc, eerr := s.cipher.Encrypt(plain)
 		if eerr != nil {
-			return webhooks, channels, fmt.Errorf("store: encrypt push token %s: %w", r.id, eerr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: encrypt push token %s: %w", r.id, eerr)
 		}
 		if _, uerr := s.pool.Exec(ctx, `UPDATE monitors SET push_token_enc = $2 WHERE id = $1 AND push_token_enc = $3`, r.id, enc, r.val); uerr != nil {
-			return webhooks, channels, fmt.Errorf("store: rewrite push token %s: %w", r.id, uerr)
+			return webhooks, channels, phonesReleased, phonesSkipped, fmt.Errorf("store: rewrite push token %s: %w", r.id, uerr)
 		}
 	}
-	return webhooks, channels, nil
+	return webhooks, channels, phonesReleased, phonesSkipped, nil
 }
 
 const (

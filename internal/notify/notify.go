@@ -38,7 +38,7 @@ type Store interface {
 
 // Dispatcher delivers a monitor transition to the monitor's channels.
 type Dispatcher struct {
-	store   Store
+	store   *dispatchStore // the Store, read without phone channels by the text paths (phone.go)
 	client  *http.Client
 	timeout time.Duration
 }
@@ -50,7 +50,7 @@ func New(store Store, client *http.Client) *Dispatcher {
 		// so a caller that passes nil never gets a laxer client than production.
 		client = &http.Client{Timeout: 10 * time.Second, CheckRedirect: prober.RefuseRedirects}
 	}
-	return &Dispatcher{store: store, client: client, timeout: 10 * time.Second}
+	return &Dispatcher{store: &dispatchStore{Store: store}, client: client, timeout: 10 * time.Second}
 }
 
 // Deliver sends the transition to every enabled channel linked to the monitor.

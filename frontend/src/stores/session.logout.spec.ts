@@ -45,6 +45,19 @@ describe("session.logout", () => {
     expect(assign).toHaveBeenCalledWith("https://idp.example/logout?x=1");
   });
 
+  it("drops the phone state with the user (FR-041a)", async () => {
+    answer(200, { redirect_to: "/" });
+    const s = useSession();
+    s.user = { id: "u1", email: "u@example.com" } as typeof s.user;
+    s.phone = { number_masked: "+90•••••6869", verified: true, language: null };
+    s.telephonyEnabled = true;
+    s.telephonyVoiceLanguage = "en-US";
+    await s.logout();
+    expect(s.phone).toBeNull();
+    expect(s.telephonyEnabled).toBe(false);
+    expect(s.telephonyVoiceLanguage).toBeNull();
+  });
+
   it("navigates to / when the server names no destination", async () => {
     answer(200, { redirect_to: "/" });
     await useSession().logout();

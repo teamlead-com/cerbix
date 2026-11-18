@@ -127,6 +127,15 @@ type fakeStore struct {
 	// changeCount answers CountServiceChanges; changeCountErr fails the sample.
 	changeCount    int64
 	changeCountErr error
+	// FR-041a's leader passes: what the stale sweep closes (or its failure), the calls of each pass,
+	// and the ages the two purges were handed.
+	phoneStale              []store.ClosedPhoneDelivery
+	phoneStaleErr           error
+	phoneStaleCloses        int32
+	phoneVerificationPurges int32
+	phoneDeliveryPurges     int32
+	phoneVerificationAge    time.Duration
+	phoneDeliveryAge        time.Duration
 }
 
 type staticCredentialRegions map[string]bool
@@ -577,6 +586,23 @@ func (f *fakeStore) DeleteExpiredSessions(context.Context) (int64, error) {
 }
 func (f *fakeStore) DeleteExpiredAuthFlows(context.Context) (int64, error) {
 	atomic.AddInt32(&f.flowPurges, 1)
+	return 0, nil
+}
+func (f *fakeStore) CloseStalePhoneDeliveries(context.Context) ([]store.ClosedPhoneDelivery, error) {
+	atomic.AddInt32(&f.phoneStaleCloses, 1)
+	if f.phoneStaleErr != nil {
+		return nil, f.phoneStaleErr
+	}
+	return append([]store.ClosedPhoneDelivery(nil), f.phoneStale...), nil
+}
+func (f *fakeStore) PurgePhoneVerifications(_ context.Context, olderThan time.Duration) (int, error) {
+	atomic.AddInt32(&f.phoneVerificationPurges, 1)
+	f.phoneVerificationAge = olderThan
+	return 0, nil
+}
+func (f *fakeStore) PurgePhoneDeliveries(_ context.Context, olderThan time.Duration) (int, error) {
+	atomic.AddInt32(&f.phoneDeliveryPurges, 1)
+	f.phoneDeliveryAge = olderThan
 	return 0, nil
 }
 func (f *fakeStore) PullQueueStats(context.Context) ([]metrics.PullStat, error) {

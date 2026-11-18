@@ -323,3 +323,27 @@ func TestNoReadRouteServesWhatTheAllowListOmitsOrAnotherTenantOwns(t *testing.T)
 		}
 	}
 }
+
+// FR-041a review P2-9: a malformed id in the channel and incident routes is an unknown id — 404, never
+// the 500 PostgreSQL's invalid-uuid error (22P02) used to become. On PostgreSQL, because a fake store
+// has no such error.
+func TestMalformedChannelAndIncidentIDsAnswer404(t *testing.T) {
+	w := newWorld(t)
+	as := withCookie(w.adminSess)
+	for _, c := range []struct {
+		method, path string
+		body         any
+	}{
+		{http.MethodPost, "/api/v1/notification-channels/not-a-uuid/verify/send", nil},
+		{http.MethodPost, "/api/v1/notification-channels/not-a-uuid/verify", map[string]string{"code": "123456"}},
+		{http.MethodGet, "/api/v1/notification-channels/not-a-uuid/phone-deliveries", nil},
+		{http.MethodPatch, "/api/v1/notification-channels/not-a-uuid", map[string]string{"name": "x"}},
+		{http.MethodDelete, "/api/v1/notification-channels/not-a-uuid", nil},
+		{http.MethodGet, "/api/v1/incidents/not-a-uuid/phone-activity", nil},
+		{http.MethodGet, "/api/v1/incidents/not-a-uuid", nil},
+	} {
+		if rec := w.send(c.method, c.path, c.body, as); rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s = %d, want 404 (%s)", c.method, c.path, rec.Code, rec.Body.String())
+		}
+	}
+}

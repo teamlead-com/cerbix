@@ -38,7 +38,34 @@ func (h *Handler) listIncidents(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "list_incidents", err)
 		return
 	}
+	// FR-041a D21: each item carries its short reference. domain.Incident does not (P14), so the
+	// list wraps it the way the detail does. A failed read leaves the references out — the list is
+	// still the list.
+	if len(incidents) > 0 {
+		ids := make([]string, len(incidents))
+		for i, inc := range incidents {
+			ids[i] = inc.ID
+		}
+		refs, err := h.store.IncidentRefs(r.Context(), ids)
+		if err != nil {
+			h.logEvent(r, "incident_refs_read_failed", "project_id", proj.ID, "error", err.Error())
+		}
+		items := make([]incidentListItem, len(incidents))
+		for i, inc := range incidents {
+			items[i] = incidentListItem{Incident: inc, Ref: refs[inc.ID]}
+		}
+		writeJSON(w, http.StatusOK, items)
+		return
+	}
 	writeJSON(w, http.StatusOK, incidents)
+}
+
+// incidentListItem is one row of the authenticated incident list: the incident and its short
+// reference (FR-041a D21). The reference is deliberately NOT a field of domain.Incident, which the
+// webhooks, the outbox payloads, the public projection and the feeds embed.
+type incidentListItem struct {
+	domain.Incident
+	Ref string `json:"ref,omitempty"`
 }
 
 // createIncident opens an incident with an opening timeline update (editor+).
@@ -136,6 +163,9 @@ type authedIncidentView struct {
 	// or unreadable; impact_basis_unavailable says which.
 	ImpactBasis            *domain.ImpactBasis `json:"impact_basis"`
 	ImpactBasisUnavailable bool                `json:"impact_basis_unavailable,omitempty"`
+	// Ref is the incident's short reference for the phone (FR-041a D21), absent only when the read
+	// failed. Not a field of domain.Incident, for the reason ImpactBasis is not.
+	Ref string `json:"ref,omitempty"`
 }
 
 // getIncident returns one incident with its impact links (authenticated detail
@@ -155,6 +185,11 @@ func (h *Handler) getIncident(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out := authedIncidentView{Incident: inc, Impacts: []domain.ServiceImpactLink{}}
+	if ref, err := h.store.IncidentRef(r.Context(), inc.ID); err != nil {
+		h.logEvent(r, "incident_ref_read_failed", "incident_id", inc.ID, "error", err.Error())
+	} else {
+		out.Ref = ref
+	}
 	// The incident itself must still render when the impact read fails — but the
 	// failure is DISCLOSED, not disguised as "no impacts" ([288] P1-4).
 	// Tenant-scoped at the store boundary on top of incidentAccess ([276] P0-1).

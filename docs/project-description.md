@@ -245,6 +245,27 @@ the upgrade keep their impact and never rise (migration 00119). Contract:
 [`func-incident-impact.md`](specs/func-incident-impact.md) revision 4, D-0282 — **DONE**, implemented in
 iter-0215 ([`status.md`](status.md)).
 
+## Phone alerts
+
+An alert that asks a person to act can ring their phone (**FR-041a**). Two channel types, `sms` and
+`voice`, deliver the alerts of the spec's D18 — a monitor down or recovered, a service alert or
+recovery, an escalation step, a burn alert — to a person's verified number or to a fixed number,
+through the instance's telephony provider: Twilio, or a generic HTTP gateway for SMS. Telephony is
+configured in the database only (Settings → Administration → Telephony, global admins) and is refused
+without the at-rest key. A number is confirmed by a six-digit code sent by SMS or spoken by a call,
+under per-person and per-number limits, and is kept as ciphertext, a keyed hash and a mask — never
+shown in full. A phone channel is a route only while it can deliver (D31 rule 1), so a service never
+counts an unverified or disabled phone as its way to page. Each delivery is reserved before the
+provider is called, bounded by a storm guard per incident and per number, and recorded for operators
+on the incident's Phone panel and in a channel's last 50 deliveries — never on a status page. Every
+incident has an eight-character reference, and `/i/<ref>`, the link in an SMS, opens it, through an SSO
+sign-in too. **NFR-034** (part a): a project without a phone channel delivers, suppresses and
+escalates exactly as before, and telephony credentials and phone numbers never appear in full in an
+API answer, a log line or a dispatch carrier. Acknowledge and snooze from the phone (FR-041b) and
+quotas, fallback channel and quiet hours (FR-041c) are not built. Contract:
+[`func-phone-alerts.md`](specs/func-phone-alerts.md) revision 9, D-0283 — **DONE** for part (a),
+implemented in iter-0216 ([`status.md`](status.md)).
+
 ## Reliability gate
 
 A deploy pipeline asks cerbix whether a release may go out and gets an answer it can branch on

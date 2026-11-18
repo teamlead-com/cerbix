@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -55,6 +56,12 @@ var ErrConflict = errors.New("store: conflict")
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// isDeadlockError reports a transaction Postgres aborted to break a deadlock (40P01).
+func isDeadlockError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "40P01"
 }
 
 // Pool sizing. Several long-lived connections are checked out for the whole
@@ -215,6 +222,13 @@ type Store struct {
 	// role that never wires the policy still write correct windows.
 	expectedRunRetentionDays int
 	expectedRunGapCap        int
+	// logger carries the few facts only the store can see and an operator must be told, such as
+	// a person's number changing hands (FR-041a). Nil logs nothing; see WithLogger.
+	logger *slog.Logger
+	// phoneClaimStep is a TEST-ONLY seam for FR-041a's concurrent number claims: when set,
+	// SetUserPhone calls it at named steps so a regression can hold two claims at the same point.
+	// Always nil in production.
+	phoneClaimStep func(userID, step string)
 }
 
 // WithExpectedRunPolicy sets the ledger's retention window and per-monitor gap cap. An
@@ -307,6 +321,21 @@ func (s *Store) WithResultRevisionMode(mode string) *Store {
 func (s *Store) WithCipher(c *secret.Cipher) *Store {
 	s.cipher = c
 	return s
+}
+
+// WithLogger gives the store a logger for the facts only it can see (FR-041a: a number changing
+// hands, a rotation that could not rehash one). Without one they are not logged.
+func (s *Store) WithLogger(l *slog.Logger) *Store {
+	s.logger = l
+	return s
+}
+
+// log is the store's logger, or one that discards.
+func (s *Store) log() *slog.Logger {
+	if s.logger == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return s.logger
 }
 
 // WithSecretsEnabled permits monitor writes to bind project-inventory references.
@@ -415,7 +444,7 @@ func (s *Store) TruncateAll(ctx context.Context) error {
 		return fmt.Errorf("store: refusing TruncateAll on non-test database %q (name must contain \"test\")", dbName)
 	}
 	_, err := s.pool.Exec(ctx,
-		`TRUNCATE instance_settings, oidc_settings, region_worker_alerts, escalation_policies, oncall_schedules, oncall_overrides, pull_jobs, pull_tests, agent_heartbeats, agent_tokens, outbox_events, heartbeats_daily, monitor_notifications, notification_channels, webhooks, api_tokens, components, status_pages, postmortems, incident_updates, incidents, sla_targets, maintenance_windows, heartbeats, monitors, sessions, auth_flows, memberships, projects, users, organizations RESTART IDENTITY CASCADE`)
+		`TRUNCATE instance_settings, phone_verifications, phone_deliveries, user_phones, oidc_settings, region_worker_alerts, escalation_policies, oncall_schedules, oncall_overrides, pull_jobs, pull_tests, agent_heartbeats, agent_tokens, outbox_events, heartbeats_daily, monitor_notifications, notification_channels, webhooks, api_tokens, components, status_pages, postmortems, incident_updates, incidents, sla_targets, maintenance_windows, heartbeats, monitors, sessions, auth_flows, memberships, projects, users, organizations RESTART IDENTITY CASCADE`)
 	if err != nil {
 		return fmt.Errorf("store: truncate all: %w", err)
 	}

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
@@ -10,7 +10,13 @@ import InstanceAuditPanel from "@/components/settings/InstanceAuditPanel.vue";
 import MembersPanel from "@/components/settings/MembersPanel.vue";
 import ProjectMembersPanel from "@/components/settings/ProjectMembersPanel.vue";
 import OrgDangerZonePanel from "@/components/settings/OrgDangerZonePanel.vue";
+import ChannelDeliveriesPanel from "@/components/settings/ChannelDeliveriesPanel.vue";
+import ChannelRouteChip from "@/components/settings/ChannelRouteChip.vue";
+import PhoneChannelForm from "@/components/settings/PhoneChannelForm.vue";
+import PhoneOnlyRouteWarning from "@/components/settings/PhoneOnlyRouteWarning.vue";
+import PhonePanel from "@/components/settings/PhonePanel.vue";
 import SecretsPanel from "@/components/settings/SecretsPanel.vue";
+import TelephonyPanel from "@/components/settings/TelephonyPanel.vue";
 import ProjectGatePolicy from "@/components/settings/ProjectGatePolicy.vue";
 import ProjectIncidentSettings from "@/components/settings/ProjectIncidentSettings.vue";
 import UsersPanel from "@/components/settings/UsersPanel.vue";
@@ -26,10 +32,22 @@ import { useBranding } from "@/stores/branding";
 import { useSession } from "@/stores/session";
 import { useWorkspace } from "@/stores/workspace";
 import { instantLabelShort, localInputZoneHint } from "@/lib/wallclock";
+import {
+  CHANNEL_TYPE_LABEL,
+  canHoldPhoneChannel,
+  channelRecipientLabel,
+  isPhoneChannel,
+  phoneErrorMessage,
+  phoneErrorReason,
+  routeChip,
+} from "@/lib/phone";
 import { isoInstant, localDatetimeInputValue } from "@/lib/datekeys";
 
 type Channel = components["schemas"]["NotificationChannel"];
 type ChannelType = NonNullable<Channel["type"]>;
+// The channel types whose fields are a `config` map. `sms` and `voice` are typed fields instead
+// (FR-041a §4.3) and are edited by PhoneChannelForm; `isPhoneChannel` narrows one from the other.
+type TextChannelType = Exclude<ChannelType, "sms" | "voice">;
 type ApiToken = components["schemas"]["ApiToken"];
 type Webhook = components["schemas"]["Webhook"];
 type Role = components["schemas"]["Role"];
@@ -55,6 +73,7 @@ type Tab =
   | "alerting"
   | "monitordefaults"
   | "email"
+  | "telephony"
   | "users"
   | "agenttokens"
   | "instanceaudit"
@@ -63,7 +82,8 @@ type Tab =
   | "webhooks"
   | "danger"
   | "orgdanger"
-  | "security";
+  | "security"
+  | "phone";
 const instanceTabs: { key: Tab; label: string; scope: string }[] = [
   { key: "users", label: "Users", scope: "instance" },
   { key: "authentication", label: "Authentication", scope: "instance" },
@@ -71,6 +91,8 @@ const instanceTabs: { key: Tab; label: string; scope: string }[] = [
   { key: "alerting", label: "Alerting", scope: "instance" },
   { key: "monitordefaults", label: "Monitor defaults", scope: "instance" },
   { key: "email", label: "Email", scope: "instance" },
+  // FR-041a §4.1 (mock §1): directly after Email; the panel loads itself.
+  { key: "telephony", label: "Telephony", scope: "instance" },
   { key: "agenttokens", label: "Agent tokens", scope: "instance" },
   { key: "instanceaudit", label: "Instance audit", scope: "instance" },
 ];
@@ -99,6 +121,8 @@ const tabs = computed<{ key: Tab; label: string; scope: string }[]>(() => [
     ? ([{ key: "orgdanger", label: "Danger zone", scope: "org" }] as { key: Tab; label: string; scope: string }[])
     : []),
   { key: "security", label: "Security", scope: "account" },
+  // FR-041a §4.2 (mock §2): right after Security, for every signed-in person — SSO accounts included.
+  { key: "phone", label: "Phone", scope: "account" },
 ]);
 const tab = ref<Tab>("channels");
 
@@ -409,14 +433,24 @@ const projectName = (id?: string | null) =>
 // ── Notification channels (project-scoped) ────────────────────────────────
 const channels = ref<Channel[]>([]);
 const channelsError = ref("");
-const channelTypes: { key: ChannelType; label: string }[] = [
+const textChannelTypes: { key: TextChannelType; label: string }[] = [
   { key: "webhook", label: "Webhook" },
   { key: "slack", label: "Slack" },
   { key: "telegram", label: "Telegram" },
   { key: "email", label: "Email" },
 ];
+// FR-041a mock 3f: with phone alerts off on the instance (`telephony_enabled` on /me), the two phone
+// types stay listed, disabled, with the reason in their label.
+const channelTypes = computed<{ key: ChannelType; label: string; disabled: boolean }[]>(() => [
+  ...textChannelTypes.map((t) => ({ ...t, disabled: false })),
+  ...(["sms", "voice"] as const).map((key) => ({
+    key,
+    label: session.telephonyEnabled ? CHANNEL_TYPE_LABEL[key] : `${CHANNEL_TYPE_LABEL[key]} — phone alerts are off`,
+    disabled: !session.telephonyEnabled,
+  })),
+]);
 // Config fields per channel type (mirrors internal/domain/notification.go Validate).
-const channelFields: Record<ChannelType, { key: string; label: string; placeholder?: string; optional?: boolean }[]> = {
+const channelFields: Record<TextChannelType, { key: string; label: string; placeholder?: string; optional?: boolean }[]> = {
   webhook: [{ key: "url", label: "URL", placeholder: "https://hooks.example/incoming" }],
   slack: [{ key: "url", label: "Slack webhook URL", placeholder: "https://hooks.slack.com/services/…" }],
   telegram: [
@@ -447,6 +481,23 @@ const channelForm = reactive<{ type: ChannelType; name: string; config: Record<s
 });
 const channelBusy = ref(false);
 const channelFormError = ref("");
+// The config fields of the picked type; none for a phone type, whose fields are typed.
+const channelTypeFields = computed(() => {
+  const t = channelForm.type;
+  return isPhoneChannel(t) ? [] : channelFields[t];
+});
+// FR-041a: the phone channel being edited (3d), and whether a new number channel's verification
+// steps (3b-2 / 3b-3) now fill the form in place of Type and Name.
+const phoneEditChannel = ref<Channel | null>(null);
+const phoneVerifying = ref(false);
+// The row's Verify (mock 3e): PhoneChannelForm opens on the 3b-2 steps of that existing channel.
+const phoneVerifyStart = ref(false);
+// The form above the channel list, which the row's Verify brings into view.
+const channelFormEl = ref<HTMLElement | null>(null);
+const phoneChannelType = computed(() => {
+  const t = channelForm.type;
+  return isPhoneChannel(t) ? t : null;
+});
 
 // Leaves `type` alone: the create form has always kept the last type picked, and an
 // edit sets it explicitly. Only the per-channel state is cleared.
@@ -455,6 +506,9 @@ function resetChannelForm() {
   channelForm.name = "";
   channelForm.config = {};
   channelFormError.value = "";
+  phoneEditChannel.value = null;
+  phoneVerifying.value = false;
+  phoneVerifyStart.value = false;
 }
 
 function toggleChannelAdd() {
@@ -464,23 +518,103 @@ function toggleChannelAdd() {
     return;
   }
   resetChannelForm();
+  // A kept phone type that phone alerts no longer allow would open on a disabled option (3f).
+  if (isPhoneChannel(channelForm.type) && !session.telephonyEnabled) channelForm.type = "webhook";
   showChannelAdd.value = true;
 }
 
 /** Opens the form on an existing channel: name and non-secret config prefilled,
- * secrets left blank because the server never sent them. */
+ * secrets left blank because the server never sent them. A phone channel (FR-041a §4.3) has no
+ * config: it opens PhoneChannelForm on the channel instead (mock 3d). */
 function startEditChannel(c: Channel) {
-  if (!c.id || !c.type) return;
+  const t = c.type;
+  if (!c.id || !t) return;
+  resetChannelForm();
+  channelEditId.value = c.id;
+  channelForm.type = t;
+  channelForm.name = c.name ?? "";
+  if (isPhoneChannel(t)) {
+    phoneEditChannel.value = c;
+  } else {
+    const cfg: Record<string, string> = {};
+    for (const f of channelFields[t]) {
+      cfg[f.key] = SECRET_CHANNEL_KEYS.has(f.key) ? "" : ((c.config?.[f.key] as string) ?? "");
+    }
+    channelForm.config = cfg;
+  }
+  showChannelAdd.value = true;
+}
+
+/** The row's Verify (3e): the verification steps of an existing number channel (3b-2), in the form
+ * above the table, without Type and Name — as after creating one. */
+function startVerifyChannel(c: Channel) {
+  if (!c.id || !isPhoneChannel(c.type)) return;
+  resetChannelForm();
   channelEditId.value = c.id;
   channelForm.type = c.type;
   channelForm.name = c.name ?? "";
-  const cfg: Record<string, string> = {};
-  for (const f of channelFields[c.type]) {
-    cfg[f.key] = SECRET_CHANNEL_KEYS.has(f.key) ? "" : ((c.config?.[f.key] as string) ?? "");
-  }
-  channelForm.config = cfg;
-  channelFormError.value = "";
+  phoneEditChannel.value = c;
+  phoneVerifying.value = true;
+  phoneVerifyStart.value = true;
   showChannelAdd.value = true;
+  void revealChannelForm();
+}
+
+/** Every Verify ends here, also when the same channel's steps are already open and nothing else on
+ * the screen would change (the owner's manual check, 2026-11-18): the form is scrolled into view and
+ * its first action takes the focus. */
+async function revealChannelForm() {
+  await nextTick();
+  const el = channelFormEl.value;
+  if (!el) return;
+  el.scrollIntoView?.({ block: "start" });
+  el.querySelector<HTMLElement>("button:not(:disabled)")?.focus({ preventScroll: true });
+}
+
+// ── FR-041a: PhoneChannelForm's answers ──
+function onPhoneCreated(ch: Channel) {
+  channels.value.push(ch);
+  // A number channel stays open on its verification steps (3b-2), which replace Type and Name; a
+  // person channel's form closes (PhoneChannelForm emits `cancel` right after).
+  if (ch.recipient === "number") phoneVerifying.value = true;
+}
+
+/** D28 on a row: whether this writer may edit, switch or delete the channel. Every text channel; a
+ * phone channel only for a project admin, or for the editor it phones (`canHoldPhoneChannel`) —
+ * the server refuses the rest with 403. */
+function canHoldChannel(c: Channel): boolean {
+  if (!canWriteChannels.value) return false;
+  return !isPhoneChannel(c.type) || canHoldPhoneChannel(c, { projectAdmin: canManageProject.value, selfUserId: session.user?.id });
+}
+/** Verify is offered on a number channel whose number is not confirmed, to whoever may send it a
+ * code: `POST …/verify/send` is project:manage (D28). */
+function canVerify(c: Channel): boolean {
+  return canWriteChannels.value && canManageProject.value && isPhoneChannel(c.type) && c.recipient === "number" && c.number_verified === false;
+}
+/** The tooltip of a phone row's locked switch (`disabled_reason`), or "" when it is not locked. */
+function lockTitle(c: Channel): string {
+  const chip = routeChip(c, { selfUserId: session.user?.id });
+  return chip.kind === "disabled" ? chip.unlock : "";
+}
+const recipientLabel = (c: Channel) => channelRecipientLabel(c, { selfUserId: session.user?.id });
+
+// A refused switch or delete on a phone row reads the server's sentence under that row (§14 point 9);
+// the list stays.
+const rowErrors = ref<Record<string, string>>({});
+// The channel whose deliveries are open under the table (mock 3g, decision 15).
+const deliveriesFor = ref<{ id: string; name: string } | null>(null);
+function openDeliveries(c: Channel) {
+  if (c.id) deliveriesFor.value = { id: c.id, name: c.name ?? "" };
+}
+
+function onPhoneSaved(ch: Channel) {
+  channels.value = channels.value.map((x) => (x.id === ch.id ? ch : x));
+  // The row changed under its sentence: a refusal it reported no longer describes it (review M-6).
+  if (ch.id && rowErrors.value[ch.id]) {
+    const { [ch.id]: _stale, ...rest } = rowErrors.value;
+    void _stale;
+    rowErrors.value = rest;
+  }
 }
 
 function cancelChannelForm() {
@@ -488,8 +622,9 @@ function cancelChannelForm() {
   resetChannelForm();
 }
 
-async function loadChannels() {
+async function loadChannels(opts: { keepRowErrors?: boolean } = {}) {
   channelsError.value = "";
+  if (!opts.keepRowErrors) rowErrors.value = {};
   if (!ws.projectId) {
     channels.value = [];
     channelsError.value = "Select a project to manage its notification channels.";
@@ -507,16 +642,17 @@ async function loadChannels() {
 }
 
 async function addChannel() {
-  if (!ws.projectId || channelBusy.value) return;
+  const t = channelForm.type;
+  if (!ws.projectId || channelBusy.value || isPhoneChannel(t)) return;
   channelBusy.value = true;
   channelFormError.value = "";
   const config: Record<string, string> = {};
-  for (const f of channelFields[channelForm.type]) {
+  for (const f of channelFields[t]) {
     const v = (channelForm.config[f.key] ?? "").trim();
     if (v) config[f.key] = v;
   }
   const body: components["schemas"]["CreateNotificationChannel"] = {
-    type: channelForm.type,
+    type: t,
     name: channelForm.name.trim(),
     config,
     enabled: true,
@@ -543,11 +679,12 @@ async function addChannel() {
  * be cleared. The type is not sent: it is not editable. */
 async function editChannel() {
   const id = channelEditId.value;
-  if (!id || channelBusy.value) return;
+  const t = channelForm.type;
+  if (!id || channelBusy.value || isPhoneChannel(t)) return;
   channelBusy.value = true;
   channelFormError.value = "";
   const config: Record<string, string> = {};
-  for (const f of channelFields[channelForm.type]) {
+  for (const f of channelFields[t]) {
     const v = (channelForm.config[f.key] ?? "").trim();
     if (SECRET_CHANNEL_KEYS.has(f.key) && !v) continue;
     config[f.key] = v;
@@ -576,10 +713,16 @@ function submitChannelForm() {
 
 async function deleteChannel(c: Channel) {
   if (!c.id || !confirm(`Delete channel "${c.name}"? Monitors linked to it stop notifying here.`)) return;
+  const id = c.id;
   const res = await api.DELETE("/api/v1/notification-channels/{channelID}", {
-    params: { path: { channelID: c.id } },
+    params: { path: { channelID: id } },
   });
-  if (!res.error) channels.value = channels.value.filter((x) => x.id !== c.id);
+  if (!res.error) {
+    channels.value = channels.value.filter((x) => x.id !== id);
+    if (deliveriesFor.value?.id === id) deliveriesFor.value = null;
+    return;
+  }
+  if (isPhoneChannel(c.type)) rowErrors.value = { ...rowErrors.value, [id]: phoneErrorMessage(res.error, "Could not delete the channel.") };
 }
 
 // ── API tokens (org-scoped) ───────────────────────────────────────────────
@@ -723,6 +866,7 @@ async function toggleWebhook(h: Webhook) {
 }
 
 async function toggleChannel(c: Channel) {
+  if (isPhoneChannel(c.type)) return togglePhoneChannel(c);
   const res = await api.PATCH("/api/v1/notification-channels/{channelID}", {
     params: { path: { channelID: c.id! } },
     body: { enabled: !c.enabled },
@@ -733,6 +877,36 @@ async function toggleChannel(c: Channel) {
     return;
   }
   c.enabled = res.data.enabled;
+}
+
+/** A phone row's switch (FR-041a): the answer carries the route state, so it replaces the row. A
+ * refusal (`telephony_disabled`, `number_unverified`, `voice_unsupported_by_provider`) reads the
+ * server's sentence under the row; `telephony_disabled` also re-reads /me and the list, whose
+ * route states it changed. */
+async function togglePhoneChannel(c: Channel) {
+  const id = c.id;
+  if (!id) return;
+  const { [id]: _cleared, ...rest } = rowErrors.value;
+  void _cleared;
+  rowErrors.value = rest;
+  try {
+    const res = await api.PATCH("/api/v1/notification-channels/{channelID}", {
+      params: { path: { channelID: id } },
+      body: { enabled: !c.enabled },
+    });
+    if (res.error || !res.data) {
+      rowErrors.value = { ...rowErrors.value, [id]: phoneErrorMessage(res.error, "Could not update the channel.") };
+      if (phoneErrorReason(res.error) === "telephony_disabled") {
+        void session.fetchMe();
+        await loadChannels({ keepRowErrors: true });
+      }
+      return;
+    }
+    const updated = res.data;
+    channels.value = channels.value.map((x) => (x.id === id ? updated : x));
+  } catch {
+    rowErrors.value = { ...rowErrors.value, [id]: "Could not update the channel." };
+  }
 }
 
 async function deleteWebhook(h: Webhook) {
@@ -928,6 +1102,10 @@ async function onProjectMembersSelfChanged() {
   }
   tab.value = tabs.value[0]?.key ?? "security";
 }
+// A panel's link to another settings tab (Telephony → Account → Phone): selected when the user has it.
+function openTab(key: string) {
+  if (tabs.value.some((t) => t.key === key)) tab.value = key as Tab;
+}
 // A tab can vanish under the user (project switch, role change): fall back to the first one.
 watch(tabs, (list) => {
   if (requestedTab && list.some((t) => t.key === requestedTab)) {
@@ -944,7 +1122,13 @@ watch(tab, () => {
 
 onMounted(load);
 watch(() => ws.orgId, load);
-watch(() => ws.projectId, () => tab.value === "channels" && loadChannels());
+watch(
+  () => ws.projectId,
+  () => {
+    deliveriesFor.value = null;
+    if (tab.value === "channels") void loadChannels();
+  },
+);
 watch(tab, loadActive);
 </script>
 
@@ -1000,13 +1184,19 @@ watch(tab, loadActive);
           <div class="text-[13px] text-ink-3">{{ ws.projectName }} · {{ channels.length }} channel(s)</div>
           <button v-if="canWriteChannels" type="button" class="h-[32px] rounded-sm bg-accent px-[13px] text-[13px] font-medium text-accent-ink hover:bg-accent-2" @click="toggleChannelAdd">Add channel</button>
         </div>
-        <div v-if="showChannelAdd && canWriteChannels" data-testid="channel-form" class="mb-5 flex flex-col gap-3 rounded border border-border bg-surface p-4 shadow-card">
-          <div v-if="isChannelEdit" class="text-[12.5px] text-ink-3">Editing <span class="font-medium text-ink">{{ channelForm.name || "channel" }}</span> — the type cannot be changed; a channel of another type is a new channel.</div>
-          <div class="grid grid-cols-[200px_1fr] gap-3 max-[720px]:grid-cols-1">
+        <div v-if="showChannelAdd && canWriteChannels" ref="channelFormEl" data-testid="channel-form" class="mb-5 flex flex-col gap-3 rounded border border-border bg-surface p-4 shadow-card">
+          <PhoneOnlyRouteWarning
+            v-if="phoneEditChannel && !phoneVerifyStart && (phoneEditChannel.only_route_for?.length ?? 0) > 0"
+            :services="phoneEditChannel.only_route_for ?? []"
+            :total="phoneEditChannel.only_route_for_total"
+          />
+          <div v-if="phoneEditChannel && !phoneVerifyStart" class="text-[12.5px] text-ink-3" data-testid="channel-edit-note">Editing <span class="font-medium text-ink">{{ phoneEditChannel.name }}</span> — the type and who it sends to cannot be changed; another kind of recipient is a new channel.</div>
+          <div v-else-if="isChannelEdit && !phoneEditChannel" class="text-[12.5px] text-ink-3" data-testid="channel-edit-note">Editing <span class="font-medium text-ink">{{ channelForm.name || "channel" }}</span> — the type cannot be changed; a channel of another type is a new channel.</div>
+          <div v-if="!phoneVerifying" class="grid grid-cols-[200px_1fr] gap-3 max-[720px]:grid-cols-1">
             <label class="flex flex-col gap-[6px]">
               <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">Type</span>
               <select v-model="channelForm.type" :disabled="isChannelEdit" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent disabled:opacity-60" data-testid="channel-type">
-                <option v-for="ct in channelTypes" :key="ct.key" :value="ct.key">{{ ct.label }}</option>
+                <option v-for="ct in channelTypes" :key="ct.key" :value="ct.key" :disabled="ct.disabled">{{ ct.label }}</option>
               </select>
             </label>
             <label class="flex flex-col gap-[6px]">
@@ -1014,8 +1204,22 @@ watch(tab, loadActive);
               <input v-model="channelForm.name" type="text" data-testid="channel-name" placeholder="e.g. oncall-slack" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
             </label>
           </div>
+          <PhoneChannelForm
+            v-if="phoneChannelType && ws.projectId"
+            :key="`${channelEditId ?? 'new'}${phoneVerifyStart ? ':verify' : ''}`"
+            :org-id="ws.orgId"
+            :project-id="ws.projectId"
+            :type="phoneChannelType"
+            :name="channelForm.name"
+            :channel="phoneEditChannel"
+            :verify="phoneVerifyStart"
+            @created="onPhoneCreated"
+            @saved="onPhoneSaved"
+            @cancel="cancelChannelForm"
+          />
+          <template v-else>
           <div class="grid grid-cols-2 gap-3 max-[720px]:grid-cols-1">
-            <label v-for="f in channelFields[channelForm.type]" :key="f.key" class="flex flex-col gap-[6px]">
+            <label v-for="f in channelTypeFields" :key="f.key" class="flex flex-col gap-[6px]">
               <span class="text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-3">{{ f.label }}<span v-if="f.optional" class="ml-1 normal-case text-ink-3/70">(optional)</span></span>
               <input v-model="channelForm.config[f.key]" type="text" :data-testid="`channel-field-${f.key}`" :placeholder="isChannelEdit && SECRET_CHANNEL_KEYS.has(f.key) ? 'unchanged — type a new value to replace it' : f.placeholder" class="rounded-sm border border-border bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
             </label>
@@ -1025,6 +1229,7 @@ watch(tab, loadActive);
             <button type="button" :disabled="!channelForm.name.trim() || channelBusy" class="h-[34px] rounded-sm bg-accent px-4 text-[13px] font-medium text-accent-ink hover:bg-accent-2 disabled:opacity-50" @click="submitChannelForm">{{ channelBusy ? (isChannelEdit ? "Saving…" : "Creating…") : isChannelEdit ? "Save" : "Create" }}</button>
             <button type="button" class="h-[34px] rounded-sm border border-border px-4 text-[13px] text-ink-2 hover:border-border-strong" @click="cancelChannelForm">Cancel</button>
           </div>
+          </template>
         </div>
         <section class="overflow-hidden rounded border border-border bg-surface shadow-card">
           <table class="w-full text-[13px]">
@@ -1037,30 +1242,73 @@ watch(tab, loadActive);
               </tr>
             </thead>
             <tbody>
-              <tr v-for="c in channels" :key="c.id" class="hover:bg-surface-2">
-                <td class="border-b border-border px-4 py-[11px] font-medium">{{ c.name }}</td>
-                <td class="border-b border-border px-4 py-[11px] text-ink-2">{{ c.type }}</td>
-                <td class="border-b border-border px-4 py-[11px]">
-                  <button
-                    v-if="canWriteChannels"
-                    type="button"
-                    class="inline-flex h-[19px] w-[34px] items-center rounded-full transition-colors"
-                    :class="c.enabled ? 'bg-up' : 'bg-border-strong'"
-                    :title="c.enabled ? 'Click to pause this channel' : 'Paused — click to resume'"
-                    :aria-label="c.enabled ? 'Disable channel' : 'Enable channel'"
-                    @click="toggleChannel(c)"
-                  ><span class="block h-[15px] w-[15px] rounded-full bg-white transition-transform" :class="c.enabled ? 'translate-x-[17px]' : 'translate-x-[2px]'"></span></button>
-                  <span v-else class="text-ink-2">{{ c.enabled ? "enabled" : "disabled" }}</span>
-                </td>
-                <td class="border-b border-border px-4 py-[11px] text-right">
-                  <button v-if="canWriteChannels" type="button" class="mr-3 text-[12.5px] text-ink-2 hover:underline" @click="startEditChannel(c)">Edit</button>
-                  <button v-if="canWriteChannels" type="button" class="text-[12.5px] text-down hover:underline" @click="deleteChannel(c)">Delete</button>
-                </td>
-              </tr>
+              <template v-for="c in channels" :key="c.id">
+                <tr class="hover:bg-surface-2" :data-name="c.name" data-testid="channel-row">
+                  <td class="border-b border-border px-4 py-[11px] align-top">
+                    <div class="font-medium">{{ c.name }}</div>
+                    <div v-if="recipientLabel(c)" class="mt-[2px] text-[12px] text-ink-3" data-testid="channel-recipient">
+                      to
+                      <span v-if="recipientLabel(c)!.style === 'mono'" class="font-mono text-[11.5px] text-ink-2">{{ recipientLabel(c)!.text }}</span>
+                      <i v-else-if="recipientLabel(c)!.style === 'deleted'">{{ recipientLabel(c)!.text }}</i>
+                      <span v-else>{{ recipientLabel(c)!.text }}</span>
+                    </div>
+                    <ChannelRouteChip v-if="isPhoneChannel(c.type)" :channel="c" :self-user-id="session.user?.id" @add-number="openTab('phone')" />
+                    <PhoneOnlyRouteWarning
+                      v-if="isPhoneChannel(c.type) && (c.only_route_for?.length ?? 0) > 0"
+                      class="mt-[6px]"
+                      :services="c.only_route_for ?? []"
+                      :total="c.only_route_for_total"
+                    />
+                  </td>
+                  <td class="border-b border-border px-4 py-[11px] align-top text-ink-2">{{ c.type }}</td>
+                  <td class="border-b border-border px-4 py-[11px] align-top" data-testid="channel-status">
+                    <template v-if="canHoldChannel(c)">
+                      <!-- A disabled reason locks a phone channel's switch; its tooltip says what unlocks it (3e). -->
+                      <button
+                        v-if="lockTitle(c)"
+                        type="button"
+                        disabled
+                        class="inline-flex h-[19px] w-[34px] cursor-not-allowed items-center rounded-full opacity-45"
+                        :class="c.enabled ? 'bg-up' : 'bg-border-strong'"
+                        :title="lockTitle(c)"
+                        :aria-label="lockTitle(c)"
+                        data-testid="channel-toggle-locked"
+                      ><span class="block h-[15px] w-[15px] rounded-full bg-white" :class="c.enabled ? 'translate-x-[17px]' : 'translate-x-[2px]'"></span></button>
+                      <button
+                        v-else
+                        type="button"
+                        class="inline-flex h-[19px] w-[34px] items-center rounded-full transition-colors"
+                        :class="c.enabled ? 'bg-up' : 'bg-border-strong'"
+                        :title="c.enabled ? 'Click to pause this channel' : 'Paused — click to resume'"
+                        :aria-label="c.enabled ? 'Disable channel' : 'Enable channel'"
+                        @click="toggleChannel(c)"
+                      ><span class="block h-[15px] w-[15px] rounded-full bg-white transition-transform" :class="c.enabled ? 'translate-x-[17px]' : 'translate-x-[2px]'"></span></button>
+                    </template>
+                    <span v-else class="text-ink-2">{{ c.enabled ? "enabled" : "disabled" }}</span>
+                  </td>
+                  <td class="whitespace-nowrap border-b border-border px-4 py-[11px] text-right align-top" data-testid="channel-actions">
+                    <button v-if="canVerify(c)" type="button" class="mr-3 text-[12.5px] text-accent hover:underline" data-testid="channel-verify" @click="startVerifyChannel(c)">Verify</button>
+                    <button v-if="isPhoneChannel(c.type)" type="button" class="mr-3 text-[12.5px] text-accent hover:underline" data-testid="channel-deliveries-open" @click="openDeliveries(c)">Deliveries</button>
+                    <button v-if="canHoldChannel(c)" type="button" class="mr-3 text-[12.5px] text-ink-2 hover:underline" @click="startEditChannel(c)">Edit</button>
+                    <button v-if="canHoldChannel(c)" type="button" class="text-[12.5px] text-down hover:underline" @click="deleteChannel(c)">Delete</button>
+                  </td>
+                </tr>
+                <tr v-if="c.id && rowErrors[c.id]">
+                  <td colspan="4" class="border-b border-border px-4 pb-[10px] pt-[2px] text-[12.5px] leading-[1.5] text-down" data-testid="channel-row-error">{{ rowErrors[c.id] }}</td>
+                </tr>
+              </template>
               <tr v-if="!channels.length && !loading"><td colspan="4" class="px-4 py-10 text-center text-[13px] text-ink-3">No channels yet. Link one to a monitor from its detail page.</td></tr>
             </tbody>
           </table>
         </section>
+        <ChannelDeliveriesPanel
+          v-if="deliveriesFor"
+          :key="deliveriesFor.id"
+          class="mt-4"
+          :channel-id="deliveriesFor.id"
+          :channel-name="deliveriesFor.name"
+          @close="deliveriesFor = null"
+        />
       </template>
 
       <template v-else-if="tab === 'gatepolicy'">
@@ -1388,6 +1636,9 @@ watch(tab, loadActive);
         <div v-else class="text-[13px] text-ink-3">Loading…</div>
       </template>
 
+      <!-- ── Telephony (instance-wide, global admin, self-loading panel; FR-041a §4.1) ── -->
+      <TelephonyPanel v-else-if="tab === 'telephony'" @open-tab="openTab" />
+
       <!-- ── Members (org-scoped, self-loading panel) ── -->
       <MembersPanel v-else-if="tab === 'members'" />
 
@@ -1584,6 +1835,9 @@ watch(tab, loadActive);
           </table>
         </section>
       </template>
+
+      <!-- ── Phone (FR-041a §4.2) ── -->
+      <PhonePanel v-else-if="tab === 'phone'" @open-tab="openTab" />
 
       <!-- ── Security (2FA) ── -->
       <template v-else-if="tab === 'security'">

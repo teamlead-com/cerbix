@@ -1,0 +1,46 @@
+# P14 (FR-041 / NFR-034): a project without phone channels through an outage with a ladder.
+# Captured on the tree before FR-041a. Never regenerate it; a difference is a P14 violation.
+
+== outbox_events (14) ==
+monitor_transition delivered {"at": "<t>", "cur": "down", "seq": 1, "prev": "pending", "monitor_id": "<id1>"}
+incident_correlation delivered {"incident_id": "<id2>"}
+incident_event delivered {"seq": 1, "event": "incident.opened", "incident": {"id": "<id2>", "title": "ladder-api is down", "impact": "major", "source": "auto", "status": "investigating", "created_at": "<t>", "monitor_id": "<id1>", "project_id": "<id3>", "started_at": "<t>", "updated_at": "<t>"}}
+monitor_transition delivered {"at": "<t>", "cur": "down", "seq": 1, "prev": "pending", "monitor_id": "<id4>"}
+incident_correlation delivered {"incident_id": "<id5>"}
+incident_event delivered {"seq": 1, "event": "incident.opened", "incident": {"id": "<id5>", "title": "flat-api is down", "impact": "major", "source": "auto", "status": "investigating", "created_at": "<t>", "monitor_id": "<id4>", "project_id": "<id3>", "started_at": "<t>", "updated_at": "<t>"}}
+escalation_step delivered {"step": 0, "monitor_id": "<id1>", "channel_ids": ["<id6>"], "incident_id": "<id2>", "monitor_name": "ladder-api", "subject_name": "ladder-api"}
+escalation_step delivered {"step": 1, "monitor_id": "<id1>", "channel_ids": ["<id7>", "<id8>"], "incident_id": "<id2>", "monitor_name": "ladder-api", "subject_name": "ladder-api"}
+escalation_step delivered {"step": 1, "repeat": true, "monitor_id": "<id1>", "channel_ids": ["<id7>", "<id8>"], "incident_id": "<id2>", "monitor_name": "ladder-api", "subject_name": "ladder-api"}
+escalation_step delivered {"step": 1, "repeat": true, "monitor_id": "<id1>", "channel_ids": ["<id7>", "<id8>"], "incident_id": "<id2>", "monitor_name": "ladder-api", "subject_name": "ladder-api"}
+monitor_transition delivered {"at": "<t>", "cur": "up", "seq": 2, "prev": "down", "monitor_id": "<id1>"}
+incident_event delivered {"seq": 2, "event": "incident.resolved", "update": {"id": "<id9>", "body": "Monitor recovered — automatically resolved.", "author": "auto", "status": "resolved", "created_at": "<t>", "incident_id": "<id2>"}, "incident": {"id": "<id2>", "title": "ladder-api is down", "impact": "major", "source": "auto", "status": "resolved", "created_at": "<t>", "monitor_id": "<id1>", "project_id": "<id3>", "started_at": "<t>", "updated_at": "<t>", "resolved_at": "<t>", "escalation_step": 2, "last_escalated_at": "<t>"}}
+monitor_transition delivered {"at": "<t>", "cur": "up", "seq": 2, "prev": "down", "monitor_id": "<id4>"}
+incident_event delivered {"seq": 2, "event": "incident.resolved", "update": {"id": "<id10>", "body": "Monitor recovered — automatically resolved.", "author": "auto", "status": "resolved", "created_at": "<t>", "incident_id": "<id5>"}, "incident": {"id": "<id5>", "title": "flat-api is down", "impact": "major", "source": "auto", "status": "resolved", "created_at": "<t>", "monitor_id": "<id4>", "project_id": "<id3>", "started_at": "<t>", "updated_at": "<t>", "resolved_at": "<t>"}}
+
+== recorder hook (3) ==
+{"event":"monitor.transition","monitor":"flat-api","monitor_id":"<id4>","project_id":"<id3>","text":"🔴 flat-api is DOWN.","up":false}
+{"event":"escalation","text":"🚨 ladder-api is DOWN — on-call escalation step 1. Acknowledge the incident to stop escalation."}
+{"event":"monitor.transition","monitor":"flat-api","monitor_id":"<id4>","project_id":"<id3>","text":"🟢 flat-api recovered — it is back UP.","up":true}
+
+== recorder slack (5) ==
+{"text":"🔴 flat-api is DOWN."}
+{"text":"🚨 ladder-api is DOWN — on-call escalation step 2. Acknowledge the incident to stop escalation."}
+{"text":"🚨 Still unacknowledged: ladder-api is DOWN (escalation step 2). Acknowledge the incident to stop escalation."}
+{"text":"🚨 Still unacknowledged: ladder-api is DOWN (escalation step 2). Acknowledge the incident to stop escalation."}
+{"text":"🟢 flat-api recovered — it is back UP."}
+
+== recorder slack-off (0) ==
+
+== escalation passes ==
+open monitor_steps=1 service_steps=0
+  ladder-api step=0 repeat=false channels=[hook]
++301s monitor_steps=1 service_steps=0
+  ladder-api step=1 repeat=false channels=[slack slack-off]
++901s monitor_steps=1 service_steps=0
+  ladder-api step=1 repeat=true channels=[slack slack-off]
++1501s monitor_steps=1 service_steps=0
+  ladder-api step=1 repeat=true channels=[slack slack-off]
+
+== incidents ==
+ladder-api {"id":"<id2>","project_id":"<id3>","monitor_id":"<id1>","title":"ladder-api is down","status":"resolved","impact":"major","source":"auto","started_at":"<t>","resolved_at":"<t>","escalation_step":2,"last_escalated_at":"<t>","created_at":"<t>","updated_at":"<t>"}
+flat-api {"id":"<id5>","project_id":"<id3>","monitor_id":"<id4>","title":"flat-api is down","status":"resolved","impact":"major","source":"auto","started_at":"<t>","resolved_at":"<t>","created_at":"<t>","updated_at":"<t>"}

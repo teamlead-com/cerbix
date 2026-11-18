@@ -99,6 +99,44 @@ export function utcCellExtentLabel(
   return `${dm(pa)} ${hm(pa)} → ${dm(pb)} ${hm(pb)} ${tail}`;
 }
 
+/** An instant as a short list prints it: the clock, a relative day, and the offset at the instant. */
+export interface ClockDayLabel {
+  clock: string;
+  day: string;
+  offset: string;
+}
+
+/**
+ * An INSTANT in a short, recent list whose reader scans the clock — a channel's phone deliveries
+ * (FR-041a mock 3g): the clock to the second, then "today", "yesterday" or the date, all in the
+ * viewer's zone, and the offset in force AT the instant, which the list prints with it.
+ *
+ *   instantClockDayLabel("2026-09-03T15:04:31Z", new Date("2026-09-03T18:00:00Z"))
+ *     ->  { clock: "20:04:31", day: "today", offset: "UTC+05:00" }   (viewer at UTC+05)
+ *
+ * "Yesterday" is the calendar day before `now`'s in the viewer's zone, found by calendar
+ * arithmetic, not 24 hours back: a DST day has 23 or 25 hours. `now` is a parameter so the
+ * branches are testable.
+ */
+export function instantClockDayLabel(
+  iso: string | null | undefined,
+  now: Date = new Date(),
+  zone?: string,
+): ClockDayLabel {
+  const d = parse(iso);
+  if (!d) return { clock: ABSENT, day: "", offset: "" };
+  const p = partsAt(d, zone, {
+    day: "2-digit", month: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
+  const t = partsAt(now, zone, { day: "2-digit", month: "2-digit", year: "numeric" });
+  const before = new Date(Date.UTC(Number(t.year), Number(t.month) - 1, Number(t.day) - 1));
+  const y = partsAt(before, "UTC", { day: "2-digit", month: "2-digit", year: "numeric" });
+  const date = dmy(p);
+  const day = date === dmy(t) ? "today" : date === dmy(y) ? "yesterday" : date;
+  return { clock: `${hm(p)}:${p.second}`, day, offset: offsetAt(d, zone) };
+}
+
 /**
  * The same rule as `instantLabel` at MINUTE precision, for a list or a table cell where seconds
  * are noise. It still names the offset — that is the part NFR-025 is about, and a shorter

@@ -21,8 +21,10 @@ vi.mock("vue-router", () => ({
 vi.mock("@/components/AppShell.vue", () => ({
   default: { name: "AppShell", template: "<div><slot name='actions' /><slot /></div>" },
 }));
+// FR-041a: the Phone panel reads `telephonyEnabled` from the session (revision 6, §5.5).
+const sessionMock = vi.hoisted(() => ({ canProjectWrite: () => true, telephonyEnabled: false }));
 vi.mock("@/stores/session", () => ({
-  useSession: () => ({ canProjectWrite: () => true }),
+  useSession: () => sessionMock,
 }));
 const workspaceMock = vi.hoisted(() => ({
   init: vi.fn(() => Promise.resolve()),
@@ -36,6 +38,9 @@ const workspaceMock = vi.hoisted(() => ({
 }));
 const reactiveWorkspace = reactive(workspaceMock);
 vi.mock("@/stores/workspace", () => ({ useWorkspace: () => reactiveWorkspace }));
+// FR-041a mock 5a-2: `/i/:ref` leaves a read-once "Switched to …" notice in the ui store.
+const uiMock = vi.hoisted(() => ({ takeIncidentNotice: vi.fn(() => "") }));
+vi.mock("@/stores/ui", () => ({ useUi: () => uiMock }));
 
 const RouterLink = { props: ["to"], template: "<a><slot /></a>" };
 
@@ -65,6 +70,7 @@ function mountWith(detail: Record<string, unknown>) {
   apiMock.GET.mockImplementation((path: string) => {
     if (path.endsWith("/updates")) return Promise.resolve({ data: [] });
     if (path.endsWith("/postmortem")) return Promise.resolve({ error: { error: "not found" } });
+    if (path.endsWith("/phone-activity")) return Promise.resolve({ data: { deliveries: [] } });
     return Promise.resolve({ data: detail });
   });
   // The acknowledge response is the BASE incident: this is the wire contract, and the
@@ -76,6 +82,9 @@ function mountWith(detail: Record<string, unknown>) {
 }
 
 beforeEach(() => {
+  uiMock.takeIncidentNotice.mockReset();
+  uiMock.takeIncidentNotice.mockReturnValue("");
+  sessionMock.telephonyEnabled = false;
   workspaceMock.init.mockReset();
   workspaceMock.init.mockResolvedValue(undefined);
   workspaceMock.orgId = "o1";
@@ -126,6 +135,7 @@ describe("IncidentDetailView workspace fencing", () => {
       }
       if (path.endsWith("/updates")) return Promise.resolve({ data: [] });
       if (path.endsWith("/postmortem")) return Promise.resolve({ error: { error: "not found" } });
+      if (path.endsWith("/phone-activity")) return Promise.resolve({ data: { deliveries: [] } });
       return Promise.resolve({ data: undefined });
     });
 
@@ -164,6 +174,7 @@ describe("IncidentDetailView subject chip", () => {
     apiMock.GET.mockImplementation((path: string) => {
       if (path.endsWith("/updates")) return Promise.resolve({ data: [] });
       if (path.endsWith("/postmortem")) return Promise.resolve({ error: { error: "not found" } });
+      if (path.endsWith("/phone-activity")) return Promise.resolve({ data: { deliveries: [] } });
       if (path.includes("/services/")) return Promise.resolve({ data: subject ? { service: subject } : undefined });
       if (path.includes("/monitors/")) return Promise.resolve({ data: subject ?? undefined });
       return Promise.resolve({ data: { ...BASE_INCIDENT, monitor_id: undefined, ...anchor, impacts: [] } });
@@ -330,6 +341,7 @@ describe("IncidentDetailView impact basis", () => {
     apiMock.GET.mockImplementation((path: string) => {
       if (path.endsWith("/updates")) return Promise.resolve({ data: updates });
       if (path.endsWith("/postmortem")) return Promise.resolve({ error: { error: "not found" } });
+      if (path.endsWith("/phone-activity")) return Promise.resolve({ data: { deliveries: [] } });
       if (path.includes("/services/") || path.includes("/monitors/")) return Promise.resolve({ data: undefined });
       return Promise.resolve({ data: detail });
     });
@@ -484,5 +496,165 @@ describe("IncidentDetailView impact basis", () => {
     const note = w.get('[data-testid="incident-update-system-note"]');
     expect(note.attributes("data-note")).toBe("impact_raised");
     expect(note.find("p.font-mono").text()).toBe("⬆ Impact raised: none → minor — the service is degraded.");
+  });
+});
+
+// FR-041a §5.5, mock §4: the Phone panel on the incident page. The view reads
+// GET /incidents/{id}/phone-activity beside the incident, places the panel directly under the
+// Timeline and above "Post an update", shows it under revision 6's rule, and keeps a failed read
+// from hiding anything else. A 403 or 404 from that read hides the panel.
+describe("IncidentDetailView Phone panel", () => {
+  const SENT = {
+    id: "pd1",
+    channel_id: "nc1",
+    channel_name: "SMS — Ada",
+    kind: "sms",
+    alert_kind: "monitor_down",
+    number_masked: "+90•••••6869",
+    reason: "sent",
+    notes: [],
+    provider_status: 201,
+    provider_code: null,
+    provider_ref: null,
+    segments: 1,
+    attempts: 1,
+    created_at: "2026-08-17T10:14:09Z",
+    updated_at: "2026-08-17T10:14:10Z",
+    subject: { kind: "monitor", name: "checkout-http" },
+    service_state: null,
+    escalation_step: null,
+    recipient_display_name: "Ada Park",
+  };
+  type Answer = { data?: unknown; error?: unknown; response?: { status: number } } | Error;
+
+  function mountPhone(phone: Answer, detail: Record<string, unknown> = { ...BASE_INCIDENT, impacts: [] }) {
+    apiMock.GET.mockReset();
+    apiMock.POST.mockReset();
+    apiMock.GET.mockImplementation((path: string) => {
+      if (path.endsWith("/updates")) return Promise.resolve({ data: [] });
+      if (path.endsWith("/postmortem")) return Promise.resolve({ error: { error: "not found" } });
+      if (path.endsWith("/phone-activity")) return phone instanceof Error ? Promise.reject(phone) : Promise.resolve(phone);
+      if (path.includes("/monitors/")) return Promise.resolve({ data: undefined });
+      return Promise.resolve({ data: detail });
+    });
+    apiMock.POST.mockImplementation(() =>
+      Promise.resolve({ data: { ...BASE_INCIDENT, acknowledged_at: "2026-08-17T10:20:00Z", acknowledged_by: "u1" } }),
+    );
+    return mount(IncidentDetailView, { global: { stubs: { RouterLink } } });
+  }
+  const has = (w: ReturnType<typeof mountPhone>) => w.find('[data-testid="incident-phone-panel"]').exists();
+
+  it("reads the incident's phone activity from its own endpoint", async () => {
+    mountPhone({ data: { deliveries: [] } });
+    await flushPromises();
+    expect(apiMock.GET).toHaveBeenCalledWith("/api/v1/incidents/{incidentID}/phone-activity", {
+      params: { path: { incidentID: "inc1" } },
+    });
+  });
+
+  it("4g-1: telephony off and no delivery — the view places no panel; the next block is Post an update", async () => {
+    sessionMock.telephonyEnabled = false;
+    const w = mountPhone({ data: { deliveries: [] } });
+    await flushPromises();
+    expect(has(w)).toBe(false);
+    expect(w.text()).not.toContain("No phone alert was sent for this incident.");
+    expect(w.text()).toContain("Post an update");
+  });
+
+  it("4c: telephony on and no delivery — the panel with its empty line", async () => {
+    sessionMock.telephonyEnabled = true;
+    const w = mountPhone({ data: { deliveries: [] } });
+    await flushPromises();
+    expect(has(w)).toBe(true);
+    expect(w.text()).toContain("No phone alert was sent for this incident.");
+  });
+
+  it("4g-2: telephony off with a delivery — the panel is shown", async () => {
+    sessionMock.telephonyEnabled = false;
+    const w = mountPhone({ data: { deliveries: [SENT] } });
+    await flushPromises();
+    expect(has(w)).toBe(true);
+    expect(w.findAll('[data-testid="delivery-row"]')).toHaveLength(1);
+  });
+
+  it("sits directly under the Timeline and above Post an update", async () => {
+    sessionMock.telephonyEnabled = true;
+    const w = mountPhone({ data: { deliveries: [SENT] } });
+    await flushPromises();
+    // The section headings as rendered elements, not their mentions in template comments.
+    const html = w.html();
+    const timeline = html.indexOf(">Timeline</div>");
+    const phone = html.indexOf('data-testid="incident-phone-panel"');
+    const post = html.indexOf(">Post an update</div>");
+    expect(timeline).toBeGreaterThan(-1);
+    expect(post).toBeGreaterThan(-1);
+    expect(timeline).toBeLessThan(phone);
+    expect(phone).toBeLessThan(post);
+  });
+
+  it("4d: a failed read gets its own sentence and hides nothing else on the page", async () => {
+    for (const answer of [{ error: { error: "boom" }, response: { status: 500 } }, new Error("network")] as Answer[]) {
+      sessionMock.telephonyEnabled = false;
+      const w = mountPhone(answer);
+      await flushPromises();
+      expect(w.get('[data-testid="incident-phone-unavailable"]').text()).toBe(
+        "Phone activity could not be read — this is not “nothing was sent”.",
+      );
+      expect(w.find('[data-testid="incident-load-error"]').exists()).toBe(false);
+      expect(w.text()).toContain(BASE_INCIDENT.title);
+      expect(w.text()).toContain("Timeline");
+      expect(w.text()).toContain("Post an update");
+      w.unmount();
+    }
+  });
+
+  it("a 403 or 404 from the phone read hides the panel, and only the panel", async () => {
+    for (const status of [403, 404]) {
+      sessionMock.telephonyEnabled = true;
+      const w = mountPhone({ error: { error: "forbidden" }, response: { status } });
+      await flushPromises();
+      expect(has(w), `status ${status}`).toBe(false);
+      expect(w.find('[data-testid="incident-load-error"]').exists()).toBe(false);
+      expect(w.text()).toContain(BASE_INCIDENT.title);
+      expect(w.text()).toContain("Post an update");
+      w.unmount();
+    }
+  });
+
+  it("acknowledge() carries the incident's ref over — the base response lacks it (D21)", async () => {
+    const w = mountPhone({ data: { deliveries: [] } }, { ...BASE_INCIDENT, impacts: [], ref: "X7K2P9QM" });
+    await flushPromises();
+    const vm = w.vm as unknown as { incident: { ref?: string; acknowledged_at?: string } | null };
+    expect(vm.incident?.ref).toBe("X7K2P9QM");
+    await w.findAll("button").find((b) => b.text() === "Acknowledge")!.trigger("click");
+    await flushPromises();
+    expect(apiMock.POST).toHaveBeenCalledTimes(1);
+    expect(vm.incident?.acknowledged_at).toBe("2026-08-17T10:20:00Z");
+    expect(vm.incident?.ref).toBe("X7K2P9QM");
+  });
+});
+
+describe("IncidentDetailView — the /i/:ref workspace notice (mock 5a-2)", () => {
+  it("shows the notice /i/:ref left, once, above the title, and Dismiss removes it", async () => {
+    uiMock.takeIncidentNotice.mockReturnValue("Switched to Acme / prod to open this incident.");
+    const w = mountWith(BASE_INCIDENT);
+    await flushPromises();
+    expect(uiMock.takeIncidentNotice).toHaveBeenCalledTimes(1);
+    const notice = w.find('[data-testid="incident-notice"]');
+    expect(notice.exists()).toBe(true);
+    expect(notice.text()).toContain("Switched to Acme / prod to open this incident.");
+    // Above the title, as drawn: the notice sits between the breadcrumb and the heading.
+    const html = w.html();
+    expect(html.indexOf('data-testid="incident-notice"')).toBeLessThan(html.indexOf(BASE_INCIDENT.title));
+    const dismiss = notice.findAll("button").find((b) => b.text() === "Dismiss");
+    expect(dismiss).toBeTruthy();
+    await dismiss!.trigger("click");
+    expect(w.find('[data-testid="incident-notice"]').exists()).toBe(false);
+  });
+
+  it("no notice when the workspace did not change (nothing was left)", async () => {
+    const w = mountWith(BASE_INCIDENT);
+    await flushPromises();
+    expect(w.find('[data-testid="incident-notice"]').exists()).toBe(false);
   });
 });

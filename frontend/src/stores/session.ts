@@ -2,10 +2,12 @@ import { defineStore } from "pinia";
 
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
+import type { PhoneCodeSend } from "@/lib/phone";
 import { useLive } from "@/stores/live";
 
 type User = components["schemas"]["User"];
 type Membership = components["schemas"]["Membership"];
+type UserPhone = components["schemas"]["UserPhone"];
 
 interface State {
   user: User | null;
@@ -14,10 +16,37 @@ interface State {
   loaded: boolean;
   version: string;
   commit: string;
+  // FR-041a §4.2 (revision 6/8): the signed-in person's masked phone, whether the instance's
+  // telephony is on, and the instance's voice language — every phone surface reads them here, so
+  // a non-admin learns that phone alerts are off without meeting a refusal. Re-read with fetchMe()
+  // after a telephony save and after any `telephony_disabled` refusal.
+  phone: UserPhone | null;
+  telephonyEnabled: boolean;
+  // Revision 9: whether a verification code can be spoken by a call (telephony on and a provider
+  // that places calls) — the "call me with the code" actions are offered only while it is true.
+  telephonyCanCall: boolean;
+  telephonyVoiceLanguage: string | null;
+  // Revision 9 (review m-2): what the last code sent from Account → Phone did, held here in memory
+  // so a settings tab switch keeps it — never in browser storage: after a reload the page does not
+  // know it, and a code sent from another tab or device would make a stored one a lie. It goes with
+  // the number it belonged to.
+  phoneCodeSend: PhoneCodeSend | null;
 }
 
 export const useSession = defineStore("session", {
-  state: (): State => ({ user: null, memberships: [], totpEnabled: false, loaded: false, version: "", commit: "" }),
+  state: (): State => ({
+    user: null,
+    memberships: [],
+    totpEnabled: false,
+    loaded: false,
+    version: "",
+    commit: "",
+    phone: null,
+    telephonyEnabled: false,
+    telephonyCanCall: false,
+    telephonyVoiceLanguage: null,
+    phoneCodeSend: null,
+  }),
   getters: {
     isAuthed: (s) => s.user !== null,
     isGlobalAdmin: (s) => s.user?.is_global_admin === true,
@@ -76,12 +105,33 @@ export const useSession = defineStore("session", {
         this.user = null;
         this.memberships = [];
         this.totpEnabled = false;
+        this.clearPhoneState();
         return false;
       }
       this.user = data.user ?? null;
       this.memberships = data.memberships ?? [];
       this.totpEnabled = data.totp_enabled ?? false;
+      this.setPhone(data.phone ?? null);
+      this.telephonyEnabled = data.telephony_enabled === true;
+      this.telephonyCanCall = data.telephony_can_call === true;
+      this.telephonyVoiceLanguage = data.telephony_voice_language ?? null;
       return this.user !== null;
+    },
+    // Account → Phone holds the answer of a phone write here, so the other surfaces see it at once.
+    // Another number (or none) drops the way of the last code, which belonged to the old one.
+    setPhone(p: UserPhone | null) {
+      if ((p?.number_masked ?? null) !== (this.phone?.number_masked ?? null)) this.phoneCodeSend = null;
+      this.phone = p;
+    },
+    setPhoneCodeSend(v: PhoneCodeSend | null) {
+      this.phoneCodeSend = v;
+    },
+    clearPhoneState() {
+      this.phone = null;
+      this.phoneCodeSend = null;
+      this.telephonyEnabled = false;
+      this.telephonyCanCall = false;
+      this.telephonyVoiceLanguage = null;
     },
     // Build info for the sidebar footer — fetched once per session.
     async fetchVersion() {
@@ -109,6 +159,7 @@ export const useSession = defineStore("session", {
       }
       this.user = null;
       this.memberships = [];
+      this.clearPhoneState();
       window.location.assign(to);
     },
   },

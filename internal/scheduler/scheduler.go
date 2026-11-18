@@ -162,6 +162,11 @@ type Store interface {
 	LiveCanaryAgentCapabilities(ctx context.Context, within time.Duration) (map[string][]string, error)
 	PurgeExpiredPullJobs(ctx context.Context) (int, error)
 	PurgeExpiredPullTests(ctx context.Context) (int, error)
+	// FR-041a's leader passes (D33, R6, §8): stale `sending` phone deliveries closed as
+	// outcome_unknown — one entry per row, so each is counted (P7) — and the two retention purges.
+	CloseStalePhoneDeliveries(ctx context.Context) ([]store.ClosedPhoneDelivery, error)
+	PurgePhoneVerifications(ctx context.Context, olderThan time.Duration) (int, error)
+	PurgePhoneDeliveries(ctx context.Context, olderThan time.Duration) (int, error)
 	PurgeStaleAgentHeartbeats(ctx context.Context, olderThan time.Duration) (int, error)
 	PurgeDeliveredOutbox(ctx context.Context, olderThan time.Duration) (int, error)
 	DeleteExpiredSessions(ctx context.Context) (int64, error)
@@ -366,6 +371,20 @@ const (
 	// deliveredOutboxRetention is how long a delivered outbox row is kept for audit before
 	// the leader purges it (dead-lettered rows are never auto-purged).
 	deliveredOutboxRetention = 7 * 24 * time.Hour
+	// phoneStaleEvery is the cadence of D33's sweep of `sending` phone deliveries whose call was never
+	// answered (FR-041a): a row is stale after 60 s, so a 15 s sweep closes it within 75 s.
+	phoneStaleEvery = 15 * time.Second
+	// phoneVerificationPurgeEvery / phoneVerificationRetention: verification codes older than the
+	// 24 hours the send limits look back over count for nothing (R6) and are purged hourly.
+	phoneVerificationPurgeEvery = time.Hour
+	phoneVerificationRetention  = 24 * time.Hour
+	// phoneDeliveryPurgeEvery / phoneDeliveryRetention: delivery rows are kept 90 days (§8) and
+	// purged daily.
+	phoneDeliveryPurgeEvery = 24 * time.Hour
+	phoneDeliveryRetention  = 90 * 24 * time.Hour
+	// phoneProviderNone is the provider label of a phone delivery under no provider at all, the
+	// label the delivery path gives it (internal/metrics/phone.go).
+	phoneProviderNone = "none"
 	// confirmCapPerRegion bounds how many monitors may probe at their accelerated
 	// confirm interval simultaneously per region: during a mass outage the herd
 	// falls back to the normal rhythm instead of multiplying load (anti
@@ -696,6 +715,22 @@ type Scheduler struct {
 	// ledgerMetrics publishes FR-032 §11's HOT-update sample. Optional and nil-safe, like every
 	// other sink here: a role that runs no maintenance pass publishes nothing rather than zero.
 	ledgerMetrics LedgerStatsSink
+	// phoneMetrics counts the phone deliveries the leader's stale sweep closes (FR-041a P7).
+	// Optional and nil-safe.
+	phoneMetrics PhoneDeliverySink
+}
+
+// PhoneDeliverySink counts finished phone deliveries in cerbix_phone_deliveries_total. Implemented
+// by *metrics.Registry.
+type PhoneDeliverySink interface {
+	RecordPhoneDelivery(kind, provider, reason string)
+}
+
+// WithPhoneMetrics wires the sink the stale phone-delivery sweep counts every row it closes into, as
+// outcome_unknown (FR-041a P7). Without it the sweep still closes them.
+func (s *Scheduler) WithPhoneMetrics(sink PhoneDeliverySink) *Scheduler {
+	s.phoneMetrics = sink
+	return s
 }
 
 // WithChangeRetention wires FR-025 D9's retention: once a day the leader removes change groups
@@ -1326,6 +1361,7 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 	// the snapshot refresh prunes it authoritatively).
 	confirmFast := map[string]time.Time{}
 	var lastRollup, lastMaintain, lastRefresh, lastPushCheck, lastRenotify, lastBurn, lastReport, lastRegionChk, lastEscalation, lastPullStats, lastPublishWarn, lastLeaderChk, lastServiceSlice, lastServiceAlert, lastServiceBurn, lastChangePurge time.Time
+	var lastPhone phonePasses
 	ticker := time.NewTicker(s.tick)
 	defer ticker.Stop()
 	for {
@@ -1599,6 +1635,9 @@ func (s *Scheduler) lead(ctx context.Context, session LeaderSession) bool {
 					}
 				})
 			}
+			// FR-041a: stale phone deliveries closed (D33), verification codes and old delivery rows
+			// purged, each at its own cadence.
+			s.runPhonePasses(ctx, now, &lastPhone)
 			// Publish due active checks. Non-credentialed monitors keep the snapshot path;
 			// credentialed monitors are nominated by the snapshot then authorized/materialized
 			// in one bounded DB batch immediately before dispatch (§4.4.3/4).
@@ -2371,6 +2410,64 @@ func (s *Scheduler) maintainPartitions(ctx context.Context, now time.Time) {
 		s.logger.Warn("purge_auth_flows_failed", "error", err.Error())
 	} else if purged > 0 {
 		s.logger.Info("expired_auth_flows_purged", "count", purged)
+	}
+}
+
+// phonePasses is when each of FR-041a's three leader passes last ran.
+type phonePasses struct{ stale, verifications, deliveries time.Time }
+
+// runPhonePasses runs the phone passes that are due: the D33 sweep that closes `sending` rows no retry
+// will come back to (a dead-lettered event's), and the two retention purges. Each is bounded like the
+// other periodic leader tasks, and a failure is logged and leaves the others to run.
+func (s *Scheduler) runPhonePasses(ctx context.Context, now time.Time, last *phonePasses) {
+	if last.stale.IsZero() || now.Sub(last.stale) >= phoneStaleEvery {
+		last.stale = now
+		withTimeout(ctx, subCadenceTimeout, s.closeStalePhoneDeliveries)
+	}
+	if last.verifications.IsZero() || now.Sub(last.verifications) >= phoneVerificationPurgeEvery {
+		last.verifications = now
+		withTimeout(ctx, subCadenceTimeout, func(c context.Context) {
+			if n, err := s.store.PurgePhoneVerifications(c, phoneVerificationRetention); err != nil {
+				s.logger.Warn("purge_phone_verifications_failed", "error", err.Error())
+			} else if n > 0 {
+				s.logger.Info("phone_verifications_purged", "count", n)
+			}
+		})
+	}
+	if last.deliveries.IsZero() || now.Sub(last.deliveries) >= phoneDeliveryPurgeEvery {
+		last.deliveries = now
+		withTimeout(ctx, maintainTimeout, func(c context.Context) {
+			if n, err := s.store.PurgePhoneDeliveries(c, phoneDeliveryRetention); err != nil {
+				s.logger.Warn("purge_phone_deliveries_failed", "error", err.Error())
+			} else if n > 0 {
+				s.logger.Info("phone_deliveries_purged", "count", n)
+			}
+		})
+	}
+}
+
+// closeStalePhoneDeliveries is D33's leader pass. Every row it closes is an alert a phone channel was
+// handed and did not send, so each is counted as outcome_unknown (P7), under the labels a retry that
+// closes one gives it: the channel kind and the provider in force, `none` when there is none.
+func (s *Scheduler) closeStalePhoneDeliveries(ctx context.Context) {
+	closed, err := s.store.CloseStalePhoneDeliveries(ctx)
+	if err != nil {
+		s.logger.Error("close_stale_phone_deliveries_failed", "error", err.Error())
+		return
+	}
+	if len(closed) == 0 {
+		return
+	}
+	s.logger.Warn("stale_phone_deliveries_closed", "count", len(closed))
+	if s.phoneMetrics == nil {
+		return
+	}
+	for _, c := range closed {
+		provider := c.Provider
+		if provider == "" {
+			provider = phoneProviderNone
+		}
+		s.phoneMetrics.RecordPhoneDelivery(string(c.Kind), provider, domain.PhoneReasonOutcomeUnknown)
 	}
 }
 

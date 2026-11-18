@@ -727,6 +727,7 @@ var impactReaderAllowList = map[string]string{
 	"store/incidents.go:(*Store).FindOpenAutoIncidentByMonitor:incidentColumns":        "row read for a caller",
 	"store/incidents.go:(*Store).FindOpenIncidentByExternalKey:incidentColumns":        "row read for a caller (Alertmanager dedupe by key)",
 	"store/incidents.go:(*Store).GetIncident:incidentColumns":                          "row read for a caller (detail rendering)",
+	"store/incidents.go:(*Store).IncidentByRef:incidentColumns":                        "row read for a caller (the /i/:ref resolver, FR-041a D21)",
 	"store/incidents.go:(*Store).ListIncidentsByProject:incidentColumns":               "row read for a caller (list rendering)",
 	"store/incidents.go:(*Store).acknowledgeIncident:incidentColumns":                  "row read: RETURNING the acknowledged row",
 	"store/incidents.go:(*Store).addIncidentUpdate:incidentColumns":                    "row read: RETURNING the updated row",

@@ -146,6 +146,10 @@ type OutboxEvent struct {
 	// SPAN (`LeaseUntil - ClaimedAt`) is entirely in database time, and the worker measures its own
 	// elapsed time against that span, which only assumes the two clocks tick at the same rate.
 	ClaimedAt time.Time
+	// CreatedAt is when the event was enqueued (`outbox_events.created_at`), as the claim reads it.
+	// It is the row's, not the payload's: the phone path links a recovery to an incident resolved at
+	// or after it (FR-041a D32, R15), and no payload carries a usable time for that (P14).
+	CreatedAt time.Time
 }
 
 // OutboxEventView is an outbox row exposed to operators (the dead-letter admin
@@ -208,9 +212,9 @@ type SLOBurnAlert struct {
 // windows renders the rule's window pair ("1h ∧ 5m") or the single legacy window.
 func (a SLOBurnAlert) windows() string {
 	if a.ShortWindowSeconds > 0 && a.ShortWindowSeconds != a.WindowSeconds {
-		return humanWindow(a.WindowSeconds) + " ∧ " + humanWindow(a.ShortWindowSeconds)
+		return HumanWindow(a.WindowSeconds) + " ∧ " + HumanWindow(a.ShortWindowSeconds)
 	}
-	return humanWindow(a.WindowSeconds)
+	return HumanWindow(a.WindowSeconds)
 }
 
 // sevTag renders the severity prefix ("[page] " / "[ticket] "), empty for legacy.
@@ -235,8 +239,8 @@ func (a SLOBurnAlert) Message(monitorName string) string {
 		a.sevTag(), monitorName, a.BurnRate, a.windows())
 }
 
-// humanWindow renders a burn window in the coarsest whole unit (h/m/s).
-func humanWindow(seconds int) string {
+// HumanWindow renders a burn window in the coarsest whole unit (h/m/s).
+func HumanWindow(seconds int) string {
 	switch {
 	case seconds%3600 == 0 && seconds >= 3600:
 		return fmt.Sprintf("%dh", seconds/3600)

@@ -61,6 +61,39 @@ func TestRegisteredStatusPageRequestContractsMatchOpenAPI(t *testing.T) {
 	}
 }
 
+// registeredPhoneRequestContracts holds the request bodies of the phone-alerts surface (FR-041a).
+// Each named struct — nested objects included, since the drift check reads one level — is matched to
+// the components/schemas entry of the same contract.
+var registeredPhoneRequestContracts = []requestContract{
+	{schema: "SetTelephonySettings", body: setTelephonySettingsRequest{}},
+	{schema: "SetTelephonyTwilio", body: setTelephonyTwilioRequest{}},
+	{schema: "SetTelephonyGenericHTTP", body: setTelephonyGenericHTTPRequest{}},
+	{schema: "TelephonyStorm", body: telephonyStormBody{}},
+	{schema: "SetUserPhone", body: setUserPhoneRequest{}},
+	{schema: "VerifyPhone", body: verifyPhoneRequest{}},
+	{schema: "SendPhoneCode", body: sendPhoneCodeRequest{}},
+	{schema: "SetUserPhonePreferences", body: setUserPhonePreferencesRequest{}},
+	{schema: "CreateNotificationChannel", body: createChannelRequest{}},
+	{schema: "UpdateNotificationChannel", body: updateChannelRequest{}},
+}
+
+func TestRegisteredPhoneRequestContractsMatchOpenAPI(t *testing.T) {
+	t.Parallel()
+
+	document := readOpenAPIContractDocument(t)
+	for _, contract := range registeredPhoneRequestContracts {
+		t.Run(contract.schema, func(t *testing.T) {
+			schema, ok := document.Components.Schemas[contract.schema]
+			if !ok {
+				t.Fatalf("OpenAPI schema %q is not defined", contract.schema)
+			}
+			if drift := requestContractDrift(document, schema, reflect.TypeOf(contract.body)); len(drift) != 0 {
+				t.Fatalf("request contract drifted:\n- %s", strings.Join(drift, "\n- "))
+			}
+		})
+	}
+}
+
 func TestRequestContractGuardDetectsRequiredTypeAndFormatDrift(t *testing.T) {
 	t.Parallel()
 

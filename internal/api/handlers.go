@@ -40,7 +40,8 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, totpEnabled, _ := h.store.GetTOTP(r.Context(), p.UserID)
-	writeJSON(w, http.StatusOK, map[string]any{
+	// FR-041a §4.2: writeMe adds the phone (masked, D35) and telephony_enabled.
+	h.writeMe(w, r, map[string]any{
 		"user":         user,
 		"memberships":  p.Memberships,
 		"totp_enabled": totpEnabled,

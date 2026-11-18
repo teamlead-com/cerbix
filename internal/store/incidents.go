@@ -219,6 +219,16 @@ func (s *Store) createIncident(ctx context.Context, inc domain.Incident, basis d
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
 
+	// D32: the opening of a MONITOR's auto-incident — the system door, and only it: not a manual
+	// incident, not an Alertmanager one, not a service's — is serialised with that monitor's phone
+	// reservations by the monitor's lock, taken before the insert, and attaches their rows after it.
+	attachPhone := actor == nil && inc.Source == domain.SourceAuto && inc.MonitorID != "" && inc.ServiceID == ""
+	if attachPhone {
+		if err := lockPhoneMonitorTx(ctx, tx, inc.MonitorID); err != nil {
+			return domain.Incident{}, err
+		}
+	}
+
 	var monitorID, serviceID, externalKey *string
 	if inc.MonitorID != "" {
 		monitorID = &inc.MonitorID
@@ -279,6 +289,11 @@ func (s *Store) createIncident(ctx context.Context, inc domain.Incident, basis d
 		created.ID, created.Status, openingBody, author); err != nil {
 		return domain.Incident{}, fmt.Errorf("store: create opening update: %w", err)
 	}
+	if attachPhone {
+		if err := attachMonitorPhoneDeliveriesTx(ctx, tx, created.ID, inc.MonitorID); err != nil {
+			return domain.Incident{}, err
+		}
+	}
 	// A SERVICE-anchored incident freezes its ladder here too. Only the principal door can reach this
 	// branch now: a manual service-anchored incident keeps its ladder, the system door refuses a
 	// service anchor, and a service auto-incident opens only through `OpenServiceIncidentTx`. An
@@ -335,11 +350,12 @@ func (s *Store) createIncident(ctx context.Context, inc domain.Incident, basis d
 	return created, nil
 }
 
-// GetIncident returns an incident by id, or ErrNotFound.
+// GetIncident returns an incident by id, or ErrNotFound — for an id that is not a uuid too, which
+// names no incident (FR-041a review P2-9).
 func (s *Store) GetIncident(ctx context.Context, id string) (domain.Incident, error) {
 	row := s.pool.QueryRow(ctx, `SELECT `+incidentColumns+` FROM incidents WHERE id = $1`, id)
 	inc, err := scanIncident(row)
-	if noRows(err) {
+	if noRows(err) || isInvalidTextRepresentation(err) {
 		return domain.Incident{}, ErrNotFound
 	}
 	if err != nil {
@@ -348,14 +364,89 @@ func (s *Store) GetIncident(ctx context.Context, id string) (domain.Incident, er
 	return inc, nil
 }
 
+// IncidentRef returns an incident's short reference (FR-041a, D21), or ErrNotFound. The reference
+// is NOT a field of domain.Incident: that type's JSON is the `incident` object of webhooks and outbox
+// payloads, which stay unchanged for every project (P14), so the phone path reads it here.
+func (s *Store) IncidentRef(ctx context.Context, id string) (string, error) {
+	var ref string
+	err := s.pool.QueryRow(ctx, `SELECT ref FROM incidents WHERE id = $1`, id).Scan(&ref)
+	if noRows(err) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: incident ref: %w", err)
+	}
+	return ref, nil
+}
+
+// IncidentRefs returns the references of the given incidents keyed by id. An id with no incident is
+// absent from the map; no ids is an empty map and no query.
+func (s *Store) IncidentRefs(ctx context.Context, ids []string) (map[string]string, error) {
+	out := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text, ref FROM incidents WHERE id = ANY($1::uuid[])`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("store: incident refs: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, ref string
+		if err := rows.Scan(&id, &ref); err != nil {
+			return nil, fmt.Errorf("store: scan incident ref: %w", err)
+		}
+		out[id] = ref
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate incident refs: %w", err)
+	}
+	return out, nil
+}
+
+// IncidentByRef returns the incident a reference names, or ErrNotFound. The input is normalized
+// first (case, and the Crockford aliases I/L → 1, O → 0), so a reference typed by hand resolves; an
+// input that is not a reference at all is not found rather than an error. Visibility is the
+// caller's: this read is not scoped to a project.
+func (s *Store) IncidentByRef(ctx context.Context, ref string) (domain.Incident, error) {
+	norm, ok := domain.NormalizeIncidentRef(ref)
+	if !ok {
+		return domain.Incident{}, ErrNotFound
+	}
+	inc, err := scanIncident(s.pool.QueryRow(ctx, `SELECT `+incidentColumns+` FROM incidents WHERE ref = $1`, norm))
+	if noRows(err) {
+		return domain.Incident{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.Incident{}, fmt.Errorf("store: incident by ref: %w", err)
+	}
+	return inc, nil
+}
+
+// autoIncidentSQL and incidentUnresolvedSQL are the two halves of "an open auto-incident": source
+// auto, not yet resolved. openMonitorAutoIncidentFrom and the phone link (autoIncidentLink, FR-041a
+// D32/R15) are built from them, so the three readers below cannot drift apart.
+const (
+	autoIncidentSQL       = `source = 'auto'`
+	incidentUnresolvedSQL = `status <> 'resolved'`
+)
+
+// openMonitorAutoIncidentFrom selects the monitor's open auto-incident ($1 = the monitor id): source
+// auto, not yet resolved, the newest. The reconciler's dedupe (FindOpenAutoIncidentByMonitor), the
+// phone deliveries' attachment and lookup (openMonitorAutoIncidentTx, FR-041a D32) and the phone link
+// (autoIncidentLink) must mean the SAME incident — were one copy edited alone, a DOWN's phone rows
+// would silently stop attaching, or its message link another incident — so the first two read this
+// one text and the third its two fragments.
+const openMonitorAutoIncidentFrom = `FROM incidents
+		 WHERE monitor_id = $1 AND ` + autoIncidentSQL + ` AND ` + incidentUnresolvedSQL + `
+		 ORDER BY started_at DESC LIMIT 1`
+
 // FindOpenAutoIncidentByMonitor returns the currently-open auto-incident for a
 // monitor (source auto, not yet resolved), or ErrNotFound. Used to avoid opening
 // a duplicate while one is already active.
 func (s *Store) FindOpenAutoIncidentByMonitor(ctx context.Context, monitorID string) (domain.Incident, error) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT `+incidentColumns+` FROM incidents
-		 WHERE monitor_id = $1 AND source = 'auto' AND status <> 'resolved'
-		 ORDER BY started_at DESC LIMIT 1`, monitorID)
+		`SELECT `+incidentColumns+` `+openMonitorAutoIncidentFrom, monitorID)
 	inc, err := scanIncident(row)
 	if noRows(err) {
 		return domain.Incident{}, ErrNotFound

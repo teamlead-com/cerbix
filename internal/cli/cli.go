@@ -40,6 +40,7 @@ import (
 	"github.com/teamlead-com/cerbix/internal/settings"
 	"github.com/teamlead-com/cerbix/internal/store"
 	"github.com/teamlead-com/cerbix/internal/subscribe"
+	"github.com/teamlead-com/cerbix/internal/telephony"
 	"github.com/teamlead-com/cerbix/internal/web"
 	"github.com/teamlead-com/cerbix/internal/webhook"
 	"github.com/teamlead-com/cerbix/internal/worker"
@@ -359,6 +360,27 @@ func notificationEgressGuard(cfg *config.Config) prober.Guard {
 	return prober.NewGuard(cfg.NotificationEgress.AllowPrivateIPs, cfg.NotificationEgress.AllowMetadataIPs)
 }
 
+// newTelephonyService builds the telephony in force (FR-041a): the provider the live settings describe,
+// built for each send, reached through the notification egress guard's client like every other
+// outbound alert — a generic_http URL is typed by an admin and must not reach loopback or a private
+// range unless notification_egress allows it — and refusing redirects (D14).
+func newTelephonyService(settings telephony.SettingsSource, egress prober.Guard) *telephony.Service {
+	return telephony.NewService(settings, egress.HTTPClient(10*time.Second))
+}
+
+// phoneLinkSettings is the live settings a phone message's link is built from.
+type phoneLinkSettings interface {
+	Telephony() domain.TelephonySettings
+	Mail() domain.MailSettings
+}
+
+// phoneLinkBases returns the two public base URLs of a phone message's incident link (§4.1): the
+// telephony settings' own and mail's, each read at the send, so a save is in force for the next
+// message.
+func phoneLinkBases(s phoneLinkSettings) (telephonyBase, mailBase func() string) {
+	return func() string { return s.Telephony().PublicBaseURL }, func() string { return s.Mail().PublicBaseURL }
+}
+
 func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 	cfg := loadConfigTo(opts.ConfigPath, stderr)
 	if cfg == nil {
@@ -468,6 +490,7 @@ func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 		st.WithExpectedRunPolicy(cfg.Ledger.ExpectedRunRetentionDays, cfg.Ledger.ExpectedRunGapWindowsMax)
 		// Service-reliability EVENT counters (§21) fire at their store-side event sites.
 		st.WithServiceEvents(registry)
+		st.WithLogger(logger) // FR-041a: a number changing hands is logged where it happens
 		// Secret-at-rest encryption (validated in config; empty key = disabled).
 		if keys, err := cfg.Security.Keys(); err != nil {
 			logging.Critical(logger, "encryption_key_invalid", "error", err.Error())
@@ -527,6 +550,9 @@ func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 	// resolves its SMTP endpoint per send from these settings (live-reconfigurable).
 	var settingsSvc *settings.Service
 	var mail *mailer.Mailer
+	// telSvc is the telephony in force (FR-041a): the outbox phones through it and the API sends the
+	// verification codes and the test SMS through it. Every role that delivers builds it.
+	var telSvc *telephony.Service
 	if st != nil && owned.coreDelivery {
 		settingsSvc = settings.New(st, settings.Bootstrap{
 			MinPasswordLen:    cfg.Local.MinPasswordLength,
@@ -561,8 +587,13 @@ func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 		mailer.SetEgressDial(egress.EgressDialContext())
 		subs := subscribe.New(st, mail)
 		deliverer := incidentFanout{hooks: webhook.New(st, egress.HTTPClient(10*time.Second)), subs: subs, logger: logger}
-		ob := outbox.New(st, deliverer, notify.New(st, egress.HTTPClient(10*time.Second)), registry, logger).
+		telSvc = newTelephonyService(settingsSvc, egress)
+		notifier := notify.New(st, egress.HTTPClient(10*time.Second)).WithPhone(st, telSvc, registry, logger)
+		ob := outbox.New(st, deliverer, notifier, registry, logger).
 			WithMailer(mail).
+			// FR-041a §4.1: a phone message links its incident under the telephony public_base_url,
+			// else mail's, read at each send.
+			WithPhoneLinks(phoneLinkBases(settingsSvc)).
 			WithSilence(func() bool { return settingsSvc.Alerting().Silenced(time.Now()) }).
 			// FR-025 D7: preceding changes are linked at a service auto-incident's opened delivery;
 			// the registry counts the links by role and the fail-open errors (D15).
@@ -628,6 +659,11 @@ func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 			}, registry)
 		if mail != nil {
 			apiHandler.WithMailer(mail)
+		}
+		if telSvc != nil {
+			// FR-041a: the verification codes and the settings' test SMS go out through the
+			// telephony in force; without it those routes answer 501.
+			apiHandler.WithTelephony(telSvc)
 		}
 		if st != nil {
 			// Push results apply through a dedicated recorder (trusted entrypoint, not the
@@ -828,6 +864,7 @@ func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 				// retentions. `TestEveryLeaderConstructionWiresTheLedgerPass` parses this file so
 				// a third construction site cannot ship without them.
 				WithLedgerMetrics(registry).
+				WithPhoneMetrics(registry).                    // FR-041a P7: every stale phone delivery the leader closes is counted as outcome_unknown
 				WithLocalCanaryRegions(localCanaryRegions...). // FR-029: the in-proc worker IS the announcement in role=all
 				WithLocalCanaryAnyRegionIf(canaryToken != ""). // B5: and it runs one for EVERY non-pull region, exactly as it does for every other type
 				WithPullRegions(cfg.Pull.Regions).             // pull-region jobs → pull_jobs (agent claims), NOT the in-proc worker
@@ -864,6 +901,7 @@ func serveRuntime(opts serveOptions, stdout, stderr io.Writer) int {
 				WithSecretResolutionMetrics(registry).
 				// FR-032 §11/§12.3, the same pair as the role=all construction above.
 				WithLedgerMetrics(registry).
+				WithPhoneMetrics(registry).        // FR-041a P7, the same as the role=all construction above
 				WithPullRegions(cfg.Pull.Regions). // pull-served regions get jobs via pull_jobs, not AMQP
 				WithPullMetrics(registry).
 				WithServiceMetrics(registry).                    // service repair queue/watermark gauges + slice outcomes                                          // per-region pull-queue depth/lag gauges

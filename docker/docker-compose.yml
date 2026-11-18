@@ -20,6 +20,7 @@
 #   10.5.0.12  mariadb  (sso)  10.5.0.22  worker      (distributed)
 #   10.5.0.13  keycloak (sso)  10.5.0.15  mailpit (mail)
 #   10.5.0.14  cerbix   (single)
+#   10.5.0.16  phonestub (phone)
 
 x-netCaps: &netCaps
   cap_drop:
@@ -185,6 +186,30 @@ services:
     ports:
       - "8025:8025"   # web UI + API
       - "1025:1025"   # SMTP
+
+  # ---- profile: phone (the telephony provider stub for phone-alert E2E) ------
+  # Records every SMS cerbix's generic_http provider sends and answers 201; forwards nothing, so no
+  # real provider is ever called from the dev stack (FR-041a, e2e/tests/phone-alerts.spec.ts). The
+  # stock node image runs the one dependency-free script; :8026 is published for the host-network
+  # Playwright container.
+  phonestub:
+    image: node:22-alpine
+    <<: [*netCaps, *logging]
+    profiles: ["phone"]
+    user: "node"
+    command: ["node", "/srv/server.mjs"]
+    volumes:
+      - ./phone-stub/server.mjs:/srv/server.mjs:ro
+    networks:
+      default:
+        ipv4_address: 10.5.0.16
+    ports:
+      - "8026:8026"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8026/_stub/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   # ---- profile: sso (optional Keycloak OIDC) --------------------------------
   mariadb:

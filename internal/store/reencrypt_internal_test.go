@@ -176,12 +176,12 @@ func TestReencryptRotatesToPrimary(t *testing.T) {
 	// Rotate: new primary B, old A kept for reading, then reencrypt.
 	rotated, _ := secret.New(keyB, keyA)
 	st.WithCipher(rotated)
-	nw, nc, err := st.ReencryptSecrets(ctx)
+	res, err := st.ReencryptSecrets(ctx)
 	if err != nil {
 		t.Fatalf("reencrypt: %v", err)
 	}
-	if nw != 1 || nc != 1 {
-		t.Fatalf("reencrypted %d webhooks / %d channels, want 1/1", nw, nc)
+	if res.Webhooks != 1 || res.Channels != 1 {
+		t.Fatalf("reencrypted %d webhooks / %d channels, want 1/1", res.Webhooks, res.Channels)
 	}
 
 	// The raw columns are now decryptable with B alone, and not with A alone.

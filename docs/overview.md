@@ -25,7 +25,7 @@ A single binary; behavior is selected by subcommand and flags.
 |---|---|---|
 | `cerbix serve` | Start the operational server in the selected role. | `--config <path>` (required), `--role all\|api\|scheduler\|worker\|agent` (default `all`), `--region <name>` (worker/agent pool, default `core`) |
 | `cerbix migrate` | Apply DB migrations (goose, embedded) and exit. | `--config <path>` (required; needs `database.dsn`) |
-| `cerbix reencrypt` | Re-encrypt all at-rest secrets under the current primary key (after key rotation). | `--config <path>` (required; needs `security.encryption_key` and `database.dsn`) |
+| `cerbix reencrypt` | Re-encrypt all at-rest secrets under the current primary key (after key rotation), the telephony secrets and every stored phone number included, and recompute the numbers' keyed hashes; exit `0` everything re-encrypted, `1` failure, `2` usage, `3` completed but a phone number was skipped — keep the previous key and run again. | `--config <path>` (required; needs `security.encryption_key` and `database.dsn`) |
 | `cerbix adopt-fact-month` | Adopt one retained service-fact month from the DEFAULT partition through the copy-authoritative operator path. | `--config <path>`, `--month YYYY-MM` (required), `--timeout 10m`; no dry-run or confirmation; maintenance-window operation |
 | `cerbix enqueue-service-repair` | Queue a durable audited admin repair; the scheduler leader performs the later recomputation. | `--config <path>`, `--project <id>`, `--service <id>`, `--from RFC3339`, `--to RFC3339` (all required) |
 | `cerbix gate check` | Ask the reliability gate (FR-024) whether the error budget allows a release; the exit code follows `action` — `0` ALLOW/WARN, `2` BLOCK, `4` NOT_CONFIGURED, `1` transport/auth/429. | `--project <id>`, `--service <id>` (required), `--json`, `--timeout 10s`; the server is `CERBIX_URL` and the credential `CERBIX_TOKEN` (environment only, never a flag), `CERBIX_CA_FILE` adds a CA |
@@ -204,6 +204,29 @@ detail, never by the list, the public page, the feeds or a webhook. Impact is a 
 control: no SLO, budget, burn, gate, coverage, delegation, suppression or escalation computation reads
 it, and a mapping change opens no definition revision, evaluation epoch or `alert_config_generation`
 bump (D-0282; upgrade and rollback notes in the runbook).
+
+**Phone alerts (FR-041a / NFR-034, iter-0216).** Two channel types, `sms` and `voice`, deliver the
+alerts that ask a person to act (spec D18: a monitor down or recovered, a service alert, an escalation
+step, a burn alert) to a phone, through one instance-wide provider — Twilio, or a generic HTTP gateway
+for SMS only. A phone channel names either **a person** (`recipient: user`, whose own verified number
+is read at send time) or **a fixed number** (`recipient: number`, created disabled and enabled after a
+code confirms it); a project editor may create one only for themselves, a project admin for anyone
+eligible (D28). A number is verified by a six-digit code sent by SMS or spoken by a call
+(`via: voice`, offered while `/me` says `telephony_can_call`), and stored as AEAD ciphertext, a keyed
+hash (HMAC-SHA-256 under a sub-key derived from each at-rest key, for uniqueness and lookups across a
+rotation) and a mask — no response, log line or delivery row carries it in full (D35). A phone channel
+is a **route** only when it can deliver (D31 rule 1, one SQL fragment in every route predicate and in
+the channel's `deliverable`): its recipient exists and is still eligible, its number is verified, it is
+enabled, telephony is on, and for `voice` the provider can place calls (the generated column
+`telephony_can_place_calls`). **Telephony lives in the database only** (D36): no YAML key, absent means
+disabled, and it needs `security.encryption_key` (D29). Delivery runs beside the text channels in the
+outbox worker: each phone delivery is reserved as a `sending` row before the provider is called (D33),
+bounded by a storm guard per incident and per number, and recorded with the HTTP status, a provider
+code and the attempts, never provider text. Operators read the record on the incident's **Phone
+panel** and in a channel's last 50 deliveries; nothing reaches the status page. Every incident gets an
+eight-character `ref`, and `/i/<ref>` — the link in an SMS — opens it, switching the workspace and
+returning there through an SSO sign-in (D-0283; operations in the runbook). FR-041b (acknowledge and
+snooze from the phone) and FR-041c (quotas, fallback, quiet hours) are not built.
 
 **Services (FR-021, phase 1).** A `Service` is the unit whose reliability is *explicitly
 declared*, and it sits BESIDE monitors rather than above them: a monitor may contribute to
@@ -569,6 +592,7 @@ One `--role=all` process + infrastructure:
 | `rabbitmq` | `${CERBIX_RABBITMQ_IMAGE:?...}` (fresh env template pins `rabbitmq:4.3-management`) | 5672 / 15672 | Broker (not used in dev with `all`) |
 | `keycloak` | `quay.io/keycloak/keycloak:18.0.0` (`start-dev`) | 8081 | OIDC IdP |
 | `cerbix` | build from the repository root | 8080 | `serve --role all` (API + SPA embed) |
+| `phonestub` | `node:22-alpine` running `docker/phone-stub/server.mjs` | 8026 | Dev/E2E only, compose profile `phone` (started by `make dev-up`): a stand-in SMS gateway for Generic HTTP that records what it receives and forwards nothing |
 
 The SPA is served by the binary itself from `embed.FS` on :8080 — no separate nginx layer is needed. **The image
 is self-contained:** `docker/Dockerfile` is a root-context multi-stage build (node builds the SPA → the Go stage

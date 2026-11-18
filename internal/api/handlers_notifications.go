@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -21,22 +22,74 @@ func (h *Handler) listChannels(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "list_channels", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, redactChannels(channels))
+	out, err := h.channelsOut(r.Context(), channels)
+	if err != nil {
+		h.serverError(w, "only_route_for", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
-// createChannel creates a notification channel (editor+).
+// createChannelRequest is the POST body (openapi CreateNotificationChannel). recipient,
+// recipient_user_id and number belong to the sms and voice types (FR-041a §4.3).
+type createChannelRequest struct {
+	Type            string            `json:"type" contract:"required"`
+	Name            string            `json:"name" contract:"required"`
+	Config          map[string]string `json:"config"`
+	Enabled         *bool             `json:"enabled"`
+	Recipient       *string           `json:"recipient"`
+	RecipientUserID *string           `json:"recipient_user_id" contract:"format=uuid"`
+	Number          *string           `json:"number"`
+}
+
+func (b createChannelRequest) hasPhoneFields() bool {
+	return b.Recipient != nil || b.RecipientUserID != nil || b.Number != nil
+}
+
+// updateChannelRequest is the PATCH body (openapi UpdateNotificationChannel).
+type updateChannelRequest struct {
+	Name            *string           `json:"name"`
+	Config          map[string]string `json:"config"`
+	Enabled         *bool             `json:"enabled"`
+	Recipient       *string           `json:"recipient"`
+	RecipientUserID *string           `json:"recipient_user_id" contract:"format=uuid"`
+	Number          *string           `json:"number"`
+}
+
+func (b updateChannelRequest) hasPhoneFields() bool {
+	return b.Recipient != nil || b.RecipientUserID != nil || b.Number != nil
+}
+
+// errPhoneFieldsOnOtherType answers a phone field sent for one of the four other types.
+const errPhoneFieldsOnOtherType = "recipient, recipient_user_id and number belong to sms and voice channels only"
+
+// createChannel creates a notification channel (editor+). An sms or voice channel follows D28 and
+// its own gates (createPhoneChannel): the project's visibility first (404), then D28 alone — so a
+// token whose list is only project:manage creates a `number` channel (FR-041a review P1-2). The four
+// text types keep project:write, judged before the body is read, exactly as before.
 func (h *Handler) createChannel(w http.ResponseWriter, r *http.Request) {
-	proj, ok := h.projectAccess(w, r, r.PathValue("projectID"), authz.ActionProjectWrite)
+	proj, ok := h.projectVisible(w, r, r.PathValue("projectID"))
 	if !ok {
 		return
 	}
-	var body struct {
-		Type    string            `json:"type"`
-		Name    string            `json:"name"`
-		Config  map[string]string `json:"config"`
-		Enabled *bool             `json:"enabled"`
+	if !h.mayWriteChannels(r, proj) && !(h.phoneAuthority(r, proj) != phoneAuthNone && phoneChannelBody(r)) {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
 	}
+	var body createChannelRequest
 	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if domain.IsPhoneChannelType(domain.ChannelType(body.Type)) {
+		h.createPhoneChannel(w, r, proj, body)
+		return
+	}
+	if !h.mayWriteChannels(r, proj) {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if body.hasPhoneFields() {
+		writeError(w, http.StatusBadRequest, errPhoneFieldsOnOtherType)
 		return
 	}
 	enabled := true
@@ -82,15 +135,20 @@ func (h *Handler) updateChannel(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "get_channel", err)
 		return
 	}
-	if _, ok := h.projectAccess(w, r, ch.ProjectID, authz.ActionProjectWrite); !ok {
+	proj, ok := h.channelProjectAccess(w, r, ch)
+	if !ok {
 		return
 	}
-	var body struct {
-		Enabled *bool             `json:"enabled"`
-		Name    *string           `json:"name"`
-		Config  map[string]string `json:"config"`
-	}
+	var body updateChannelRequest
 	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if domain.IsPhoneChannelType(ch.Type) {
+		h.updatePhoneChannel(w, r, ch, proj, body)
+		return
+	}
+	if body.hasPhoneFields() {
+		writeError(w, http.StatusBadRequest, errPhoneFieldsOnOtherType)
 		return
 	}
 	if body.Enabled == nil && body.Name == nil && body.Config == nil {
@@ -141,7 +199,12 @@ func (h *Handler) deleteChannel(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "get_channel", err)
 		return
 	}
-	if _, ok := h.projectAccess(w, r, ch.ProjectID, authz.ActionProjectWrite); !ok {
+	proj, ok := h.channelProjectAccess(w, r, ch)
+	if !ok {
+		return
+	}
+	if domain.IsPhoneChannelType(ch.Type) {
+		h.deletePhoneChannel(w, r, ch, proj)
 		return
 	}
 	if err := h.store.DeleteNotificationChannel(r.Context(), ch.ID); err != nil {
@@ -162,7 +225,12 @@ func (h *Handler) listMonitorChannels(w http.ResponseWriter, r *http.Request) {
 		h.serverError(w, "list_monitor_channels", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, redactChannels(channels))
+	out, err := h.channelsOut(r.Context(), channels)
+	if err != nil {
+		h.serverError(w, "only_route_for", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // redactChannels blanks secret config values in a channel slice before it is
@@ -175,6 +243,44 @@ func redactChannels(chs []domain.NotificationChannel) []domain.NotificationChann
 		out[i] = ch.Redacted()
 	}
 	return out
+}
+
+// channelsOut is chs as a channel answer carries them: secrets blanked (redactChannels), and every
+// sms and voice channel with its `only_route_for` (FR-041a §4.3), which the store computes with the
+// route predicate itself. A list without a phone channel reads nothing more and is answered exactly
+// as before (P14).
+func (h *Handler) channelsOut(ctx context.Context, chs []domain.NotificationChannel) ([]domain.NotificationChannel, error) {
+	out := redactChannels(chs)
+	var ids []string
+	for _, ch := range out {
+		if domain.IsPhoneChannelType(ch.Type) {
+			ids = append(ids, ch.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	routes, err := h.store.PhoneChannelsOnlyRouteFor(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if domain.IsPhoneChannelType(out[i].Type) {
+			out[i].SetOnlyRouteFor(routes[out[i].ID])
+		}
+	}
+	return out, nil
+}
+
+// writeChannel answers with one channel as channelsOut shapes it, or a 500 when its only_route_for
+// cannot be read.
+func (h *Handler) writeChannel(w http.ResponseWriter, r *http.Request, status int, ch domain.NotificationChannel) {
+	out, err := h.channelsOut(r.Context(), []domain.NotificationChannel{ch})
+	if err != nil {
+		h.serverError(w, "only_route_for", err)
+		return
+	}
+	writeJSON(w, status, out[0])
 }
 
 // linkMonitorChannel links a channel to a monitor (editor+). The channel must be

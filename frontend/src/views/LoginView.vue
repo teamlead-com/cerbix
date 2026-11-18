@@ -91,8 +91,17 @@ async function submitLocal() {
   }
 }
 
+// FR-041a D21 (mock 5e): the SSO start carries the page's own `redirect`, so a link such as
+// `/i/<ref>` survives an SSO sign-in. Passed as is: the server's `sanitizeRedirect` replaces anything
+// that is not a path on this site (`//host`, `/\host`, a scheme, a control character) with `/` (5e-2).
+function ssoReturnPath(): string {
+  const r = route.query.redirect;
+  const v = Array.isArray(r) ? r[0] : r;
+  return typeof v === "string" && v ? v : "/";
+}
+
 function oidcLogin() {
-  window.location.href = "/auth/login?redirect=/";
+  window.location.href = "/auth/login?redirect=" + encodeURIComponent(ssoReturnPath());
 }
 </script>
 

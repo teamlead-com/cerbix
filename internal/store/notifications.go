@@ -3,24 +3,54 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teamlead-com/cerbix/internal/domain"
 )
 
-const channelColumns = "id, project_id, type, name, config, enabled, created_at"
+// channelBaseColumns are a channel's stored columns: the original seven, then the typed phone
+// columns of FR-041a (§4.3), appended at the END so every scan reads them in this order.
+const channelBaseColumns = "id, project_id, type, name, config, enabled, created_at, " +
+	"recipient, recipient_user_id, number_masked, number_verified_at, disabled_reason"
+
+// channelColumns lists a channel's columns for a row aliased alias, ending with the computed reason
+// it is not a route (D31 rule 1, phoneroute.go) — the source of the DTO's `deliverable` — and the
+// display name of a `user` channel's recipient (§4.3: a name, never the email; NULL once the user is
+// deleted). The number's ciphertext and hash are never read here: every channel read is
+// decrypt-free for the number. The name is recipientNameSQL's.
+func channelColumns(alias string) string {
+	return prefixed(channelBaseColumns, alias) + ", " + phoneRouteReasonSQL(alias) +
+		", (SELECT " + recipientNameSQL(alias+"_rn") + " FROM users " + alias + "_rn WHERE " + alias + "_rn.id = " + alias + ".recipient_user_id)"
+}
+
+// recipientNameSQL is how every phone surface names a recipient — a `user` channel's
+// recipient_display_name and a delivery's (FR-041a §4.3, §4.5) — from the users row aliased u: the
+// display name, never an email. A display name can hold one (the OIDC preferred_username fallback,
+// or a person who typed their address), so one with an '@' is cut to the part before the first '@',
+// and is NULL when that part is empty — as an empty display name (the column's default) is NULL, never
+// "" (revision-7 review M-7). The one spelling of the rule, shared by both reads.
+func recipientNameSQL(u string) string {
+	return "(CASE WHEN strpos(" + u + ".display_name, '@') > 0 THEN NULLIF(split_part(" + u + ".display_name, '@', 1), '')" +
+		" ELSE NULLIF(" + u + ".display_name, '') END)"
+}
 
 // scanChannel scans a row and decrypts each config value (a no-op for plaintext
 // or when encryption is disabled).
 func (s *Store) scanChannel(row pgx.Row) (domain.NotificationChannel, error) {
 	var (
-		ch     domain.NotificationChannel
-		config []byte
+		ch                                                   domain.NotificationChannel
+		config                                               []byte
+		recipient, recipientUser, masked, disabled, notRoute *string
+		recipientName                                        *string
+		verifiedAt                                           *time.Time
 	)
-	if err := row.Scan(&ch.ID, &ch.ProjectID, &ch.Type, &ch.Name, &config, &ch.Enabled, &ch.CreatedAt); err != nil {
+	if err := row.Scan(&ch.ID, &ch.ProjectID, &ch.Type, &ch.Name, &config, &ch.Enabled, &ch.CreatedAt,
+		&recipient, &recipientUser, &masked, &verifiedAt, &disabled, &notRoute, &recipientName); err != nil {
 		return domain.NotificationChannel{}, err
 	}
 	ch.Config = map[string]string{}
@@ -36,12 +66,40 @@ func (s *Store) scanChannel(row pgx.Row) (domain.NotificationChannel, error) {
 		}
 		ch.Config[k] = plain
 	}
+	if domain.IsPhoneChannelType(ch.Type) {
+		ch.Recipient = deref(recipient)
+		ch.RecipientUserID = deref(recipientUser)
+		ch.DisabledReason = deref(disabled)
+		if ch.Recipient == domain.PhoneRecipientNumber {
+			ch.NumberMasked = deref(masked)
+			verified := verifiedAt != nil
+			ch.NumberVerified = &verified
+		}
+		if ch.Recipient == domain.PhoneRecipientUser {
+			ch.RecipientDisplayName = domain.RecipientName{Present: true, Name: recipientName}
+		}
+		ch.Deliverable = &domain.ChannelDeliverable{Route: notRoute == nil, Reason: deref(notRoute)}
+	}
 	return ch, nil
+}
+
+// errPhoneChannelWriter refuses an sms or voice channel on the generic writers: their typed columns,
+// gates and audit rows belong to CreatePhoneChannel and UpdatePhoneChannel (phone_channels.go).
+var errPhoneChannelWriter = errors.New("store: sms and voice channels are written by the phone-channel writers")
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // CreateNotificationChannel inserts a channel (validated in domain). Config values
 // (credentials, tokens, hook URLs) are encrypted at rest when a cipher is set.
 func (s *Store) CreateNotificationChannel(ctx context.Context, ch domain.NotificationChannel) (domain.NotificationChannel, error) {
+	if domain.IsPhoneChannelType(ch.Type) {
+		return domain.NotificationChannel{}, errPhoneChannelWriter
+	}
 	if err := ch.Validate(); err != nil {
 		return domain.NotificationChannel{}, fmt.Errorf("store: invalid channel: %w", err)
 	}
@@ -58,8 +116,8 @@ func (s *Store) CreateNotificationChannel(ctx context.Context, ch domain.Notific
 		return domain.NotificationChannel{}, fmt.Errorf("store: encode channel config: %w", err)
 	}
 	row := s.pool.QueryRow(ctx,
-		`INSERT INTO notification_channels (project_id, type, name, config, enabled)
-		 VALUES ($1,$2,$3,$4,$5) RETURNING `+channelColumns,
+		`INSERT INTO notification_channels AS c (project_id, type, name, config, enabled)
+		 VALUES ($1,$2,$3,$4,$5) RETURNING `+channelColumns("c"),
 		ch.ProjectID, ch.Type, ch.Name, string(cfg), ch.Enabled)
 	created, err := s.scanChannel(row)
 	if err != nil {
@@ -77,6 +135,9 @@ func (s *Store) UpdateNotificationChannel(ctx context.Context, ch domain.Notific
 	if ch.ID == "" {
 		return domain.NotificationChannel{}, fmt.Errorf("store: update channel: id is required")
 	}
+	if domain.IsPhoneChannelType(ch.Type) {
+		return domain.NotificationChannel{}, errPhoneChannelWriter
+	}
 	if err := ch.Validate(); err != nil {
 		return domain.NotificationChannel{}, fmt.Errorf("store: invalid channel: %w", err)
 	}
@@ -93,7 +154,7 @@ func (s *Store) UpdateNotificationChannel(ctx context.Context, ch domain.Notific
 		return domain.NotificationChannel{}, fmt.Errorf("store: encode channel config: %w", err)
 	}
 	row := s.pool.QueryRow(ctx,
-		`UPDATE notification_channels SET name = $2, config = $3 WHERE id = $1 RETURNING `+channelColumns,
+		`UPDATE notification_channels AS c SET name = $2, config = $3 WHERE c.id = $1 RETURNING `+channelColumns("c"),
 		ch.ID, ch.Name, string(cfg))
 	updated, err := s.scanChannel(row)
 	if noRows(err) {
@@ -105,11 +166,12 @@ func (s *Store) UpdateNotificationChannel(ctx context.Context, ch domain.Notific
 	return updated, nil
 }
 
-// GetNotificationChannel returns a channel by id, or ErrNotFound.
+// GetNotificationChannel returns a channel by id, or ErrNotFound — for an id that is not a uuid too,
+// which names no channel (FR-041a review P2-9).
 func (s *Store) GetNotificationChannel(ctx context.Context, id string) (domain.NotificationChannel, error) {
-	row := s.pool.QueryRow(ctx, `SELECT `+channelColumns+` FROM notification_channels WHERE id = $1`, id)
+	row := s.pool.QueryRow(ctx, `SELECT `+channelColumns("c")+` FROM notification_channels c WHERE c.id = $1`, id)
 	ch, err := s.scanChannel(row)
-	if noRows(err) {
+	if noRows(err) || isInvalidTextRepresentation(err) {
 		return domain.NotificationChannel{}, ErrNotFound
 	}
 	if err != nil {
@@ -121,7 +183,7 @@ func (s *Store) GetNotificationChannel(ctx context.Context, id string) (domain.N
 // ListChannelsByProject lists a project's channels, newest first.
 func (s *Store) ListChannelsByProject(ctx context.Context, projectID string) ([]domain.NotificationChannel, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+channelColumns+` FROM notification_channels WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
+		`SELECT `+channelColumns("c")+` FROM notification_channels c WHERE c.project_id = $1 ORDER BY c.created_at DESC`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list channels: %w", err)
 	}
@@ -132,7 +194,7 @@ func (s *Store) ListChannelsByProject(ctx context.Context, projectID string) ([]
 // ListMonitorChannels lists the channels linked to a monitor.
 func (s *Store) ListMonitorChannels(ctx context.Context, monitorID string) ([]domain.NotificationChannel, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+prefixed(channelColumns, "c")+` FROM notification_channels c
+		`SELECT `+channelColumns("c")+` FROM notification_channels c
 		 JOIN monitor_notifications mn ON mn.channel_id = c.id
 		 WHERE mn.monitor_id = $1 ORDER BY c.created_at DESC`, monitorID)
 	if err != nil {
@@ -146,7 +208,7 @@ func (s *Store) ListMonitorChannels(ctx context.Context, monitorID string) ([]do
 // (the delivery targets for a transition notification).
 func (s *Store) ListEnabledChannelsForMonitor(ctx context.Context, monitorID string) ([]domain.NotificationChannel, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+prefixed(channelColumns, "c")+` FROM notification_channels c
+		`SELECT `+channelColumns("c")+` FROM notification_channels c
 		 JOIN monitor_notifications mn ON mn.channel_id = c.id
 		 WHERE mn.monitor_id = $1 AND c.enabled ORDER BY c.created_at DESC`, monitorID)
 	if err != nil {
@@ -160,7 +222,7 @@ func (s *Store) ListEnabledChannelsForMonitor(ctx context.Context, monitorID str
 // delivery targets for a project-level notification such as a weekly SLA report).
 func (s *Store) ListEnabledChannelsByProject(ctx context.Context, projectID string) ([]domain.NotificationChannel, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+prefixed(channelColumns, "c")+` FROM notification_channels c
+		`SELECT `+channelColumns("c")+` FROM notification_channels c
 		 WHERE c.project_id = $1 AND c.enabled ORDER BY c.created_at DESC`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list enabled project channels: %w", err)
@@ -184,16 +246,31 @@ func (s *Store) collectChannels(rows pgx.Rows) ([]domain.NotificationChannel, er
 	return out, nil
 }
 
-// DeleteNotificationChannel removes a channel (and its monitor links via cascade).
+// DeleteNotificationChannel removes a channel (and its monitor links via cascade). An sms or voice
+// channel is refused (errPhoneChannelWriter): DeletePhoneChannel ends its codes and audits it.
 func (s *Store) DeleteNotificationChannel(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM notification_channels WHERE id = $1`, id)
+	tag, err := s.pool.Exec(ctx, `DELETE FROM notification_channels WHERE id = $1 AND type NOT IN ('sms', 'voice')`, id)
 	if err != nil {
 		return fmt.Errorf("store: delete channel: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		return s.phoneChannelOrNotFound(ctx, id)
 	}
 	return nil
+}
+
+// phoneChannelOrNotFound explains a generic write that matched no row: errPhoneChannelWriter when id
+// is an sms or voice channel, ErrNotFound otherwise.
+func (s *Store) phoneChannelOrNotFound(ctx context.Context, id string) error {
+	var phone bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM notification_channels
+		 WHERE id = $1 AND type IN ('sms', 'voice'))`, id).Scan(&phone); err != nil {
+		return fmt.Errorf("store: read channel type: %w", err)
+	}
+	if phone {
+		return errPhoneChannelWriter
+	}
+	return ErrNotFound
 }
 
 // LinkMonitorChannel links a monitor to a channel (idempotent).
@@ -255,14 +332,16 @@ func prefixed(cols, alias string) string {
 }
 
 // SetNotificationChannelEnabled pauses or resumes a channel; delivery listing
-// filters on the flag already.
+// filters on the flag already. An sms or voice channel is refused (errPhoneChannelWriter): switching
+// one on has gates, which UpdatePhoneChannel applies.
 func (s *Store) SetNotificationChannelEnabled(ctx context.Context, id string, enabled bool) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE notification_channels SET enabled = $2 WHERE id = $1`, id, enabled)
+	tag, err := s.pool.Exec(ctx, `UPDATE notification_channels SET enabled = $2
+		 WHERE id = $1 AND type NOT IN ('sms', 'voice')`, id, enabled)
 	if err != nil {
 		return fmt.Errorf("store: set channel enabled: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		return s.phoneChannelOrNotFound(ctx, id)
 	}
 	return nil
 }

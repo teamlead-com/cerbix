@@ -665,6 +665,7 @@ Exit codes:
   0  Stored secrets re-encrypted.
   1  Configuration, database, key, or rewrite failure.
   2  CLI usage error.
+  3  Completed, but some phone numbers were skipped: keep the previous key and run again.
 
 Examples:
   cerbix reencrypt --config /etc/cerbix/config.yaml

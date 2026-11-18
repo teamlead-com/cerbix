@@ -141,6 +141,14 @@ const routes: RouteRecordRaw[] = [
     component: () => import("@/views/IncidentDetailView.vue"),
   },
   {
+    // FR-041a D21 (mock §5): the short link in a phone message. NOT public — the guard below sends
+    // a visitor to `/login?redirect=/i/<ref>` (5c) and the login page names nothing about it. The
+    // view resolves the reference, switches the workspace and REPLACES the URL with the incident's.
+    path: "/i/:ref",
+    name: "incident-ref",
+    component: () => import("@/views/IncidentRefView.vue"),
+  },
+  {
     path: "/status",
     name: "status",
     component: () => import("@/views/StatusPagesView.vue"),

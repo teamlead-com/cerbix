@@ -18,6 +18,7 @@ import (
 	"github.com/teamlead-com/cerbix/internal/settings"
 	"github.com/teamlead-com/cerbix/internal/sla"
 	"github.com/teamlead-com/cerbix/internal/store"
+	"github.com/teamlead-com/cerbix/internal/telephony"
 )
 
 // Store is the persistence surface the API needs.
@@ -83,6 +84,37 @@ type Store interface {
 	GetTOTP(ctx context.Context, userID string) (secret string, enabled bool, err error)
 	EnableTOTP(ctx context.Context, userID, confirmedSecret string, recoveryHashes []string) error
 	DisableTOTP(ctx context.Context, userID string) error
+	// FR-041a §4.2: a person's own phone number. Reads return the mask; only
+	// VerifiedUserPhoneNumber opens the ciphertext, and only for a verified number (P1).
+	SetUserPhone(ctx context.Context, userID, number string) (domain.UserPhone, string, error)
+	VerifyUserPhone(ctx context.Context, userID, code string) (domain.UserPhone, error)
+	DeleteUserPhone(ctx context.Context, userID string) error
+	SetUserPhoneLanguage(ctx context.Context, userID string, language *string) (domain.UserPhone, error)
+	GetUserPhone(ctx context.Context, userID string) (*domain.UserPhone, error)
+	VerifiedUserPhoneNumber(ctx context.Context, userID string) (string, error)
+	// SendUserPhoneCode issues a new code for the user's STORED unverified number (§4.2, R6) and
+	// returns the number to send it to; domain.ErrPhoneNoNumber, domain.ErrPhoneAlreadyVerified.
+	SendUserPhoneCode(ctx context.Context, userID string) (number, code string, err error)
+	// TelephonyVoiceLanguage is the instance's voice_language (§4.1), read without opening a secret.
+	TelephonyVoiceLanguage(ctx context.Context) (string, error)
+	// TelephonyCanCall is telephony on AND the provider can place calls (D3) — GET /api/v1/me's
+	// telephony_can_call (FR-041a revision 9, §4.2) — read without opening a secret.
+	TelephonyCanCall(ctx context.Context) (bool, error)
+
+	// FR-041a §4.2, §4.3: the sms and voice channels. Every write runs its gates and its audit row in
+	// one transaction; authorize is the handler's D28 decision about the row as locked.
+	CreatePhoneChannel(ctx context.Context, ch domain.NotificationChannel, number string, actor store.AuditActor) (domain.NotificationChannel, error)
+	UpdatePhoneChannel(ctx context.Context, id string, patch store.PhoneChannelPatch, actor store.AuditActor,
+		authorize func(stored domain.NotificationChannel) error) (domain.NotificationChannel, error)
+	DeletePhoneChannel(ctx context.Context, id string, actor store.AuditActor, authorize func(stored domain.NotificationChannel) error) error
+	SendChannelVerificationCode(ctx context.Context, id, requester string) (number, code string, err error)
+	VerifyChannelNumber(ctx context.Context, id, code string, actor store.AuditActor) (domain.NotificationChannel, error)
+	ListPhoneRecipients(ctx context.Context, projectID string) ([]domain.PhoneRecipient, error)
+	// PhoneChannelsOnlyRouteFor is §4.3's only_route_for of each phone channel among ids (D31's route
+	// predicate, in SQL); the four other types have no entry.
+	PhoneChannelsOnlyRouteFor(ctx context.Context, ids []string) (map[string]domain.OnlyRouteFor, error)
+	TelephonyEnabled(ctx context.Context) (bool, error)
+	EncryptionKeyConfigured() bool
 	MonitorSLI(ctx context.Context, monitorID string, since time.Time) (store.SLICounts, error)
 	ProjectSLI(ctx context.Context, projectID string, since time.Time) (store.SLICounts, error)
 	MonitorDailyAvailability(ctx context.Context, monitorID string, since time.Time) ([]store.DailyAvailability, error)
@@ -146,6 +178,13 @@ type Store interface {
 	DeleteOnCallOverride(ctx context.Context, id string) error
 	FindOpenIncidentByExternalKey(ctx context.Context, projectID, key string) (domain.Incident, error)
 	ListIncidentsByProject(ctx context.Context, projectID string) ([]domain.Incident, error)
+	// FR-041a D21, §4.5: the short reference of an incident, the resolver behind /i/:ref, and the two
+	// operator reads of phone deliveries.
+	IncidentRef(ctx context.Context, id string) (string, error)
+	IncidentRefs(ctx context.Context, ids []string) (map[string]string, error)
+	IncidentByRef(ctx context.Context, ref string) (domain.Incident, error)
+	ListIncidentPhoneDeliveries(ctx context.Context, incidentID string) ([]domain.PhoneDeliveryView, error)
+	ListChannelPhoneDeliveries(ctx context.Context, channelID string, limit int) ([]domain.PhoneDeliveryView, error)
 	AddIncidentUpdateByPrincipal(ctx context.Context, upd domain.IncidentUpdate, actor store.AuditActor) (domain.IncidentUpdate, error)
 	ListIncidentUpdates(ctx context.Context, incidentID string) ([]domain.IncidentUpdate, error)
 	UpsertPostmortemByPrincipal(ctx context.Context, incidentID, body, author string, actor store.AuditActor) (domain.Postmortem, error)
@@ -370,6 +409,7 @@ type Handler struct {
 	eventSrc          EventSource
 	oidc              OIDCController
 	settings          *settings.Service
+	phones            TelephonyProviders // the current provider for code sends and the test SMS; nil = not wired
 	liveRegions       LiveRegionSource
 	tester            RegionTester
 	agentToken        string                   // optional catch-all agent token (authorizes any region)
@@ -489,6 +529,21 @@ func (h *Handler) WithOIDC(o OIDCController) *Handler {
 // alerting, monitor defaults). Without it, those endpoints report not-configurable.
 func (h *Handler) WithSettings(s *settings.Service) *Handler {
 	h.settings = s
+	return h
+}
+
+// TelephonyProviders yields the telephony provider the settings stored NOW describe
+// (*telephony.Service in production; FR-041a review P2-8 — not the settings snapshot, which can be up
+// to a refresh old on a replica that did not save): telephony.ErrTelephonyDisabled while telephony is
+// off, telephony.ErrSecretsUnreadable when the provider's secret cannot be opened.
+type TelephonyProviders interface {
+	CurrentProvider(ctx context.Context) (telephony.Provider, error)
+}
+
+// WithTelephony wires the provider source the verification codes and the settings' test SMS are
+// sent through. Without it those routes answer 501 and store nothing.
+func (h *Handler) WithTelephony(p TelephonyProviders) *Handler {
+	h.phones = p
 	return h
 }
 
@@ -618,6 +673,11 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/me/totp/enroll", h.totpEnroll)
 	mux.HandleFunc("POST /api/v1/me/totp/enable", h.totpEnable)
 	mux.HandleFunc("POST /api/v1/me/totp/disable", h.totpDisable)
+	mux.HandleFunc("PUT /api/v1/me/phone", h.putMyPhone)
+	mux.HandleFunc("DELETE /api/v1/me/phone", h.deleteMyPhone)
+	mux.HandleFunc("POST /api/v1/me/phone/verify", h.verifyMyPhone)
+	mux.HandleFunc("POST /api/v1/me/phone/verify/send", h.sendMyPhoneCode)
+	mux.HandleFunc("PATCH /api/v1/me/phone/preferences", h.patchMyPhonePreferences)
 	mux.HandleFunc("GET /api/v1/organizations", h.listOrganizations)
 	mux.HandleFunc("POST /api/v1/organizations", h.createOrganization)
 	mux.HandleFunc("GET /api/v1/organizations/{orgID}", h.getOrganization)
@@ -729,9 +789,16 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/incidents", h.createIncident)
 	mux.HandleFunc(alertmanagerRoute, h.alertmanagerWebhook)
 	mux.HandleFunc("GET /api/v1/incidents/{incidentID}", h.getIncident)
-	mux.HandleFunc("GET /api/v1/incidents/{incidentID}/updates", h.listIncidentUpdates)
+	// `GET /api/v1/incidents/by-ref/{ref}` (D21) cannot be registered beside the `{incidentID}/<name>`
+	// routes: ServeMux refuses two patterns that each match a path the other does not. The by-ref
+	// route and the three `{incidentID}/{updates|postmortem|phone-activity}` GET routes therefore
+	// share one two-segment pattern, which getIncidentSubroute dispatches. Because that pattern
+	// matches EVERY two-segment path, two method answers changed with it (pinned by
+	// TestIncidentSubrouteMethodAnswers): a GET of a POST-only subpath such as `…/acknowledge` is
+	// the dispatcher's 404, not 405; any other method on an unknown subpath is 405 (Allow: GET,
+	// HEAD), not 404.
+	mux.HandleFunc("GET /api/v1/incidents/{first}/{second}", h.getIncidentSubroute)
 	mux.HandleFunc("POST /api/v1/incidents/{incidentID}/updates", h.addIncidentUpdate)
-	mux.HandleFunc("GET /api/v1/incidents/{incidentID}/postmortem", h.getPostmortem)
 	mux.HandleFunc("PUT /api/v1/incidents/{incidentID}/postmortem", h.putPostmortem)
 	mux.HandleFunc("POST /api/v1/incidents/{incidentID}/acknowledge", h.acknowledgeIncident)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/escalation-policies", h.listEscalationPolicies)
@@ -778,6 +845,10 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/notification-channels", h.createChannel)
 	mux.HandleFunc("PATCH /api/v1/notification-channels/{channelID}", h.updateChannel)
 	mux.HandleFunc("DELETE /api/v1/notification-channels/{channelID}", h.deleteChannel)
+	mux.HandleFunc("POST /api/v1/notification-channels/{channelID}/verify/send", h.sendChannelVerificationCode)
+	mux.HandleFunc("POST /api/v1/notification-channels/{channelID}/verify", h.verifyChannelNumber)
+	mux.HandleFunc("GET /api/v1/notification-channels/{channelID}/phone-deliveries", h.listChannelPhoneDeliveries)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/phone-recipients", h.listPhoneRecipients)
 	mux.HandleFunc("GET /api/v1/monitors/{monitorID}/notifications", h.listMonitorChannels)
 	mux.HandleFunc("POST /api/v1/monitors/{monitorID}/notifications", h.linkMonitorChannel)
 	mux.HandleFunc("DELETE /api/v1/monitors/{monitorID}/notifications/{channelID}", h.unlinkMonitorChannel)
@@ -798,6 +869,9 @@ func (h *Handler) Router() *http.ServeMux {
 	mux.HandleFunc("PUT /api/v1/settings/monitor-defaults", h.putMonitorDefaults)
 	mux.HandleFunc("GET /api/v1/settings/mail", h.getMail)
 	mux.HandleFunc("PUT /api/v1/settings/mail", h.putMail)
+	mux.HandleFunc("GET /api/v1/settings/telephony", h.getTelephonySettings)
+	mux.HandleFunc("PUT /api/v1/settings/telephony", h.putTelephonySettings)
+	mux.HandleFunc("POST /api/v1/settings/telephony/test-sms", h.postTelephonyTestSMS)
 	mux.HandleFunc("GET /api/v1/admin/audit", h.listGlobalAudit)
 	mux.HandleFunc("GET /api/v1/admin/users", h.listAllUsers)
 	mux.HandleFunc("PATCH /api/v1/admin/users/{userID}", h.updateAdminUser)
@@ -837,4 +911,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeErrorReason is writeError with a machine reason the SPA tells refusals apart by (FR-041a R7):
+// {"error": msg, "reason": reason}.
+func writeErrorReason(w http.ResponseWriter, status int, reason, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg, "reason": reason})
 }

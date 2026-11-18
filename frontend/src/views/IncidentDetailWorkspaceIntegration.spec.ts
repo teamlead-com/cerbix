@@ -19,7 +19,7 @@ vi.mock("@/components/AppShell.vue", () => ({
   default: { name: "AppShell", template: "<div><slot name='actions' /><slot /></div>" },
 }));
 vi.mock("@/stores/session", () => ({
-  useSession: () => ({ canProjectWrite: () => true }),
+  useSession: () => ({ canProjectWrite: () => true, telephonyEnabled: false }),
 }));
 
 function deferred<T>() {
@@ -77,6 +77,7 @@ describe("IncidentDetailView with the production workspace store", () => {
       if (path === "/api/v1/incidents/{incidentID}/postmortem") {
         return Promise.resolve({ error: { error: "not found" } });
       }
+      if (path === "/api/v1/incidents/{incidentID}/phone-activity") return Promise.resolve({ data: { deliveries: [] } });
       return Promise.resolve({ data: undefined });
     });
 
@@ -124,6 +125,7 @@ describe("IncidentDetailView with the production workspace store", () => {
         return new Promise(() => {});
       }
       if (path === "/api/v1/incidents/{incidentID}") incidentReads += 1;
+      if (path === "/api/v1/incidents/{incidentID}/phone-activity") return Promise.resolve({ data: { deliveries: [] } });
       return Promise.resolve({ data: undefined });
     });
 
@@ -186,7 +188,8 @@ describe("IncidentDetailView with the production workspace store", () => {
           data: { body: "## Summary\nForeign postmortem", author: "operator", published_at: "2026-10-01T00:02:00Z" },
         });
       }
-      if (path.includes("/services/") || path.endsWith("/changes")) {
+      // The phone activity of a foreign incident is a secondary read like the others: never asked.
+      if (path.includes("/services/") || path.endsWith("/changes") || path.endsWith("/phone-activity")) {
         secondaryReads += 1;
       }
       return Promise.resolve({ data: undefined });

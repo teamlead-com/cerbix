@@ -1,0 +1,1465 @@
+<title>Cerbix Phone Alerts A</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+
+<style>
+/* Tokens VERBATIM from frontend/src/style.css (the block every approved mock carries). FR-041a adds
+   NO new colour, no new status hue and no new component shape: the reason chips reuse the status
+   tokens (up / degraded / down / pending), the warnings reuse the --degraded notice the forms already
+   use, refusals the --down text the forms already print under Save. --knob is the white thumb of the
+   channel table's existing toggle (bg-white in SettingsView.vue), named here only so no literal sits
+   in a component rule.
+   Spec: docs/specs/func-phone-alerts.md (FR-041 / NFR-034), revision 5, §9 items 1–5, part (a). */
+:root {
+  --bg:#fafafb; --surface:#ffffff; --surface-2:#f5f5f8; --inset:#f0f0f4;
+  --border:#e9e9ef; --border-strong:#dadae4;
+  --ink:#17171f; --ink-2:#55556a; --ink-3:#8a8a9d;
+  --accent:#5854f2; --accent-2:#7a77ff; --accent-ink:#ffffff; --accent-weak:rgba(88,84,242,.10);
+  --focus:#5854f2;
+  --up:#12a05c; --up-weak:rgba(18,160,92,.12);
+  --down:#e0393f; --down-weak:rgba(224,57,63,.12);
+  --degraded:#b97800; --degraded-weak:rgba(185,120,0,.13);
+  --maint:#3a7de5; --maint-weak:rgba(58,125,229,.12);
+  --pending:#8a8a9d; --pending-weak:rgba(138,138,157,.14);
+  --shadow:0 1px 2px rgba(20,20,40,.04), 0 4px 16px rgba(20,20,40,.04);
+  --note:#5854f2; --note-bg:rgba(88,84,242,.055); --note-border:rgba(88,84,242,.28);
+  --knob:#ffffff;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+    --border:#262630; --border-strong:#34343f;
+    --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+    --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+    --focus:#7d79ff;
+    --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+    --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+    --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+    --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+    --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+    --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+    --knob:#ffffff;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0b0f; --surface:#141419; --surface-2:#1a1a20; --inset:#101015;
+  --border:#262630; --border-strong:#34343f;
+  --ink:#f2f2f6; --ink-2:#a4a4b6; --ink-3:#6c6c7e;
+  --accent:#7d79ff; --accent-2:#928fff; --accent-ink:#0b0b0f; --accent-weak:rgba(125,121,255,.15);
+  --focus:#7d79ff;
+  --up:#35c67f; --up-weak:rgba(53,198,127,.15);
+  --down:#ff5f64; --down-weak:rgba(255,95,100,.15);
+  --degraded:#e0a53a; --degraded-weak:rgba(224,165,58,.15);
+  --maint:#5c9bff; --maint-weak:rgba(92,155,255,.15);
+  --pending:#6c6c7e; --pending-weak:rgba(108,108,126,.18);
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.3);
+  --note:#928fff; --note-bg:rgba(125,121,255,.09); --note-border:rgba(125,121,255,.32);
+  --knob:#ffffff;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+.mono{font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; font-variant-numeric:tabular-nums}
+.lbl{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+h1,h2,h3,h4,h5,h6{margin:0; text-wrap:balance}
+p{margin:0}
+code{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.92em}
+a{color:var(--accent); text-decoration:none}
+button{font:inherit; color:inherit}
+
+.page{max-width:1180px; margin:0 auto; padding-block:28px 80px; padding-left:max(16px, env(safe-area-inset-left, 0px)); padding-right:max(16px, env(safe-area-inset-right, 0px)); display:flex; flex-direction:column; gap:44px}
+.head{display:flex; flex-direction:column; gap:10px; max-width:84ch}
+.head h1{font-size:24px; font-weight:600; letter-spacing:-.01em}
+.head p{color:var(--ink-2)}
+.eyebrow{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+.themes{display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden; margin-left:auto}
+.themes button{border:0; background:var(--surface); padding:4px 10px; font-size:12px; color:var(--ink-3); cursor:pointer}
+.themes button.on{background:var(--accent-weak); color:var(--accent); font-weight:600}
+.toc{display:flex; flex-wrap:wrap; gap:6px 14px; font-size:12.5px}
+.toc a{color:var(--ink-2)} .toc a:hover{color:var(--accent)}
+
+/* annotation grammar, as in every approved mock: NEW = added by this change, dashed = where to look */
+.new{display:inline-flex; align-items:center; height:18px; padding:0 7px; border-radius:999px;
+  background:var(--note-bg); border:1px solid var(--note-border); color:var(--note);
+  font-size:10.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; vertical-align:middle}
+.note{border:1px solid var(--note-border); background:var(--note-bg); border-radius:6px; padding:12px 14px; color:var(--ink-2); font-size:13px; line-height:1.55}
+.note b{color:var(--note); font-weight:600}
+.hl{outline:1.5px dashed var(--note); outline-offset:3px; border-radius:3px}
+
+section{display:flex; flex-direction:column; gap:14px}
+section > header{display:flex; flex-direction:column; gap:4px}
+section > header h2{font-size:16px; font-weight:600}
+section > header .where{font-size:12.5px; color:var(--ink-3); max-width:110ch}
+section > header .where code{font-size:12px; color:var(--ink-2)}
+h3.sub{font-size:13px; font-weight:600; color:var(--ink-2); margin-top:6px}
+
+.contract{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); border:1px solid var(--border); border-radius:6px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.contract > div{padding:14px 16px; border-right:1px solid var(--border); border-bottom:1px solid var(--border); display:flex; flex-direction:column; gap:4px; min-width:0}
+.contract .v{font-size:15px; font-weight:600}
+.contract .d{font-size:12.5px; color:var(--ink-2)}
+
+.card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden; min-width:0}
+.stateline{display:flex; align-items:center; flex-wrap:wrap; gap:8px; font-size:11.5px; color:var(--ink-3); padding:12px 16px 0}
+.stateline .tagv{border:1px solid var(--note-border); border-radius:3px; padding:1px 7px; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--note); background:var(--note-bg)}
+.inner{padding:12px 16px 16px; display:flex; flex-direction:column; gap:12px; min-width:0}
+.two{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+.three{display:grid; grid-template-columns:repeat(3,1fr); gap:14px}
+@media (max-width:1000px){.three{grid-template-columns:1fr 1fr}}
+@media (max-width:900px){.two,.three{grid-template-columns:1fr}}
+ul.plain{margin:0; padding-left:18px; color:var(--ink-2); font-size:13px; display:flex; flex-direction:column; gap:7px}
+ul.plain b{color:var(--ink)}
+
+/* ── app atoms, faithful to the Tailwind classes of SettingsView.vue ───────────────────────── */
+.st-grid{display:grid; grid-template-columns:210px 1fr; gap:28px; padding:20px}
+@media (max-width:820px){.st-grid{grid-template-columns:1fr; gap:16px}}
+.st-nav{display:flex; flex-direction:column; gap:18px}
+.st-nav .g{padding:0 10px 5px; font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+.st-nav .it{display:block; border-radius:6px; padding:7px 10px; font-size:13px; color:var(--ink-2)}
+.st-nav .it.on{background:var(--accent-weak); color:var(--accent); font-weight:500}
+.st-card{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); padding:18px; display:flex; flex-direction:column; gap:16px; min-width:0}
+.st-card.flat{box-shadow:none}
+.st-card h4{font-size:14px; font-weight:600}
+.st-card .top{display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap}
+.expl{font-size:12.5px; color:var(--ink-3); line-height:1.55; max-width:76ch}
+.foot{display:flex; align-items:center; flex-wrap:wrap; gap:12px; border-top:1px solid var(--border); padding-top:14px}
+.sub-h{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-2); padding-top:4px; border-top:1px solid var(--border); padding-top:14px}
+
+.fl{display:flex; flex-direction:column; gap:6px; min-width:0}
+.lab{font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--ink-3)}
+.lab .opt{margin-left:4px; font-weight:400; text-transform:none; letter-spacing:0; color:var(--ink-3)}
+.lab .stored{margin-left:4px; font-weight:400; text-transform:none; letter-spacing:0; color:var(--up)}
+.in{display:block; width:100%; border:1px solid var(--border); background:var(--surface-2); color:var(--ink); border-radius:6px; padding:8px 12px; font:13px/1.4 inherit; font-family:inherit; min-height:36px; overflow-wrap:anywhere}
+.in.mono{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px}
+.in.ph{color:var(--ink-3)}
+.in.dis{opacity:.6}
+.in.bad{border-color:color-mix(in srgb,var(--down) 60%,transparent)}
+.in.code{width:180px; font-family:ui-monospace,Menlo,monospace; font-size:15px; letter-spacing:.3em}
+textarea.in{min-height:96px; white-space:pre; overflow-x:auto; resize:none}
+.hint{font-size:11.5px; color:var(--ink-3); line-height:1.5}
+.g2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+.g3{display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px}
+.g21{display:grid; grid-template-columns:2fr 1fr; gap:14px}
+@media (max-width:620px){.g2,.g3,.g21{grid-template-columns:1fr}}
+.chk{display:inline-flex; align-items:center; gap:8px; font-size:13px}
+.cb{width:15px; height:15px; border:1px solid var(--border-strong); border-radius:3px; display:inline-grid; place-items:center; font-size:10px; line-height:1; background:var(--surface); flex:none}
+.cb.on{background:var(--accent); border-color:var(--accent); color:var(--accent-ink)}
+.rd{width:15px; height:15px; border:1px solid var(--border-strong); border-radius:50%; display:inline-grid; place-items:center; background:var(--surface); flex:none}
+.rd.on{border-color:var(--accent)} .rd.on::after{content:""; width:7px; height:7px; border-radius:50%; background:var(--accent)}
+.choice{display:flex; flex-direction:column; gap:8px}
+.choice label{display:flex; align-items:flex-start; gap:8px; font-size:13px}
+.choice label .d{display:block; font-size:11.5px; color:var(--ink-3)}
+.choice label.off{opacity:.55}
+.btn{display:inline-flex; align-items:center; justify-content:center; height:36px; border-radius:6px; padding:0 16px; font-size:13px; font-weight:500; border:1px solid transparent; white-space:nowrap}
+.btn.sm{height:32px; padding:0 13px}
+.btn.xs{height:28px; padding:0 10px; font-size:12.5px; font-weight:400}
+.btn.pri{background:var(--accent); color:var(--accent-ink)}
+.btn.sec{border-color:var(--border); color:var(--ink-2); background:transparent}
+.btn.danger{background:var(--down); color:var(--knob)}
+.btn.dangerline{border-color:var(--border); color:var(--down)}
+.btn.dis{opacity:.5}
+.err{font-size:12.5px; color:var(--down); line-height:1.5}
+.ok{font-size:12.5px; color:var(--up)}
+.muted{font-size:12.5px; color:var(--ink-3)}
+.warn{border:1px solid color-mix(in srgb,var(--degraded) 40%,transparent); background:var(--degraded-weak); border-radius:6px; padding:9px 12px; font-size:12.5px; color:var(--ink-2); line-height:1.55}
+.warn b{color:var(--degraded); font-weight:600}
+.refuse{border:1px solid color-mix(in srgb,var(--down) 40%,transparent); background:var(--down-weak); border-radius:6px; padding:10px 12px; font-size:12.5px; color:var(--ink-2); line-height:1.55}
+.refuse b{color:var(--down); font-weight:600}
+.quiet{border:1px solid var(--border); background:var(--surface-2); border-radius:6px; padding:9px 12px; font-size:12.5px; color:var(--ink-2); line-height:1.55}
+.svc{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border); background:var(--surface); border-radius:999px; padding:1px 8px; font-size:11.5px; color:var(--ink); white-space:nowrap}
+.svc .k{font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-3)}
+.pill{display:inline-flex; align-items:center; gap:6px; border-radius:999px; padding:3px 10px; font-size:11.5px; font-weight:500; white-space:nowrap}
+.pill.on{background:var(--up-weak); color:var(--up)}
+.pill.off{background:var(--inset); color:var(--ink-3)}
+.pill.wait{background:var(--degraded-weak); color:var(--degraded)}
+.seg{display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden}
+.seg span{padding:7px 12px; font-size:12.5px; color:var(--ink-2); background:var(--surface); border-right:1px solid var(--border)}
+.seg span:last-child{border-right:0}
+.seg span.on{background:var(--accent-weak); color:var(--accent); font-weight:500}
+.seg span.off{color:var(--ink-3); background:var(--surface-2); text-decoration:line-through; text-decoration-color:var(--border-strong)}
+.fakesel{border:1px solid var(--border-strong); background:var(--surface); border-radius:6px; font-size:13px; overflow:hidden; box-shadow:var(--shadow)}
+.fakesel div{padding:7px 12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+.fakesel div.on{background:var(--accent-weak)}
+.fakesel .e{color:var(--ink-3); font-size:12px}
+.fakesel .v{margin-left:auto; font-size:11.5px}
+.vok{color:var(--up)} .vno{color:var(--ink-3)}
+.steps{display:flex; flex-direction:column; gap:12px}
+.step .t{font-size:12px; font-weight:600; color:var(--ink-2)}
+.step .t.done{color:var(--up)}
+.step .t.dim{color:var(--ink-3); font-weight:500}
+.row{display:flex; align-items:center; flex-wrap:wrap; gap:8px 10px}
+
+/* channel table: SettingsView.vue channels tab */
+.tbl-wrap{overflow-x:auto}
+table.ch{width:100%; border-collapse:collapse; font-size:13px; min-width:640px}
+table.ch th{text-align:left; font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); padding:10px 16px; border-bottom:1px solid var(--border)}
+table.ch td{padding:11px 16px; border-bottom:1px solid var(--border); vertical-align:top}
+table.ch tr:last-child td{border-bottom:0}
+table.ch td.nm{font-weight:500}
+table.ch td.ty{color:var(--ink-2); font-family:inherit}
+table.ch .to{display:block; margin-top:2px; font-size:12px; color:var(--ink-3); font-weight:400}
+table.ch .to .mono{font-size:11.5px; color:var(--ink-2)}
+table.ch .act{text-align:right; white-space:nowrap}
+table.ch .act span{font-size:12.5px; color:var(--ink-2); margin-left:12px}
+table.ch .act span.del{color:var(--down)}
+table.ch .act span.dl{color:var(--accent)}
+.sw{display:inline-flex; align-items:center; width:34px; height:19px; border-radius:999px; background:var(--border-strong); flex:none}
+.sw i{display:block; width:15px; height:15px; border-radius:50%; background:var(--knob); transform:translateX(2px)}
+.sw.on{background:var(--up)} .sw.on i{transform:translateX(17px)}
+.sw.locked{opacity:.45}
+.nr{display:inline-flex; align-items:center; gap:6px; margin-top:5px; border:1px dashed var(--border-strong); border-radius:4px; padding:1px 7px; font-size:11.5px; color:var(--ink-2); font-weight:400; max-width:100%}
+.nr b{color:var(--degraded); font-weight:600}
+.dr{display:inline-flex; align-items:center; gap:6px; margin-top:5px; border:1px solid var(--border); background:var(--inset); border-radius:4px; padding:1px 7px; font-size:11.5px; color:var(--ink-2); font-weight:400}
+.dr b{color:var(--ink); font-weight:600}
+.only{display:block; margin-top:6px; font-weight:400}
+
+/* reason chips (§4.5, part a): status tokens only */
+.rs{display:inline-flex; align-items:center; gap:6px; border-radius:999px; padding:2px 9px; font-size:11.5px; font-weight:500; white-space:nowrap}
+.rs i{width:7px; height:7px; border-radius:50%; background:currentColor; flex:none}
+.rs.sent{color:var(--up); background:var(--up-weak)}
+.rs.sending{color:var(--pending); background:transparent; border:1px dashed var(--pending); padding:1px 8px}
+.rs.warn{color:var(--degraded); background:var(--degraded-weak)}
+.rs.bad{color:var(--down); background:var(--down-weak)}
+.rs.cfg{color:var(--ink-2); background:var(--pending-weak)}
+.nt{display:inline-flex; align-items:center; border:1px solid var(--border); border-radius:4px; padding:0 6px; font-family:ui-monospace,Menlo,monospace; font-size:10.5px; color:var(--ink-3); white-space:nowrap}
+.kind{display:inline-flex; align-items:center; gap:5px; font-size:12px; color:var(--ink-2); white-space:nowrap}
+.kind svg{width:13px; height:13px; flex:none}
+
+/* incident page: IncidentDetailView.vue */
+.shell-top{display:flex; align-items:center; gap:8px; flex-wrap:wrap; border-bottom:1px solid var(--border); padding:10px 18px; font-size:12.5px; color:var(--ink-3); background:var(--surface)}
+.shell-top b{color:var(--ink); font-weight:500}
+.shell-top .sep{color:var(--border-strong)}
+.shell-top .acts{margin-left:auto; display:flex; gap:8px}
+.idv{max-width:900px; margin:0 auto; padding:22px 22px 22px; display:flex; flex-direction:column; gap:20px}
+.idv .hrow{display:flex; flex-wrap:wrap; align-items:center; gap:10px}
+.idv h5{font-size:22px; font-weight:600; letter-spacing:-.01em}
+.idv .meta{margin-top:7px; display:flex; flex-wrap:wrap; gap:4px 16px; font-size:13px; color:var(--ink-3)}
+.idv .meta .mono{color:var(--ink-2)}
+.basis{margin-top:6px; font-size:12.5px; color:var(--ink-3)}
+.basis .ip{color:var(--ink-2); font-weight:500}
+.bdg{display:inline-flex; align-items:center; border-radius:999px; padding:2px 9px; font-size:11.5px; font-weight:500; white-space:nowrap}
+.s-inv{color:var(--degraded); background:var(--degraded-weak)}
+.s-ide{color:var(--maint); background:var(--maint-weak)}
+.s-res{color:var(--up); background:var(--up-weak)}
+.i-major{color:var(--degraded); background:var(--degraded-weak)}
+.src{display:inline-block; border:1px solid var(--border); border-radius:4px; padding:0 6px; font-family:ui-monospace,Menlo,monospace; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-3)}
+.subj{display:inline-flex; align-items:center; gap:5px; border:1px solid var(--border); background:var(--surface-2); border-radius:999px; padding:2px 8px; font-size:11.5px; white-space:nowrap; color:var(--ink)}
+.subj .k{font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-3)}
+.esc{border-radius:999px; background:var(--degraded-weak); color:var(--degraded); padding:2px 9px; font-size:11.5px; font-weight:500}
+.panel{border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); min-width:0}
+.panel > .h{display:flex; flex-wrap:wrap; align-items:center; gap:10px; border-bottom:1px solid var(--border); padding:13px 16px}
+.panel > .h h6{font-size:13px; font-weight:600}
+.panel > .h .r{margin-left:auto}
+.chip{display:inline-flex; align-items:center; border:1px solid var(--border); border-radius:999px; padding:1px 8px; font-size:11px; color:var(--ink-3); white-space:nowrap}
+.tl{list-style:none; margin:0; padding:0}
+.tl li{display:flex; gap:12px; border-bottom:1px solid var(--border); padding:13px 16px}
+.tl li:last-child{border-bottom:0}
+.tl .dot{margin-top:4px; width:9px; height:9px; border-radius:50%; flex:none}
+.tl .l1{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+.tl .l1 .st{font-size:12.5px; font-weight:500}
+.tl .l1 .mono{font-size:11px; color:var(--ink-3)}
+.tl .body{margin-top:4px; color:var(--ink-2); font-size:13px}
+.tl .body.sys{font-family:ui-monospace,Menlo,monospace; font-size:12.5px}
+/* NEW: the Phone panel rows */
+.pr{display:grid; grid-template-columns:96px 1fr; gap:4px 14px; border-bottom:1px solid var(--border); padding:12px 16px}
+.pr:last-child{border-bottom:0}
+@media (max-width:560px){.pr{grid-template-columns:1fr}}
+.pr .when{font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-3); padding-top:2px}
+.pr .when b{display:block; color:var(--ink-2); font-weight:500}
+.pr .l1{display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; font-size:13px}
+.pr .l1 .cn{font-weight:500}
+.pr .l1 .ms{font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink-2)}
+.pr .l2{margin-top:5px; display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; font-size:12px; color:var(--ink-3)}
+.pr .l2 .mono{font-size:11.5px; color:var(--ink-2)}
+.pr .why{margin-top:4px; font-size:12px; color:var(--ink-3); line-height:1.5}
+.empty{padding:22px 16px; text-align:center; font-size:13px; color:var(--ink-3)}
+.unav{display:inline-flex; align-items:center; gap:6px; margin:12px 16px; border:1px dashed var(--border-strong); border-radius:6px; padding:4px 9px; font-size:12.5px; color:var(--ink-3)}
+
+/* public page miniature: PublicStatusView.vue */
+.pub{border:1px solid var(--border); border-radius:10px; background:var(--bg); overflow:hidden}
+.pub-top{height:52px; display:flex; align-items:center; gap:10px; border-bottom:1px solid var(--border); background:var(--surface); padding:0 18px}
+.pub-top .mark{width:24px; height:24px; border-radius:7px; background:var(--accent)}
+.pub-top b{font-size:14px; font-weight:600}
+.pub-main{padding:16px 18px 18px; display:flex; flex-direction:column; gap:10px}
+.art{border:1px solid var(--border); border-radius:8px; background:var(--surface); overflow:hidden}
+.art .hd{padding:12px 16px; display:flex; flex-wrap:wrap; align-items:center; gap:8px}
+.art .hd .tt{flex:1 1 200px; font-size:14px; font-weight:600}
+.art .pn{border-top:1px solid var(--border); background:var(--surface-2); padding:12px 16px; display:flex; flex-direction:column; gap:10px}
+.art .u{border-left:2px solid var(--border); padding-left:12px}
+.art .u .l{display:flex; flex-wrap:wrap; gap:8px; font-size:11px}
+.art .u .l b{color:var(--ink-2)}
+.art .u .l .mono{color:var(--ink-3)}
+.art .u p{margin-top:3px; font-size:13px; color:var(--ink-2)}
+
+/* /i/:ref: browser frame + LoginView.vue */
+.bf{border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--bg); min-width:0}
+.bf .bar{display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--border); background:var(--surface-2)}
+.bf .bar i{width:9px; height:9px; border-radius:50%; background:var(--border-strong); flex:none}
+.bf .url{flex:1; min-width:0; border:1px solid var(--border); border-radius:6px; background:var(--surface); padding:3px 10px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.bf .body{padding:22px 18px; display:flex; flex-direction:column; gap:14px; align-items:stretch}
+.msgcard{max-width:520px; width:100%; margin:0 auto; border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); padding:22px; display:flex; flex-direction:column; gap:10px}
+.msgcard h6{font-size:16px; font-weight:600}
+.msgcard p{font-size:13px; color:var(--ink-2); line-height:1.55}
+.login{max-width:360px; width:100%; margin:0 auto; border:1px solid var(--border); border-radius:8px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden}
+.login .strip{display:flex; gap:2px; height:4px}
+.login .strip i{flex:1; background:var(--up)}
+.login .strip i.d{background:var(--degraded)}
+.login .in-b{padding:24px 24px 20px; display:flex; flex-direction:column; gap:12px}
+.login .brand{display:flex; align-items:center; gap:10px; margin-bottom:6px}
+.login .brand span:first-child{width:28px; height:28px; border-radius:8px; background:var(--accent)}
+.login .brand .w{font-family:ui-monospace,Menlo,monospace; font-size:16px; font-weight:600}
+.login h6{font-size:17px; font-weight:600}
+.spin{width:14px; height:14px; border-radius:50%; border:2px solid var(--border-strong); border-top-color:var(--accent); flex:none}
+.selfnote{display:flex; align-items:center; gap:10px; border:1px solid var(--border); border-radius:6px; background:var(--surface); padding:10px 14px; font-size:13px; box-shadow:var(--shadow)}
+.selfnote .d{width:8px; height:8px; border-radius:50%; background:var(--up); flex:none}
+.selfnote .x{margin-left:auto; font-size:12px; color:var(--ink-3)}
+
+/* SMS texts */
+.sms{display:flex; flex-direction:column; gap:8px; min-width:0}
+.bubble{border:1px solid var(--border); background:var(--surface-2); border-radius:12px 12px 12px 4px; padding:10px 12px; font-family:ui-monospace,Menlo,monospace; font-size:12px; line-height:1.55; color:var(--ink); overflow-wrap:anywhere; word-break:break-word}
+.bubble .cut{background:var(--degraded-weak); color:var(--degraded); border-radius:3px; padding:0 2px}
+.bubble .two-s{background:var(--note-bg); color:var(--note); border-radius:3px}
+.meter{display:flex; flex-wrap:wrap; gap:6px 12px; font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--ink-3)}
+.meter b{color:var(--ink-2); font-weight:600}
+.sms .cap{font-size:12.5px; font-weight:600}
+.sms .why{font-size:12px; color:var(--ink-3); line-height:1.5}
+
+.ref{width:100%; border-collapse:collapse; font-size:12.5px}
+.ref th{text-align:left; font-size:10.5px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); padding:9px 14px; border-bottom:1px solid var(--border)}
+.ref td{padding:10px 14px; border-bottom:1px solid var(--border); vertical-align:top; color:var(--ink-2)}
+.ref tr:last-child td{border-bottom:0}
+
+/* decisions */
+.dec{counter-reset:d; display:flex; flex-direction:column; gap:10px; margin:0; padding:0; list-style:none}
+.dec li{border:1px solid var(--border); border-radius:8px; background:var(--surface); padding:12px 14px 12px 54px; position:relative; font-size:13px; color:var(--ink-2); line-height:1.55}
+.dec li::before{counter-increment:d; content:"D-" counter(d); position:absolute; left:12px; top:12px; font-family:ui-monospace,Menlo,monospace; font-size:11px; font-weight:700; color:var(--note)}
+.dec li b{color:var(--ink); font-weight:600}
+.dec .alt{display:block; margin-top:5px; font-size:12.5px; color:var(--ink-3)}
+.dec .alt::before{content:"Alternative: "; font-weight:600; color:var(--ink-3)}
+.dec li.found{border-style:dashed}
+.out{display:block; margin-top:6px; font-size:12px; font-weight:600}
+.out.acc{color:var(--up)}
+.out.chg{color:var(--note)}
+.out.chg span{font-weight:400; color:var(--ink-2)}
+
+@media (prefers-reduced-motion: reduce){*{transition:none!important; animation:none!important}}
+</style>
+
+<div class="page">
+
+  <div class="head">
+    <div class="eyebrow">
+      <span class="lbl">Design mock · phone alerts, part (a) · FR-041a / NFR-034 · APPROVED by the owner 2026-11-17 · aligned with spec revision 6</span>
+      <span class="themes" role="group" aria-label="Theme">
+        <button type="button" data-t="" class="on">Auto</button><button type="button" data-t="light">Light</button><button type="button" data-t="dark">Dark</button>
+      </span>
+    </div>
+    <h1>A phone channel that rings a verified number, says why when it did not, and never shows a number in full</h1>
+    <p>Mock for <span class="mono">docs/specs/func-phone-alerts.md</span> §9 items 1–5, part (a) only. Approved by the owner on 2026-11-17; redrawn the same day against revision 6 of the spec, which added what six of the mock's decisions needed (§14 of the spec, “Mock of FR-041a”). Four surfaces are existing screens with the change drawn in; one (<span class="mono">/i/:ref</span>) is a new route; §5b shows the unchanged escalation editor with phone channels in it. Every state is drawn separately and labelled with the spec clause it comes from. Inbound URLs, acknowledgements, snooze, quotas, usage, quiet hours, the fallback channel and the project override belong to parts (b) and (c) and are not drawn (§7). Where the spec leaves wording, placement or a state to the mock, the choice is listed in §8 with its alternative.</p>
+    <nav class="toc" aria-label="Sections">
+      <a href="#s1">1 · Telephony settings</a><a href="#s2">2 · Account → Phone</a><a href="#s3">3 · Channel editor</a><a href="#s4">4 · Incident → Phone panel</a><a href="#s5">5 · /i/:ref</a><a href="#s5b">5b · Escalation editor</a><a href="#s6">6 · SMS texts</a><a href="#s7">7 · Not drawn</a><a href="#s8">8 · Decisions for the owner</a>
+    </nav>
+  </div>
+
+  <div class="contract">
+    <div><span class="lbl">Instance switch</span><span class="v mono">telephony.enabled</span><span class="d">database only, absent = off (D36); global admin; refused without the at-rest key (D29)</span></div>
+    <div><span class="lbl">Two providers</span><span class="v">Twilio · generic HTTP</span><span class="d">generic HTTP is SMS only — no voice channel can be created under it (D3, P5)</span></div>
+    <div><span class="lbl">A number</span><span class="v mono">+90•••••6869</span><span class="d">masked for everyone, its owner included (D35); verified by a 6-digit code (§4.2)</span></div>
+    <div><span class="lbl">A route</span><span class="v mono">deliverable</span><span class="d">a phone channel that cannot deliver is not a route (D31); the channel says why</span></div>
+    <div><span class="lbl">The trace</span><span class="v mono">phone_deliveries</span><span class="d">one row per handed alert, reason from a closed set (§4.5); operators only, never public (D22)</span></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════ 1 ═══════════════════════════════════════════════ -->
+  <section id="s1">
+    <header>
+      <h2>1 · Settings → Administration → Telephony <span class="new">new tab</span></h2>
+      <div class="where">route <code>/settings?tab=telephony</code> · <code>frontend/src/views/SettingsView.vue</code>, the <i>Administration</i> group (global admin only), placed <b>directly after Email</b>. The card follows the Email (SMTP) card: a status pill in the title row, one explanation, labelled fields, stored secrets marked “✓ stored” with an “(unchanged)” placeholder, Save + “✓ Saved”. Reads <code>GET /api/v1/settings/telephony</code>, writes <code>PUT</code> (§4.1, §9).</div>
+    </header>
+
+    <!-- 1a -->
+    <div class="card">
+      <div class="stateline"><span class="tagv">1a · not configured</span> the block is absent (D36): telephony is off and nothing is stored. The form opens on Twilio with the §4.1 defaults filled in.</div>
+      <div class="st-grid">
+        <nav class="st-nav" aria-label="Settings sections (drawing)">
+          <div><div class="g">Project</div><span class="it">Notification channels</span><span class="it">Incoming alerts</span><span class="it">Secrets</span><span class="it">Release gate</span><span class="it">Incidents</span><span class="it">Members</span></div>
+          <div><div class="g">Organization</div><span class="it">Members</span><span class="it">API tokens</span><span class="it">Webhooks</span></div>
+          <div><div class="g">Administration</div><span class="it">Users</span><span class="it">Authentication</span><span class="it">Branding</span><span class="it">Alerting</span><span class="it">Monitor defaults</span><span class="it">Email</span><span class="it on hl">Telephony</span><span class="it">Agent tokens</span><span class="it">Instance audit</span></div>
+          <div><div class="g">Account</div><span class="it">Security</span><span class="it">Phone</span></div>
+        </nav>
+        <div class="st-card">
+          <div class="top"><h4>Phone alerts (SMS and voice calls)</h4><span class="pill off">Off · not configured</span></div>
+          <p class="expl">Sends alerts as SMS and voice calls through your own provider account. Phone channels can be created only while this is on. Changes apply immediately to every process that delivers alerts.</p>
+          <label class="chk"><span class="cb"></span>Enable phone alerts</label>
+          <div class="fl"><span class="lab">Provider</span>
+            <div class="choice">
+              <label><span class="rd on"></span><span>Twilio<span class="d">SMS and voice calls</span></span></label>
+              <label><span class="rd"></span><span>Generic HTTP gateway<span class="d">SMS only, through a request you define — no voice calls</span></span></label>
+            </div>
+          </div>
+          <div class="g3">
+            <div class="fl"><span class="lab">Account SID</span><span class="in mono ph">AC…</span></div>
+            <div class="fl"><span class="lab">Auth token</span><span class="in mono ph">auth token</span></div>
+            <div class="fl"><span class="lab">From</span><span class="in mono ph">+15550100 or MG…</span><span class="hint">An E.164 number or a Messaging Service SID.</span></div>
+          </div>
+          <div class="quiet">The rest of the form (links, language, encoding, storm limits) is shown filled in 1b; here it carries the defaults: <span class="mono">en-US</span>, <span class="mono">transliterate</span>, 2 segments, 5 and 20 an hour.</div>
+          <div class="foot"><span class="btn pri">Save phone settings</span><span class="muted">Nothing is stored until you save.</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1b -->
+    <div class="card">
+      <div class="stateline"><span class="tagv">1b · Twilio, on, secrets stored</span> the normal state. Blank secret = keep (the <span class="mono">smtp_password</span> contract, §4.1). The test SMS sits in its own block at the bottom.</div>
+      <div class="inner">
+        <div class="st-card flat">
+          <div class="top"><h4>Phone alerts (SMS and voice calls)</h4><span class="pill on">On · Twilio</span></div>
+          <p class="expl">Sends alerts as SMS and voice calls through your own provider account. Phone channels can be created only while this is on. Changes apply immediately to every process that delivers alerts.</p>
+          <label class="chk"><span class="cb on">✓</span>Enable phone alerts</label>
+          <div class="fl"><span class="lab">Provider</span>
+            <div class="choice">
+              <label><span class="rd on"></span><span>Twilio<span class="d">SMS and voice calls</span></span></label>
+              <label><span class="rd"></span><span>Generic HTTP gateway<span class="d">SMS only, through a request you define — no voice calls</span></span></label>
+            </div>
+          </div>
+          <div class="g3">
+            <div class="fl"><span class="lab">Account SID</span><span class="in mono">AC7f3e0c1b9a4d6e2f8a0b3c5d7e9f1a2b</span></div>
+            <div class="fl hl"><span class="lab">Auth token<span class="stored">✓ stored</span></span><span class="in mono ph">•••••••• (unchanged)</span></div>
+            <div class="fl"><span class="lab">From</span><span class="in mono">+15550100</span><span class="hint">An E.164 number or a Messaging Service SID.</span></div>
+          </div>
+
+          <div class="sub-h">Messages</div>
+          <div class="g21">
+            <div class="fl"><span class="lab">Public base URL<span class="opt">(for the incident link)</span></span><span class="in mono ph">https://cerbix.example.com</span><span class="hint hl">Empty: links use <span class="mono">https://cerbix.example.com</span> from Email settings. Set it here when the phone link must differ. <span class="mono">https</span> unless the host is loopback.</span></div>
+            <div class="fl"><span class="lab">Voice language</span><span class="in mono">en-US</span><span class="hint">BCP-47 tag spoken in calls. A person can choose their own under Account → Phone.</span></div>
+          </div>
+          <div class="g21">
+            <div class="fl"><span class="lab">Names in SMS</span>
+              <div class="choice">
+                <label><span class="rd on"></span><span>Transliterate to Latin<span class="d">Names become ASCII; a message stays at 160 characters a segment. Characters with no Latin form become “?”.</span></span></label>
+                <label><span class="rd"></span><span>Send as written (Unicode)<span class="d">Names keep their script; the whole message then costs 70 characters a segment.</span></span></label>
+              </div>
+            </div>
+            <div class="fl"><span class="lab">Longest SMS</span><span class="in">2 segments ▾</span><span class="hint">1–4. Longer names are shortened to fit; the link is never cut (§6).</span></div>
+          </div>
+
+          <div class="sub-h">Storm limits</div>
+          <p class="expl">A delivery past a limit is not sent; it is recorded on the incident's Phone panel and in the channel's deliveries as “Storm limit”.</p>
+          <div class="g2">
+            <div class="fl"><span class="lab">Per number, per incident, per hour</span><span class="in mono">5</span></div>
+            <div class="fl"><span class="lab">Per number, per hour</span><span class="in mono">20</span></div>
+          </div>
+
+          <div class="foot"><span class="btn pri">Save phone settings</span><span class="ok">✓ Saved</span></div>
+
+          <div class="sub-h hl">Test</div>
+          <div class="row"><span class="btn sec sm">Send test SMS to +90•••••6869</span><span class="muted">Sends a fixed text to your own verified number, with the saved settings.</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1c / 1d -->
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv">1c · generic HTTP gateway</span> the provider block swaps; the rest of the form is 1b's</div>
+        <div class="inner">
+          <div class="top row" style="justify-content:space-between"><h4 style="font-size:14px; font-weight:600">Phone alerts (SMS and voice calls)</h4><span class="pill on">On · Generic HTTP</span></div>
+          <div class="quiet"><b style="color:var(--ink)">SMS only.</b> A gateway cannot place calls: a Voice call channel cannot be created, and existing ones are not called while this provider is in use.</div>
+          <div class="g21">
+            <div class="fl"><span class="lab">URL</span><span class="in mono">https://sms-gw.example.net/v2/messages</span></div>
+            <div class="fl"><span class="lab">Method</span><span class="in">POST ▾</span></div>
+          </div>
+          <div class="fl"><span class="lab">Content type</span><span class="in">application/json ▾</span><span class="hint">Fixes how placeholders are encoded: JSON string escaping, or form percent-encoding for <span class="mono">application/x-www-form-urlencoded</span>.</span></div>
+          <div class="fl hl"><span class="lab">Headers<span class="stored">✓ stored</span></span>
+            <textarea class="in mono ph" style="min-height:60px" readonly>Authorization: Bearer …</textarea>
+            <span class="hint">Headers can hold credentials, so they are never shown back. Leave empty to keep the stored set; type headers here to replace all of them.</span>
+            <span class="row"><span class="btn dangerline xs">Remove stored headers</span><span class="hint">for a gateway that no longer needs any (1c′)</span></span></div>
+          <div class="fl"><span class="lab">Body template</span>
+            <textarea class="in mono" readonly>{"to": "{{to}}", "from": "{{from}}", "message": "{{text}}"}</textarea>
+            <span class="hint">Placeholders <span class="mono">{{to}}</span>, <span class="mono">{{from}}</span>, <span class="mono">{{text}}</span> are inserted as values, encoded for the content type. They must sit inside a JSON string or a form value.</span></div>
+          <div class="g2">
+            <div class="fl"><span class="lab">From</span><span class="in mono">CERBIX</span></div>
+            <div class="fl hl"><span class="lab">Error code field<span class="opt">(optional)</span></span><span class="in mono">error_code</span></div>
+          </div>
+          <p class="hint hl" style="font-size:12px">The top-level key of the gateway's JSON response that holds its own error code. cerbix keeps that code (letters, digits, <span class="mono">_ . -</span>, up to 32) and never the response text, which can quote the number. <b style="color:var(--ink-2); font-weight:600">Without it, a refusal is recorded as its HTTP status alone</b> — a bad template and an empty balance then look the same. Any 2xx answer counts as sent: a gateway that reports failure inside a 200 is not supported, and a redirect is treated as a refusal.</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">1d · template refused</span> a placeholder outside a value (§4.4); the server's 400 is shown under the field and under Save</div>
+        <div class="inner">
+          <div class="fl"><span class="lab">Body template</span>
+            <textarea class="in mono bad" readonly>{"to": {{to}}, "from": "{{from}}", "message": "{{text}}"}</textarea>
+            <span class="err hl"><span class="mono">{{to}}</span> is outside a JSON string. Placeholders are inserted as values, so write it in quotes: <span class="mono">"to": "{{to}}"</span>.</span>
+          </div>
+          <div class="fl"><span class="lab">Same rule, form body</span>
+            <textarea class="in mono bad" style="min-height:44px" readonly>{{to}}=1&amp;text={{text}}</textarea>
+            <span class="err"><span class="mono">{{to}}</span> is used as a field name. Placeholders can only be values: <span class="mono">to={{to}}&amp;text={{text}}</span>.</span>
+          </div>
+          <div class="foot"><span class="btn pri">Save phone settings</span><span class="err">Not saved: the body template has a placeholder outside a value.</span></div>
+          <p class="hint">Why it is refused: a monitor named <span class="mono">x","to":"+12025550199","x":"</span> would otherwise rewrite the recipient (P1). Inside quotes it stays one string.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1c' headers_clear -->
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv">1c′ · removing the stored headers</span> revision 6, §4.1: <span class="mono">generic_http.headers_clear: true</span></div>
+        <div class="inner">
+          <div class="fl hl"><span class="lab">Headers<span class="stored">✓ stored</span></span>
+            <textarea class="in mono ph dis" style="min-height:60px" readonly>Headers will be removed</textarea>
+            <span class="row"><span class="warn" style="padding:4px 10px"><b>Removed when you save.</b> The gateway will be called with no extra headers.</span><span class="btn sec xs">Undo</span></span>
+          </div>
+          <div class="foot"><span class="btn pri">Save phone settings</span></div>
+          <p class="hint">While removal is marked, the field is locked, so the form never sends new headers together with the removal. After the save the label loses “✓ stored”.</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">1c″ · removal and new headers together</span> the server's 400 (§4.1). The form cannot send both (1c′ locks the field); drawn so the text exists if the API answers it</div>
+        <div class="inner">
+          <div class="fl"><span class="lab">Headers</span>
+            <textarea class="in mono bad" style="min-height:60px" readonly>Authorization: Bearer 9f2c…</textarea>
+          </div>
+          <div class="foot"><span class="btn pri">Save phone settings</span><span class="err hl">Not saved: remove the stored headers or type new ones, not both. To replace them, type the new headers and leave “Remove stored headers” off.</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1e / 1h -->
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv">1e · no encryption key</span> known from the read (<span class="mono">encryption_key_configured: false</span>, revision 6) and said on load, before anything is typed (D29, P22)</div>
+        <div class="inner">
+          <div class="top row" style="justify-content:space-between"><h4 style="font-size:14px; font-weight:600">Phone alerts (SMS and voice calls)</h4><span class="pill off">Off · not configured</span></div>
+          <div class="refuse hl"><b>Phone alerts need an encryption key, and this server has none.</b> They store a provider credential and phone numbers, and cerbix keeps those only encrypted. Set <span class="mono">security.encryption_key</span> in the server configuration and restart; this form opens once the key is there.</div>
+          <label class="chk" style="opacity:.55"><span class="cb"></span>Enable phone alerts</label>
+          <div class="g3">
+            <div class="fl"><span class="lab">Account SID</span><span class="in mono ph dis">AC…</span></div>
+            <div class="fl"><span class="lab">Auth token</span><span class="in mono ph dis">auth token</span></div>
+            <div class="fl"><span class="lab">From</span><span class="in mono ph dis">+15550100 or MG…</span></div>
+          </div>
+          <div class="foot"><span class="btn pri dis">Save phone settings</span><span class="muted">Needs the encryption key.</span></div>
+          <p class="hint">Fields and Save are disabled. If the key disappears between the read and the save, the server's refusal reads the same sentence under Save.</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">1h · no public URL anywhere</span> this field and Email → Public base URL are both empty (§4.1)</div>
+        <div class="inner">
+          <div class="fl"><span class="lab">Public base URL<span class="opt">(for the incident link)</span></span><span class="in mono ph">https://cerbix.example.com</span></div>
+          <div class="warn hl"><b>Messages will carry no link.</b> Neither this field nor Email → Public base URL is set. Messages still name the incident by its short reference (<span class="mono">incident X7K2P9QM</span>), and each delivery records <span class="mono">no_public_url</span>.</div>
+          <p class="hint">A warning, not a refusal: Save stays enabled. The message drawn for this case is in §6 (6c).</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1f / 1g -->
+    <h3 class="sub">Warnings when a change takes routes away (§4.1, revision 6). The warning is the save's own answer: Save sends the <span class="mono">PUT</span>; if it would leave a service without a route the server changes nothing and answers <span class="mono">409</span> with <span class="mono">services_without_route</span> (at most 50, and the total). The card shows that list; the confirm button resends the same body with <span class="mono">confirm_unroutable: true</span>.</h3>
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv">1f · switching phone alerts off</span> “Enable” unticked, Save → 409</div>
+        <div class="inner">
+          <label class="chk"><span class="cb"></span>Enable phone alerts</label>
+          <div class="foot" style="border-top:0; padding-top:0"><span class="btn pri dis">Saving…</span><span class="muted">→ <span class="mono">409</span>, nothing saved yet</span></div>
+          <div class="warn hl">
+            <b>Not saved yet — 3 services would be left with no route.</b> Phone channels stay, but they would not be called or texted and would stop counting as routes. These services' incidents would not be announced, and their members' own alerts page as usual:
+            <div class="row" style="margin-top:8px"><span class="svc"><span class="k">service</span>checkout</span><span class="svc"><span class="k">service</span>payments</span><span class="muted">· project <b style="color:var(--ink-2); font-weight:500">prod</b></span></div>
+            <div class="row" style="margin-top:4px"><span class="svc"><span class="k">service</span>search</span><span class="muted">· project <b style="color:var(--ink-2); font-weight:500">staging</b></span></div>
+          </div>
+          <div class="row"><span class="btn danger">Turn off anyway</span><span class="btn sec">Keep phone alerts on</span></div>
+          <p class="hint">“Turn off anyway” resends with <span class="mono">confirm_unroutable: true</span> and ends in “✓ Saved”. “Keep phone alerts on” ticks Enable again and sends nothing. The list is what was true when the server answered; if another save changes it before the confirm, the confirmed save still goes through, as the spec computes the list per request.</p>
+          <div class="quiet" style="margin-top:4px"><span class="lbl" style="display:block; margin-bottom:4px">Variant · more than 50</span>Not saved yet — 73 services would be left with no route. <span class="muted">(the first 50, grouped by project)</span> … <b style="color:var(--ink-2); font-weight:500">and 23 more.</b></div>
+          <div class="quiet"><span class="lbl" style="display:block; margin-bottom:4px">Variant · nobody loses a route</span>No <span class="mono">409</span>: every service keeps another route, so the save goes through at once and shows <span class="ok">✓ Saved</span>.</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">1g · switching to the generic HTTP gateway</span> while Voice call channels exist; Save → 409</div>
+        <div class="inner">
+          <div class="fl"><span class="lab">Provider</span>
+            <div class="choice">
+              <label><span class="rd"></span><span>Twilio<span class="d">SMS and voice calls</span></span></label>
+              <label><span class="rd on"></span><span>Generic HTTP gateway<span class="d">SMS only, through a request you define — no voice calls</span></span></label>
+            </div>
+          </div>
+          <div class="warn hl">
+            <b>Not saved yet — 1 service would be left with no route.</b> The generic HTTP gateway cannot place calls: Voice call channels stay, but they would not be called and would stop counting as routes. SMS channels are not affected.
+            <div class="row" style="margin-top:8px"><span class="svc"><span class="k">service</span>payments</span><span class="muted">· project <b style="color:var(--ink-2); font-weight:500">prod</b></span></div>
+          </div>
+          <div class="row"><span class="btn pri">Switch anyway</span><span class="btn sec">Keep Twilio</span></div>
+          <p class="hint">“Switch anyway” resends with <span class="mono">confirm_unroutable: true</span>. With no service affected there is no <span class="mono">409</span> and the switch saves at once, voice channels or not — they are then marked “Not a route” in their project's channel list (3e′).</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 1i -->
+    <h3 class="sub">1i · “Send test SMS” — every state of the one action (§4.1: to the calling admin's own verified number only)</h3>
+    <div class="card">
+      <div class="tbl-wrap">
+        <table class="ref" style="min-width:720px">
+          <thead><tr><th style="width:190px">State</th><th>What the block shows</th></tr></thead>
+          <tbody>
+            <tr><td><b style="color:var(--ink)">Ready</b></td><td><div class="row"><span class="btn sec sm">Send test SMS to +90•••••6869</span><span class="muted">Sends a fixed text to your own verified number, with the saved settings.</span></div></td></tr>
+            <tr><td><b style="color:var(--ink)">No verified number</b></td><td><div class="row"><span class="btn sec sm dis">Send test SMS</span><span class="muted">You have no verified number. <a href="#s2">Add one under Account → Phone</a>.</span></div></td></tr>
+            <tr><td><b style="color:var(--ink)">Unsaved changes</b></td><td><div class="row"><span class="btn sec sm dis">Send test SMS to +90•••••6869</span><span class="muted">Save first — the test uses the saved settings.</span></div></td></tr>
+            <tr><td><b style="color:var(--ink)">Phone alerts off</b></td><td><div class="row"><span class="btn sec sm dis">Send test SMS to +90•••••6869</span><span class="muted">Turn phone alerts on and save to send a test.</span></div></td></tr>
+            <tr><td><b style="color:var(--ink)">Sending</b></td><td><div class="row"><span class="btn sec sm dis">Sending…</span></div></td></tr>
+            <tr><td><b style="color:var(--ink)">Accepted</b></td><td><div class="row"><span class="btn sec sm">Send test SMS to +90•••••6869</span><span class="ok">✓ Accepted by the provider · <span class="mono">HTTP 201</span>. Check your phone.</span></div></td></tr>
+            <tr><td><b style="color:var(--ink)">Rejected</b></td><td><div class="row"><span class="btn sec sm">Send test SMS to +90•••••6869</span><span class="err">Rejected by the provider · <span class="mono">HTTP 400 · code 21211</span>. Check the From number and the account.</span></div></td></tr>
+            <tr><td><b style="color:var(--ink)">Rejected, no code field</b><br><span class="muted">generic HTTP</span></td><td><div class="row"><span class="btn sec sm">Send test SMS to +90•••••6869</span><span class="err">Rejected by the gateway · <span class="mono">HTTP 400</span>. Set “Error code field” to see the gateway's own code.</span></div></td></tr>
+            <tr><td><b style="color:var(--ink)">Redirect</b><br><span class="muted">generic HTTP, D14</span></td><td><div class="row"><span class="btn sec sm">Send test SMS to +90•••••6869</span><span class="err">Rejected · <span class="mono">HTTP 302</span>. A redirect is not followed; put the final URL in the settings.</span></div></td></tr>
+            <tr><td><b style="color:var(--ink)">Unreachable</b></td><td><div class="row"><span class="btn sec sm">Send test SMS to +90•••••6869</span><span class="err">No answer from the provider within 5 s (<span class="mono">timeout</span>). The message may or may not have been sent.</span></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="note"><b>Field order</b> follows the order an admin fills them in: switch, provider, provider fields, then what every message shares (link, language, encoding, length), then the limits, then the test. <b>Secrets</b> are the Email card's grammar exactly: “✓ stored” in the label, “•••••••• (unchanged)” as the placeholder, blank keeps (§4.1). The header map is one secret (§4.1 “the whole map is secret”), so it is replaced whole or kept whole. <b>Not drawn here:</b> the inbound URLs and “Regenerate URLs” (part b), quotas and usage (part c).</div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 2 ═══════════════════════════════════════════════ -->
+  <section id="s2">
+    <header>
+      <h2>2 · Settings → Account → Phone <span class="new">new tab</span></h2>
+      <div class="where">route <code>/settings?tab=phone</code> · <code>frontend/src/views/SettingsView.vue</code>, the <i>Account</i> group, after <i>Security</i>. The SPA has no separate profile page: the account menu's “Settings” already leads to the Account group, where Security lives (D-1 in §8). Shown to every signed-in person, SSO accounts included. Uses <code>PUT</code>/<code>DELETE /api/v1/me/phone</code>, <code>POST /api/v1/me/phone/verify</code>, <code>PATCH /api/v1/me/phone/preferences</code>, and <code>phone</code> and <code>telephony_enabled</code> of <code>GET /api/v1/me</code> (§4.2, revision 6). The code entry is the two-factor enrolment's grammar (numbered steps, the 180 px mono code field).</div>
+    </header>
+
+    <div class="three">
+      <div class="card">
+        <div class="stateline"><span class="tagv">2a · no number</span> <span class="mono">phone: null</span></div>
+        <div class="inner">
+          <h4 style="font-size:13px; font-weight:600">Phone for alerts</h4>
+          <p class="expl">Phone channels can text or call you at this number. cerbix sends nothing to it until you confirm it with a code.</p>
+          <div class="fl"><span class="lab">Mobile number</span><span class="in mono ph">+90 532 000 0000</span><span class="hint">International format with the country code (E.164).</span></div>
+          <div><span class="btn pri sm">Send code</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">2b · code sent</span> stored unverified; also what a reload shows while unverified</div>
+        <div class="inner">
+          <div class="row"><span class="mono" style="font-size:13px">+90•••••6869</span><span class="pill wait">Not verified</span></div>
+          <div class="steps">
+            <div class="step"><div class="t done">✓ 1 · Code sent by SMS</div><p class="hint">It works for 10 minutes. The number is shown masked, here as everywhere.</p></div>
+            <div class="step"><div class="t">2 · Enter the 6-digit code</div><span class="in code ph" style="margin-top:6px">123456</span></div>
+          </div>
+          <div class="row"><span class="btn pri sm">Verify</span><span class="btn sec sm">Send a new code</span><span class="muted"><a href="#s2">Use another number</a></span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">2g · verified</span> the normal state, with the voice language</div>
+        <div class="inner">
+          <div class="row"><span class="mono" style="font-size:13px">+90•••••6869</span><span class="pill on">Verified</span></div>
+          <div class="row"><span class="btn sec sm">Replace number</span><span class="btn dangerline sm">Remove</span></div>
+          <div class="fl hl"><span class="lab">Voice language</span><span class="in">Instance default (en-US) ▾</span><span class="hint">The language cerbix speaks when it calls you. SMS text is always in English. Saved as soon as you pick it.</span></div>
+          <span class="ok">✓ Saved</span>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="sub">Code states (§4.2: 6 digits, 10 minutes, 5 attempts; 3 codes an hour per person, 10 a day per number)</h3>
+    <div class="card">
+      <div class="tbl-wrap">
+        <table class="ref" style="min-width:720px">
+          <thead><tr><th style="width:170px">State</th><th>Under the code field</th><th style="width:240px">What stays possible</th></tr></thead>
+          <tbody>
+            <tr><td><b style="color:var(--ink)">2c · wrong code</b></td><td><span class="in code bad" style="display:inline-block">482193</span><div class="err" style="margin-top:6px">That code is not right. Check the most recent SMS and try again.</div></td><td>Verify again; Send a new code</td></tr>
+            <tr><td><b style="color:var(--ink)">2d · expired</b></td><td><div class="err">This code has expired — codes work for 10 minutes. Send a new one.</div></td><td>Send a new code (Verify is disabled)</td></tr>
+            <tr><td><b style="color:var(--ink)">2e · attempts used up</b></td><td><div class="err">Too many wrong codes — this code no longer works. Send a new one.</div></td><td>Send a new code (Verify is disabled)</td></tr>
+            <tr><td><b style="color:var(--ink)">2f · send limit</b></td><td><div class="err">No code sent: too many codes were requested. You can get 3 codes an hour, and a number gets at most 10 a day. Try again later.</div></td><td>Enter a code already received; Use another number</td></tr>
+            <tr><td><b style="color:var(--ink)">phone alerts switched off meanwhile</b><br><span class="muted">on Send code</span></td><td><div class="err">No code sent: phone alerts were switched off on this instance. An administrator turns them on under Settings → Administration → Telephony.</div></td><td>The page re-reads <span class="mono">GET /api/v1/me</span> and shows 2j</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="three">
+      <div class="card">
+        <div class="stateline"><span class="tagv">2h · replacing the number</span> one number per person; a new one clears verification (§4.2)</div>
+        <div class="inner">
+          <div class="row"><span class="mono" style="font-size:13px">+90•••••6869</span><span class="pill on">Verified</span></div>
+          <div class="fl"><span class="lab">New mobile number</span><span class="in mono">+90 533 000 0042</span></div>
+          <div class="warn hl"><b>Your current number stops working for alerts now.</b> Until you confirm the new one, phone channels that alert you are not routes, and nothing is sent to either number.</div>
+          <div class="row"><span class="btn pri sm">Send code to the new number</span><span class="btn sec sm">Cancel</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">2i · removing the number</span> inline confirmation, the Security tab's “Disable two-factor” grammar</div>
+        <div class="inner">
+          <div class="row"><span class="mono" style="font-size:13px">+90•••••6869</span><span class="pill on">Verified</span></div>
+          <div class="warn hl"><b>Remove this number?</b> Phone channels that alert you stay, but they are not routes until you add and confirm a number again.</div>
+          <div class="row"><span class="btn danger sm">Remove number</span><span class="btn sec sm">Cancel</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">2j′ · phone alerts off, number kept</span> <span class="mono">telephony_enabled: false</span>, a number verified before the switch-off</div>
+        <div class="inner">
+          <div class="row"><span class="mono" style="font-size:13px">+90•••••6869</span><span class="pill on">Verified</span></div>
+          <div class="quiet hl">Phone alerts are switched off on this instance, so nothing is sent to this number for now. It stays verified.</div>
+          <div class="row"><span class="btn sec sm dis">Replace number</span><span class="btn dangerline sm">Remove</span></div>
+          <p class="hint">Replacing needs a code, and no SMS can be sent, so Replace is disabled. Remove and the language work as usual.</p>
+        </div>
+      </div>
+    </div>
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv">2j · phone alerts off, no number</span> <span class="mono">telephony_enabled: false</span> on <span class="mono">GET /api/v1/me</span> (revision 6, §4.2) — said on load, before anything is typed</div>
+        <div class="inner">
+          <h4 style="font-size:13px; font-weight:600">Phone for alerts</h4>
+          <div class="quiet hl">Phone alerts are not enabled on this instance, so a number cannot be confirmed now. An administrator turns them on under Settings → Administration → Telephony.</div>
+          <div class="fl"><span class="lab">Mobile number</span><span class="in mono ph dis">+90 532 000 0000</span></div>
+          <div><span class="btn pri sm dis">Send code</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">for a global admin</span> the same state, with the way to fix it</div>
+        <div class="inner">
+          <h4 style="font-size:13px; font-weight:600">Phone for alerts</h4>
+          <div class="quiet">Phone alerts are not enabled on this instance, so a number cannot be confirmed now. <a href="#s1">Turn them on under Administration → Telephony</a>.</div>
+          <p class="hint">The only difference is the link: the target tab exists only for a global admin.</p>
+        </div>
+      </div>
+    </div>
+    <div class="note"><b>Masked to its owner too</b> (D35): after verification the page has only <span class="mono">number_masked</span>, so there is no “show” toggle; a person who needs to change the number types the new one. <b>Language</b> is a separate write (<span class="mono">PATCH …/preferences</span>), so changing it never clears verification. Its options are the instance default (named with its value) plus a fixed list of BCP-47 tags; see D-9. <b>Quiet hours</b> belong to part (c) and are not drawn.</div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 3 ═══════════════════════════════════════════════ -->
+  <section id="s3">
+    <header>
+      <h2>3 · Settings → Project → Notification channels: SMS and Voice call <span class="new">two types · recipient · route state · deliveries</span></h2>
+      <div class="where">route <code>/settings?tab=channels</code> · <code>frontend/src/views/SettingsView.vue</code>, the channels tab: the inline “Add channel” form and the table under it, as they are today. The type select gains <i>SMS</i> and <i>Voice call</i>; for those two the generic config fields are replaced by a recipient block, because a phone channel's fields are typed, not <code>config</code> keys (§4.3). Uses <code>GET /api/v1/projects/{projectID}/phone-recipients</code>, the verify routes, and <code>GET …/notification-channels/{channelID}/phone-deliveries</code> (§9).</div>
+    </header>
+
+    <h3 class="sub">Creating: who can do what (D28)</h3>
+    <div class="three">
+      <!-- 3a admin user -->
+      <div class="card">
+        <div class="stateline"><span class="tagv">3a · project admin · a person</span> any eligible recipient (§4.3)</div>
+        <div class="inner">
+          <div class="g2">
+            <div class="fl"><span class="lab">Type</span><span class="in">SMS ▾</span></div>
+            <div class="fl"><span class="lab">Name</span><span class="in">SMS — Ada</span></div>
+          </div>
+          <div class="fl"><span class="lab">Send to</span>
+            <div class="seg hl"><span class="on">A person</span><span>A fixed number</span></div>
+            <span class="hint">Fixed when the channel is created.</span>
+          </div>
+          <div class="fl"><span class="lab">Person</span><span class="in">Ada Park ▾</span>
+            <div class="fakesel hl">
+              <div class="on"><span>Ada Park</span><span class="e">ada@example.com</span><span class="v vok">✓ verified number</span></div>
+              <div><span>Bo Lindqvist</span><span class="e">bo@example.com</span><span class="v vno">no verified number</span></div>
+              <div><span>Chen Wei</span><span class="e">chen@example.com</span><span class="v vok">✓ verified number</span></div>
+              <div><span>Dara Okafor</span><span class="e">dara@example.com</span><span class="v vok">✓ verified number</span></div>
+            </div>
+            <span class="hint">People who can open this project — members, organization members and global admins. No number is shown, not even masked.</span>
+          </div>
+          <div class="row"><span class="btn pri">Create</span><span class="btn sec">Cancel</span></div>
+        </div>
+      </div>
+      <!-- 3a' admin picks unverified -->
+      <div class="card">
+        <div class="stateline"><span class="tagv">3a′ · a person without a verified number</span> allowed; created, not a route</div>
+        <div class="inner">
+          <div class="g2">
+            <div class="fl"><span class="lab">Type</span><span class="in">Voice call ▾</span></div>
+            <div class="fl"><span class="lab">Name</span><span class="in">Call — Bo</span></div>
+          </div>
+          <div class="fl"><span class="lab">Send to</span><div class="seg"><span class="on">A person</span><span>A fixed number</span></div></div>
+          <div class="fl"><span class="lab">Person</span><span class="in">Bo Lindqvist — no verified number ▾</span></div>
+          <div class="warn hl"><b>Bo Lindqvist has no verified number.</b> The channel is created, but it is not a route — nothing is sent through it — until Bo confirms a number under Account → Phone.</div>
+          <div class="row"><span class="btn pri">Create</span><span class="btn sec">Cancel</span></div>
+        </div>
+      </div>
+      <!-- 3c editor -->
+      <div class="card">
+        <div class="stateline"><span class="tagv">3c · project editor</span> only themselves; no fixed number (D28)</div>
+        <div class="inner">
+          <div class="g2">
+            <div class="fl"><span class="lab">Type</span><span class="in">SMS ▾</span></div>
+            <div class="fl"><span class="lab">Name</span><span class="in">SMS — Bo</span></div>
+          </div>
+          <div class="fl"><span class="lab">Send to</span>
+            <div class="seg"><span class="on">A person</span><span class="off">A fixed number</span></div>
+            <span class="hint hl">A fixed number can be added by a project admin.</span>
+          </div>
+          <div class="fl"><span class="lab">Person</span><span class="in dis">You (Bo Lindqvist) — ✓ verified number</span><span class="hint hl">As an editor you can create a phone channel only for yourself.</span></div>
+          <div class="row"><span class="btn pri">Create</span><span class="btn sec">Cancel</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3b number mode -->
+    <h3 class="sub">3b · Project admin · a fixed number: created disabled, verified, then enabled (§4.2, D7)</h3>
+    <div class="three">
+      <div class="card">
+        <div class="stateline"><span class="tagv">3b-1 · the form</span></div>
+        <div class="inner">
+          <div class="g2">
+            <div class="fl"><span class="lab">Type</span><span class="in">SMS ▾</span></div>
+            <div class="fl"><span class="lab">Name</span><span class="in">NOC duty phone</span></div>
+          </div>
+          <div class="fl"><span class="lab">Send to</span><div class="seg"><span>A person</span><span class="on">A fixed number</span></div></div>
+          <div class="fl"><span class="lab">Number</span><span class="in mono">+44 7700 900199</span><span class="hint">E.164. Never shown again in full.</span></div>
+          <div class="quiet hl">A fixed-number channel is created <b style="color:var(--ink); font-weight:600">disabled</b>. Confirm the number with a code to enable it. A shared phone receives the incident link only — it can never acknowledge, because it names nobody.</div>
+          <div class="row"><span class="btn pri">Create</span><span class="btn sec">Cancel</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">3b-2 · created, verify</span> the form stays open on the new channel</div>
+        <div class="inner">
+          <div class="muted">Created <b style="color:var(--ink); font-weight:500">NOC duty phone</b> — disabled until the number is confirmed.</div>
+          <div class="steps">
+            <div class="step"><div class="t">1 · Send a code to +44•••••0199</div><span class="btn sec sm" style="margin-top:6px">Send code</span></div>
+            <div class="step"><div class="t dim">2 · Enter the 6-digit code</div><span class="in code ph dis" style="margin-top:6px">123456</span></div>
+          </div>
+          <div class="row"><span class="btn pri sm dis">Verify</span><span class="btn sec sm">Later</span></div>
+          <p class="hint">The code states are those of §2 (wrong, expired, attempts used up, send limit). “Later” leaves the channel disabled; the row offers “Verify” again (3e).</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">3b-3 · verified</span></div>
+        <div class="inner">
+          <div class="steps">
+            <div class="step"><div class="t done">✓ 1 · Code sent to +44•••••0199</div></div>
+            <div class="step"><div class="t done">✓ 2 · Number confirmed</div></div>
+          </div>
+          <div class="row hl"><span class="btn pri sm">Enable channel</span><span class="btn sec sm">Keep disabled</span></div>
+          <p class="hint">Confirming does not switch the channel on by itself; the admin decides (D-12). The table's toggle unlocks either way.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3f refusals + 3d edit -->
+    <div class="three">
+      <div class="card">
+        <div class="stateline"><span class="tagv">3f · phone alerts off</span> D27, P22 — known from <span class="mono">telephony_enabled: false</span> on <span class="mono">GET /api/v1/me</span> (revision 6), so said in the type list</div>
+        <div class="inner">
+          <div class="g2"><div class="fl"><span class="lab">Type</span><span class="in">Webhook ▾</span>
+            <div class="fakesel hl"><div>Webhook</div><div>Slack</div><div>Telegram</div><div>Email</div><div class="e" style="color:var(--ink-3)">SMS — phone alerts are off</div><div class="e" style="color:var(--ink-3)">Voice call — phone alerts are off</div></div>
+          </div><div class="fl"><span class="lab">Name</span><span class="in ph">e.g. oncall-slack</span></div></div>
+          <p class="hint">The two options are disabled, with the reason in their label: a global admin turns phone alerts on under Settings → Administration → Telephony. If phone alerts are switched off while the form is open, the server's 400 reads under the form: “Not created: phone alerts are not enabled on this instance.”</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">3f′ · refused: voice under generic HTTP</span> D3, P5 — the server's 400; <span class="mono">GET /api/v1/me</span> says whether telephony is on, not which provider</div>
+        <div class="inner">
+          <div class="g2"><div class="fl"><span class="lab">Type</span><span class="in">Voice call ▾</span></div><div class="fl"><span class="lab">Name</span><span class="in">Call — Ada</span></div></div>
+          <div class="err hl">Not created: this instance sends SMS through a generic HTTP gateway, which cannot place calls. Create an SMS channel instead.</div>
+          <div class="row"><span class="btn pri">Create</span><span class="btn sec">Cancel</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">3d · editing a phone channel</span> type and “Send to” are fixed</div>
+        <div class="inner">
+          <div class="muted">Editing <b style="color:var(--ink); font-weight:500">NOC duty phone</b> — the type and who it sends to cannot be changed; another kind of recipient is a new channel.</div>
+          <div class="fl"><span class="lab">Number</span><span class="in mono ph">+44•••••0199 — type a new number to replace it</span><span class="hint hl">A new number clears the confirmation and disables the channel until it is confirmed again.</span></div>
+          <div class="row"><span class="btn pri">Save</span><span class="btn sec">Cancel</span></div>
+          <p class="hint">A person channel shows the person select instead: an admin can pick another eligible person; an editor sees only themselves and can edit only their own phone channels.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3e list -->
+    <h3 class="sub">3e · The channel list: recipient, route state with its reason, disabled reason (§4.3, D31)</h3>
+    <div class="card">
+      <div class="stateline"><span class="tagv">project admin</span> project <b style="color:var(--ink-2)">prod</b>, Twilio, phone alerts on. Every row a phone channel can be in.</div>
+      <div class="inner">
+        <div class="row" style="justify-content:space-between"><span class="muted">prod · 8 channel(s)</span><span class="btn pri sm">Add channel</span></div>
+        <div class="card" style="box-shadow:none">
+          <div class="tbl-wrap">
+            <table class="ch">
+              <thead><tr><th>Name</th><th>Type</th><th>Status</th><th></th></tr></thead>
+              <tbody>
+                <tr><td class="nm">oncall-slack</td><td class="ty">slack</td><td><span class="sw on"><i></i></span></td><td class="act"><span>Edit</span><span class="del">Delete</span></td></tr>
+                <tr><td class="nm">SMS — Ada<span class="to">to Ada Park</span></td><td class="ty">sms</td><td><span class="sw on"><i></i></span></td><td class="act"><span class="dl">Deliveries</span><span>Edit</span><span class="del">Delete</span></td></tr>
+                <tr><td class="nm">Call — Ada<span class="to">to Ada Park</span></td><td class="ty">voice</td><td><span class="sw on"><i></i></span></td><td class="act"><span class="dl">Deliveries</span><span>Edit</span><span class="del">Delete</span></td></tr>
+                <tr class="hl"><td class="nm">Call — Bo<span class="to">to Bo Lindqvist</span><span class="nr"><b>Not a route</b> · Bo Lindqvist has no verified number</span></td><td class="ty">voice</td><td><span class="sw on"><i></i></span></td><td class="act"><span class="dl">Deliveries</span><span>Edit</span><span class="del">Delete</span></td></tr>
+                <tr class="hl"><td class="nm">SMS — Eli<span class="to">to Eli Moreau</span><span class="nr"><b>Not a route</b> · Eli Moreau can no longer open this project</span></td><td class="ty">sms</td><td><span class="sw on"><i></i></span></td><td class="act"><span class="dl">Deliveries</span><span>Edit</span><span class="del">Delete</span></td></tr>
+                <tr class="hl"><td class="nm">NOC duty phone<span class="to">to <span class="mono">+44•••••0199</span></span><span class="dr"><b>Disabled</b> · number not confirmed</span></td><td class="ty">sms</td><td><span class="sw locked" title="Confirm the number to enable this channel"><i></i></span></td><td class="act"><span class="dl">Verify</span><span class="dl">Deliveries</span><span>Edit</span><span class="del">Delete</span></td></tr>
+                <tr class="hl"><td class="nm">SMS — Fay<span class="to">to <i>a deleted account</i></span><span class="dr"><b>Disabled</b> · its recipient's account was deleted</span></td><td class="ty">sms</td><td><span class="sw locked" title="Its recipient was deleted — pick another person or delete the channel"><i></i></span></td><td class="act"><span class="dl">Deliveries</span><span>Edit</span><span class="del">Delete</span></td></tr>
+                <tr><td class="nm">ops-mail</td><td class="ty">email</td><td><span class="sw"><i></i></span></td><td class="act"><span>Edit</span><span class="del">Delete</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv">3e′ · instance-wide reasons</span> the same project after a global admin turned phone alerts off — and, below, after switching to generic HTTP</div>
+        <div class="inner">
+          <div class="tbl-wrap">
+            <table class="ch" style="min-width:480px">
+              <thead><tr><th>Name</th><th>Type</th><th>Status</th></tr></thead>
+              <tbody>
+                <tr><td class="nm">SMS — Ada<span class="to">to Ada Park</span><span class="nr"><b>Not a route</b> · phone alerts are off on this instance</span></td><td class="ty">sms</td><td><span class="sw on"><i></i></span></td></tr>
+                <tr><td class="nm">Call — Ada<span class="to">to Ada Park</span><span class="nr"><b>Not a route</b> · phone alerts are off on this instance</span></td><td class="ty">voice</td><td><span class="sw on"><i></i></span></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="lbl">generic HTTP gateway in use</div>
+          <div class="tbl-wrap">
+            <table class="ch" style="min-width:480px">
+              <thead><tr><th>Name</th><th>Type</th><th>Status</th></tr></thead>
+              <tbody>
+                <tr><td class="nm">SMS — Ada<span class="to">to Ada Park</span></td><td class="ty">sms</td><td><span class="sw on"><i></i></span></td></tr>
+                <tr><td class="nm">Call — Ada<span class="to">to Ada Park</span><span class="nr"><b>Not a route</b> · the instance's provider cannot place calls</span></td><td class="ty">voice</td><td><span class="sw on"><i></i></span></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="hint">The toggle keeps the channel's own switch: these channels are still enabled, and become routes again the moment the instance setting changes back.</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">3e″ · the only route of a service</span> D31's cost, §9: a phone channel is the project's only route</div>
+        <div class="inner">
+          <div class="tbl-wrap">
+            <table class="ch" style="min-width:480px">
+              <thead><tr><th>Name</th><th>Type</th><th>Status</th></tr></thead>
+              <tbody>
+                <tr><td class="nm">SMS — on-call<span class="to">to Chen Wei</span>
+                  <span class="only warn hl"><b>Only route for</b> <span class="svc"><span class="k">service</span>checkout</span> <span class="svc"><span class="k">service</span>payments</span><br>If a message to it is not sent — storm limit, refused by the provider, outcome unknown — nobody hears about those services' incidents, and their members' own alerts stay held. Add a second channel, or set re-notify on the members.</span></td><td class="ty">sms</td><td><span class="sw on"><i></i></span></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="hint">Shown in the list and at the top of the edit form for that channel. Part (c) adds “or name a fallback channel” to the advice and drops the warning once a fallback exists.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv">3e‴ · project editor</span> Bo: edits Slack and own phone channels only (D28 “update and delete follow the same table”)</div>
+        <div class="inner">
+          <div class="tbl-wrap">
+            <table class="ch" style="min-width:520px">
+              <thead><tr><th>Name</th><th>Type</th><th>Status</th><th></th></tr></thead>
+              <tbody>
+                <tr><td class="nm">oncall-slack</td><td class="ty">slack</td><td><span class="sw on"><i></i></span></td><td class="act"><span>Edit</span><span class="del">Delete</span></td></tr>
+                <tr><td class="nm">SMS — Ada<span class="to">to Ada Park</span></td><td class="ty">sms</td><td class="muted">enabled</td><td class="act"><span class="dl">Deliveries</span></td></tr>
+                <tr><td class="nm">Call — Bo<span class="to">to you</span><span class="nr"><b>Not a route</b> · you have no verified number — <a href="#s2">add one</a></span></td><td class="ty">voice</td><td><span class="sw on"><i></i></span></td><td class="act"><span class="dl">Deliveries</span><span>Edit</span><span class="del">Delete</span></td></tr>
+                <tr><td class="nm">NOC duty phone<span class="to">to <span class="mono">+44•••••0199</span></span></td><td class="ty">sms</td><td class="muted">enabled</td><td class="act"><span class="dl">Deliveries</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">3e⁗ · project viewer</span> read-only, as every channel is to a viewer today; deliveries are readable (<span class="mono">project:read</span>)</div>
+        <div class="inner">
+          <div class="tbl-wrap">
+            <table class="ch" style="min-width:520px">
+              <thead><tr><th>Name</th><th>Type</th><th>Status</th><th></th></tr></thead>
+              <tbody>
+                <tr><td class="nm">oncall-slack</td><td class="ty">slack</td><td class="muted">enabled</td><td class="act"></td></tr>
+                <tr><td class="nm">SMS — Ada<span class="to">to Ada Park</span></td><td class="ty">sms</td><td class="muted">enabled</td><td class="act"><span class="dl">Deliveries</span></td></tr>
+                <tr><td class="nm">Call — Bo<span class="to">to Bo Lindqvist</span><span class="nr"><b>Not a route</b> · Bo Lindqvist has no verified number</span></td><td class="ty">voice</td><td class="muted">enabled</td><td class="act"><span class="dl">Deliveries</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="hint">No “Add channel” button. A viewer cannot create any channel today, and D28 keeps that.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3g -->
+    <h3 class="sub">3g · Deliveries of one channel — the last 50 (§4.5), opened from the row</h3>
+    <div class="card">
+      <div class="stateline"><span class="tagv">deliveries panel</span> opens under the table, like the channel form opens above it; reasons and masked numbers only</div>
+      <div class="inner">
+        <div class="panel" style="box-shadow:none">
+          <div class="h"><h6>Deliveries · SMS — Ada</h6><span class="chip">last 50</span><span class="r muted">✕ Close</span></div>
+          <div class="pr">
+            <div class="when"><b>14:07:12</b>today</div>
+            <div><div class="l1"><span class="rs sent"><i></i>Sent</span><span>Monitor down · payments-api</span><a class="mono" href="#s4">X7K2P9QM</a><span class="ms">+90•••••6869</span></div>
+              <div class="l2"><span class="mono">HTTP 201</span><span>1 segment</span><span>1 attempt</span></div></div>
+          </div>
+          <div class="pr">
+            <div class="when"><b>14:06:58</b>today</div>
+            <div><div class="l1"><span class="rs sent"><i></i>Sent</span><span>Service alert · checkout down</span><a class="mono" href="#s4">7MQ4H2ZD</a><span class="ms">+90•••••6869</span></div>
+              <div class="l2"><span class="mono">HTTP 201</span><span>1 segment</span><span>1 attempt</span></div></div>
+          </div>
+          <div class="pr">
+            <div class="when"><b>09:41:03</b>today</div>
+            <div><div class="l1"><span class="rs warn"><i></i>Storm limit</span><span>Monitor down · api-gateway</span><a class="mono" href="#s4">4RD8N1KC</a><span class="ms">+90•••••6869</span></div>
+              <div class="l2"><span>5 messages to this number for this incident in the last hour</span></div></div>
+          </div>
+          <div class="pr">
+            <div class="when"><b>03:12:40</b>yesterday</div>
+            <div><div class="l1"><span class="rs sent"><i></i>Sent</span><span>Budget burn · payments-api</span><span class="muted">no incident</span><span class="ms">+90•••••6869</span></div>
+              <div class="l2"><span class="mono">HTTP 201</span><span>1 segment</span><span>1 attempt</span></div></div>
+          </div>
+          <div class="pr">
+            <div class="when"><b>02:58:17</b>yesterday</div>
+            <div><div class="l1"><span class="rs cfg"><i></i>Not deliverable</span><span>Recovered · payments-api</span><a class="mono" href="#s4">Q2W9V5TB</a></div>
+              <div class="l2"><span class="nt">no_verified_number</span><span>Ada Park had no verified number when it was sent</span></div></div>
+          </div>
+          <div class="empty" style="padding:12px 16px; text-align:left">Older deliveries are kept 90 days and are not listed here.</div>
+        </div>
+        <div class="quiet"><span class="lbl" style="display:block; margin-bottom:4px">Empty</span>No alert has been sent through this channel yet.</div>
+      </div>
+    </div>
+    <div class="note"><b>Type column</b> keeps today's raw type (<span class="mono">sms</span>, <span class="mono">voice</span>) like <span class="mono">slack</span> beside it; the type <i>select</i> reads “SMS” and “Voice call”. <b>The route state</b> is a dashed chip under the name, because “Not a route” is a fact about the channel that the enabled toggle does not show: a phone channel can be enabled and not a route (D31). <b>Disabled reasons</b> (<span class="mono">recipient_deleted</span>, <span class="mono">number_unverified</span>) are a solid chip, the same place, and lock the toggle with a tooltip that says what unlocks it. <b>Editor and viewer refusals are not drawn as errors</b>: the controls a role cannot use are absent, as today, so no 403 can be met in normal use. <b>Not drawn here:</b> the fallback channel (part c).</div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 4 ═══════════════════════════════════════════════ -->
+  <section id="s4">
+    <header>
+      <h2>4 · Incident page: the Phone panel <span class="new">new panel</span></h2>
+      <div class="where">route <code>/incidents/:id</code> · <code>frontend/src/views/IncidentDetailView.vue</code>. The panel sits <b>directly under the Timeline</b> and above “Post an update”. It reads <code>GET /api/v1/incidents/{incidentID}/phone-activity</code> (<code>project:read</code>, §5.5) — the deliveries list in part (a); the actions list arrives with part (b). The page itself already requires <code>project:read</code>, so everyone who can open the incident sees the panel — when the incident has a delivery, or when phone alerts are on (<code>telephony_enabled</code>, revision 6); otherwise there is no panel (4g).</div>
+    </header>
+
+    <div class="card">
+      <div class="stateline"><span class="tagv">4a · an incident with phone activity</span> a service incident on its second escalation step; every part-(a) outcome that can meet one incident</div>
+      <div class="shell-top"><span>Acme</span><span class="sep">/</span><span>prod</span><span class="sep">/</span><span>Incidents</span><span class="sep">/</span><b>Checkout — service down</b><span class="acts"><span class="btn sec sm">Acknowledge</span><span class="btn sec sm">Resolve</span></span></div>
+      <div class="idv">
+        <div>
+          <div class="hrow"><h5>Checkout — service down</h5><span class="bdg s-inv">Investigating</span><span class="bdg i-major">Major</span><span class="src">auto</span><span class="subj"><span class="k">service</span>· checkout</span><span class="esc">⛑ escalated to step 2 · 6m ago</span></div>
+          <div class="meta"><span>started <span class="mono">21m ago</span></span></div>
+          <p class="basis"><span class="ip">Major impact</span> — declared by service <a href="#s4">Checkout</a> for state <span class="mono">down</span></p>
+        </div>
+        <div class="panel">
+          <div class="h"><h6>Timeline</h6></div>
+          <ol class="tl">
+            <li><span class="dot s-inv"></span><div><div class="l1"><span class="st">Investigating</span><span class="mono">21m ago</span><span class="mono">· system</span></div><p class="body sys">Opened automatically: service DOWN confirmed over 2 evaluation(s).</p></div></li>
+            <li><span class="dot s-inv"></span><div><div class="l1"><span class="st">Investigating</span><span class="mono">12m ago</span><span class="mono">· ada@example.com</span></div><p class="body">Card authorisation is timing out; looking at the payment provider.</p></div></li>
+          </ol>
+        </div>
+        <div class="panel hl">
+          <div class="h"><h6>Phone</h6><span class="chip">7 deliveries</span><span class="r chip">not on the status page</span></div>
+          <div class="pr">
+            <div class="when"><b>14:06:58</b>21m ago</div>
+            <div><div class="l1"><span class="rs sent"><i></i>Sent</span><span class="cn">SMS — on-call</span><span class="ms">+1•••••0147</span><span class="kind"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v11H8l-4 4z"/></svg>SMS</span><span class="muted">Service alert · down</span></div>
+              <div class="l2"><span class="mono">HTTP 201</span><span>1 segment</span><span>1 attempt</span><span class="mono">ref SM3f…a91c</span></div></div>
+          </div>
+          <div class="pr">
+            <div class="when"><b>14:06:58</b>21m ago</div>
+            <div><div class="l1"><span class="rs sent"><i></i>Sent</span><span class="cn">NOC duty phone</span><span class="ms">+44•••••0199</span><span class="kind"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v11H8l-4 4z"/></svg>SMS</span><span class="muted">Service alert · down</span></div>
+              <div class="l2"><span class="mono">HTTP 201</span><span>1 segment</span><span>1 attempt</span><span class="mono">ref SM8b…04de</span></div></div>
+          </div>
+          <div class="pr">
+            <div class="when"><b>14:06:59</b>21m ago</div>
+            <div><div class="l1"><span class="rs cfg"><i></i>Not deliverable</span><span class="cn">SMS — Eli</span><span class="kind"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v11H8l-4 4z"/></svg>SMS</span><span class="muted">Service alert · down</span></div>
+              <div class="l2"><span class="nt">recipient_not_eligible</span><span>Eli Moreau could no longer open this project when it was sent</span></div></div>
+          </div>
+          <div class="pr">
+            <div class="when"><b>14:14:02</b>13m ago</div>
+            <div><div class="l1"><span class="rs bad"><i></i>Rejected by provider</span><span class="cn">Call — Ada</span><span class="ms">+90•••••6869</span><span class="kind"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 4h4l2 5-3 2a11 11 0 0 0 5 5l2-3 5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg>Call</span><span class="muted">Escalation step 1</span></div>
+              <div class="l2"><span class="mono">HTTP 400 · code 21215</span><span>1 attempt</span></div></div>
+          </div>
+          <div class="pr">
+            <div class="when"><b>14:21:05</b>6m ago</div>
+            <div><div class="l1"><span class="rs warn"><i></i>Outcome unknown</span><span class="cn">SMS — on-call</span><span class="ms">+1•••••0147</span><span class="kind"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v11H8l-4 4z"/></svg>SMS</span><span class="muted">Escalation step 2</span></div>
+              <div class="l2"><span>1 attempt</span></div>
+              <p class="why">The process sending it stopped before the provider's answer was stored. It may have arrived; cerbix did not send it again, so it is not counted as delivered.</p></div>
+          </div>
+          <div class="pr">
+            <div class="when"><b>14:21:05</b>6m ago</div>
+            <div><div class="l1"><span class="rs warn"><i></i>Provider unreachable</span><span class="cn">Call — Chen</span><span class="ms">+1•••••0147</span><span class="kind"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 4h4l2 5-3 2a11 11 0 0 0 5 5l2-3 5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg>Call</span><span class="muted">Escalation step 2</span></div>
+              <div class="l2"><span class="mono">HTTP 503</span><span>3 attempts</span><span>retrying</span></div></div>
+          </div>
+          <div class="pr">
+            <div class="when"><b>14:21:06</b>6m ago</div>
+            <div><div class="l1"><span class="rs sending"><i></i>Sending</span><span class="cn">Call — Dara</span><span class="ms">+49•••••3302</span><span class="kind"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 4h4l2 5-3 2a11 11 0 0 0 5 5l2-3 5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg>Call</span><span class="muted">Escalation step 2</span></div>
+              <div class="l2"><span>waiting for the provider's answer</span></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="sub">4b · Every part-(a) reason as the panel prints it — the closed set of §4.5 (P6)</h3>
+    <div class="card">
+      <div class="tbl-wrap">
+        <table class="ref" style="min-width:760px">
+          <thead><tr><th style="width:220px">Chip</th><th style="width:210px">Stored reason</th><th>Second line</th></tr></thead>
+          <tbody>
+            <tr><td><span class="rs sending"><i></i>Sending</span></td><td class="mono">sending</td><td>waiting for the provider's answer</td></tr>
+            <tr><td><span class="rs sent"><i></i>Sent</span></td><td class="mono">sent</td><td><span class="mono">HTTP 201</span> · segments · attempts · provider reference. “Sent” is the provider's acceptance; part (a) has no delivery report from the handset.</td></tr>
+            <tr><td><span class="rs warn"><i></i>Provider unreachable</span></td><td class="mono">provider_unreachable</td><td><span class="mono">HTTP 503</span>, <span class="mono">HTTP 429</span> or the transport class (<span class="mono">timeout</span>) · attempts · “retrying”</td></tr>
+            <tr><td><span class="rs bad"><i></i>Rejected by provider</span></td><td class="mono">provider_rejected</td><td><span class="mono">HTTP 400 · code 21215</span>; a gateway without an error-code field shows the status alone; a 3xx reads <span class="mono">HTTP 302 · redirect not followed</span></td></tr>
+            <tr><td><span class="rs warn"><i></i>Outcome unknown</span></td><td class="mono">outcome_unknown</td><td>“The process sending it stopped before the provider's answer was stored. It may have arrived; cerbix did not send it again, so it is not counted as delivered.”</td></tr>
+            <tr><td><span class="rs cfg"><i></i>Not deliverable</span></td><td class="mono">not_deliverable</td><td>cause from <span class="mono">notes</span>: <span class="nt">no_verified_number</span> “… had no verified number when it was sent” · <span class="nt">recipient_not_eligible</span> “… could no longer open this project when it was sent”</td></tr>
+            <tr><td><span class="rs cfg"><i></i>Calls not supported</span></td><td class="mono">voice_unsupported_by_provider</td><td>“The instance's provider was a generic HTTP gateway, which cannot place calls.”</td></tr>
+            <tr><td><span class="rs cfg"><i></i>Phone alerts off</span></td><td class="mono">telephony_disabled</td><td>“Phone alerts were switched off on this instance.”</td></tr>
+            <tr><td><span class="rs warn"><i></i>Storm limit</span></td><td class="mono">storm_limited</td><td>“5 messages to this number for this incident in the last hour” or “20 messages to this number in the last hour” — the limit that applied, with the configured value</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="inner" style="padding-top:12px">
+        <div class="row"><span class="lbl">Notes, beside any reason</span><span class="nt">no_incident_ref</span><span class="muted">sent before the incident opened — no link</span><span class="nt">no_public_url</span><span class="muted">sent without a link</span><span class="nt">link_omitted</span><span class="muted">link dropped to fit the message</span></div>
+      </div>
+    </div>
+
+    <div class="three">
+      <div class="card">
+        <div class="stateline"><span class="tagv">4c · empty, phone alerts on</span> <span class="mono">telephony_enabled: true</span>, no delivery</div>
+        <div class="inner">
+          <div class="panel" style="box-shadow:none">
+            <div class="h"><h6>Phone</h6><span class="r chip">not on the status page</span></div>
+            <p class="empty">No phone alert was sent for this incident.</p>
+          </div>
+          <p class="hint">Revision 6, §5.5: shown when the incident has a delivery, or when phone alerts are on — then one line, so “nothing was sent” is never confused with “no panel”.</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">4d · read failed</span> the impact-links grammar: dashed, says what it is not</div>
+        <div class="inner">
+          <div class="panel" style="box-shadow:none">
+            <div class="h"><h6>Phone</h6><span class="r chip">not on the status page</span></div>
+            <span class="unav">Phone activity could not be read — this is not “nothing was sent”.</span>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">4e · a monitor's DOWN, sent before the incident opened</span> D32: attached later, no link</div>
+        <div class="inner">
+          <div class="panel" style="box-shadow:none">
+            <div class="h"><h6>Phone</h6><span class="chip">1 delivery</span></div>
+            <div class="pr">
+              <div class="when"><b>09:41:03</b>3m ago</div>
+              <div><div class="l1"><span class="rs sent"><i></i>Sent</span><span class="cn">SMS — Ada</span><span class="ms">+90•••••6869</span><span class="muted">Monitor down</span></div>
+                <div class="l2"><span class="mono">HTTP 201</span><span>1 segment</span><span class="nt">no_incident_ref</span><span>sent before the incident opened — no link</span></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="sub">4g · Phone alerts off on the instance (revision 6, §5.5)</h3>
+    <div class="two">
+      <div class="card">
+        <div class="stateline"><span class="tagv">4g-1 · off, no delivery — no panel</span> <span class="mono">telephony_enabled: false</span> and an empty list: an instance that does not use phones sees nothing new</div>
+        <div class="idv" style="padding:16px; gap:14px">
+          <div class="panel">
+            <div class="h"><h6>Timeline</h6></div>
+            <ol class="tl"><li><span class="dot s-inv"></span><div><div class="l1"><span class="st">Investigating</span><span class="mono">4m ago</span><span class="mono">· system</span></div><p class="body sys">Automatically opened: the monitor is failing its checks.</p></div></li></ol>
+          </div>
+          <div class="quiet hl" style="text-align:center">no Phone panel here — the next block is “Post an update”</div>
+          <div class="panel" style="padding:14px 16px"><span class="lbl">Post an update</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="stateline"><span class="tagv">4g-2 · off, with deliveries — panel shown</span> deliveries made before the switch-off, or rows that record it</div>
+        <div class="inner">
+          <div class="panel" style="box-shadow:none">
+            <div class="h"><h6>Phone</h6><span class="chip">2 deliveries</span><span class="r chip">not on the status page</span></div>
+            <div class="pr">
+              <div class="when"><b>08:02:11</b>2h ago</div>
+              <div><div class="l1"><span class="rs sent"><i></i>Sent</span><span class="cn">SMS — Ada</span><span class="ms">+90•••••6869</span><span class="muted">Monitor down</span></div>
+                <div class="l2"><span class="mono">HTTP 201</span><span>1 segment</span><span>1 attempt</span></div></div>
+            </div>
+            <div class="pr">
+              <div class="when"><b>09:47:30</b>14m ago</div>
+              <div><div class="l1"><span class="rs cfg"><i></i>Phone alerts off</span><span class="cn">SMS — Ada</span><span class="muted">Monitor recovery</span></div>
+                <div class="l2"><span>Phone alerts were switched off on this instance.</span></div></div>
+            </div>
+          </div>
+          <p class="hint">The rule reads the list first: a trace is never hidden because the switch is off now (P7).</p>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="sub">4f · Where the panel is not — the same incident to a visitor (D22, P19)</h3>
+    <div class="two">
+      <div class="pub">
+        <div class="pub-top"><span class="mark"></span><b>Acme status</b></div>
+        <div class="pub-main">
+          <div class="art">
+            <div class="hd"><span class="tt">Checkout — service down</span><span class="bdg s-inv">Investigating</span><span class="bdg i-major">Major</span></div>
+            <div class="pn">
+              <div class="u"><div class="l"><b>Investigating</b><span class="mono">12m ago</span></div><p>Card authorisation is timing out; looking at the payment provider.</p></div>
+              <div class="u"><div class="l"><b>Investigating</b><span class="mono">21m ago</span></div><p>Opened automatically: service DOWN confirmed over 2 evaluation(s).</p></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ul class="plain">
+        <li><b>Public status page and history</b> (<span class="mono">/status/:slug</span>, <span class="mono">…/history</span>) — the incident, its timeline, nothing about phones: not who was called, not that a limit was hit.</li>
+        <li><b>The incident's own Timeline</b> on the incident page — unchanged; the Phone panel is a separate block under it, and nothing in it becomes an update.</li>
+        <li><b>Feeds, webhooks, subscriber mail</b> — carry no phone event (P19). Not SPA, named so the absence reads as a decision.</li>
+        <li><b>Incident list</b> (<span class="mono">/incidents</span>) — no phone column or count; the panel is on the incident page only.</li>
+      </ul>
+    </div>
+    <div class="note"><b>One row per delivery</b>, newest last as the Timeline above it is ordered by time. The <b>reason chip leads</b> the row because it is what an operator scans for; the chips use status hues only — green accepted, amber “not delivered, and not final or not a refusal” (unreachable, unknown, storm), red a refusal, grey a configuration cause, dashed in flight. The <b>stored reason</b> appears as the mono note chip only where it adds a cause (the <span class="mono">notes</span> column); the reason itself reads in words (D-14). <b>Masks only</b>; an operator who needs the number asks its owner. <b>Not drawn here:</b> acknowledgements and snoozes by phone, the call's answered/no-answer status, the voice retry row (all part b).</div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 5 ═══════════════════════════════════════════════ -->
+  <section id="s5">
+    <header>
+      <h2>5 · <span class="mono">/i/:ref</span> — the link in a phone message <span class="new">new route</span></h2>
+      <div class="where"><code>frontend/src/router/index.ts</code> gains <code>/i/:ref</code> (not public: the existing guard sends a visitor to <code>/login?redirect=…</code>). The view calls <code>GET /api/v1/incidents/by-ref/{ref}</code>, switches the active organization and project to the answer's, and replaces the URL with <code>/incidents/:id</code> (D21). 404 for invisible and unknown alike; 403 only for an incident the person can see the organization of but not the project.</div>
+    </header>
+
+    <div class="two">
+      <div class="bf">
+        <div class="stateline"><span class="tagv">5a-1 · resolving</span> signed in, another project active</div>
+        <div class="bar"><i></i><i></i><i></i><span class="url">cerbix.example.com/i/X7K2P9QM</span></div>
+        <div class="body">
+          <div class="msgcard" style="flex-direction:row; align-items:center; gap:10px"><span class="spin"></span><p>Opening incident <span class="mono">X7K2P9QM</span>…</p></div>
+        </div>
+      </div>
+      <div class="bf">
+        <div class="stateline"><span class="tagv">5a-2 · redirected</span> organization and project switched; the URL is the incident's</div>
+        <div class="bar"><i></i><i></i><i></i><span class="url">cerbix.example.com/incidents/0b6d3f2e-8c1a-4e5f-9a7b-2d4c6e8f0a13</span></div>
+        <div class="body">
+          <div class="shell-top" style="border:1px solid var(--border); border-radius:6px"><span>Acme</span><span class="sep">/</span><span>prod</span><span class="sep">/</span><span>Incidents</span><span class="sep">/</span><b>payments-api is down</b></div>
+          <div class="selfnote hl"><span class="d"></span><span>Switched to <b style="font-weight:500">Acme / prod</b> to open this incident.</span><span class="x">Dismiss</span></div>
+          <div class="hrow" style="display:flex; flex-wrap:wrap; gap:10px; align-items:center"><h5 style="font-size:20px; font-weight:600">payments-api is down</h5><span class="bdg s-inv">Investigating</span><span class="bdg i-major">Major</span></div>
+          <p class="hint">The notice appears only when the workspace actually changed. With the right project already active, the page opens with no notice.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="three">
+      <div class="bf">
+        <div class="stateline"><span class="tagv">5b · signed in, no access</span> 403</div>
+        <div class="bar"><i></i><i></i><i></i><span class="url">cerbix.example.com/i/X7K2P9QM</span></div>
+        <div class="body">
+          <div class="msgcard hl">
+            <h6>You can't open this incident</h6>
+            <p>Incident <span class="mono">X7K2P9QM</span> is in a project you are not a member of. Ask an admin of that project to add you.</p>
+            <div class="row"><span class="btn sec sm">Go to incidents</span></div>
+          </div>
+          <p class="hint">No project, organization or title is named: the 403 answer carries none, and the workspace is not switched.</p>
+        </div>
+      </div>
+      <div class="bf">
+        <div class="stateline"><span class="tagv">5c · not signed in</span> the ordinary login page, nothing about the incident</div>
+        <div class="bar"><i></i><i></i><i></i><span class="url">cerbix.example.com/login?redirect=/i/X7K2P9QM</span></div>
+        <div class="body">
+          <div class="login">
+            <div class="strip"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="d"></i><i></i><i></i><i></i></div>
+            <div class="in-b">
+              <div class="brand"><span></span><span class="w">cerbix</span></div>
+              <h6>Sign in</h6>
+              <p class="muted">Keep watch over every service.</p>
+              <div class="fl"><span class="lab" style="text-transform:none; letter-spacing:0; font-size:12px; color:var(--ink-2)">Email</span><span class="in ph">you@company.com</span></div>
+              <div class="fl"><span class="lab" style="text-transform:none; letter-spacing:0; font-size:12px; color:var(--ink-2)">Password</span><span class="in ph">••••••••••</span></div>
+              <span class="btn pri" style="height:40px">Sign in</span>
+            </div>
+          </div>
+          <p class="hint">Unchanged page; the reference is only in the address bar's <span class="mono">redirect</span>, which every protected route already uses. After sign-in the view resolves the reference as in 5a, 5b or 5d.</p>
+        </div>
+      </div>
+      <div class="bf">
+        <div class="stateline"><span class="tagv">5d · unknown link</span> 404 — also for an incident in an organization the person cannot see</div>
+        <div class="bar"><i></i><i></i><i></i><span class="url">cerbix.example.com/i/X7K2P9QN</span></div>
+        <div class="body">
+          <div class="msgcard hl">
+            <h6>No incident found</h6>
+            <p>Nothing matches <span class="mono">X7K2P9QN</span>. Check the link in the message — a reference is 8 letters and digits.</p>
+            <div class="row"><span class="btn sec sm">Go to incidents</span></div>
+          </div>
+          <p class="hint">The same words whether the reference does not exist or belongs to someone else's organization (D21: never confirm existence). A reference that is not 8 Crockford characters gets this page without a request.</p>
+        </div>
+      </div>
+    </div>
+    <h3 class="sub">5e · Back to the link after an SSO sign-in (revision 6, D21)</h3>
+    <div class="two">
+      <div class="bf">
+        <div class="stateline"><span class="tagv">5e-1 · the SSO button carries the link</span> <span class="mono">LoginView.vue</span> passes the page's own <span class="mono">redirect</span> instead of the fixed <span class="mono">/</span></div>
+        <div class="bar"><i></i><i></i><i></i><span class="url">cerbix.example.com/login?redirect=/i/X7K2P9QM</span></div>
+        <div class="body">
+          <div class="login">
+            <div class="strip"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="d"></i><i></i><i></i><i></i></div>
+            <div class="in-b">
+              <div class="brand"><span></span><span class="w">cerbix</span></div>
+              <h6>Sign in</h6>
+              <p class="muted">Keep watch over every service.</p>
+              <span class="btn sec hl" style="height:40px">Sign in with SSO</span>
+            </div>
+          </div>
+          <div class="quiet mono" style="font-size:11.5px; overflow-wrap:anywhere">→ /auth/login?redirect=%2Fi%2FX7K2P9QM<br>→ identity provider<br>→ /i/X7K2P9QM → 5a, 5b or 5d</div>
+          <p class="hint">The page looks exactly as today; only where the button goes changes. The server already accepts and sanitises the parameter (<span class="mono">sanitizeRedirect</span>).</p>
+        </div>
+      </div>
+      <div class="bf">
+        <div class="stateline"><span class="tagv">5e-2 · an off-site return address</span> refused by the server; the person lands on the home page</div>
+        <div class="bar"><i></i><i></i><i></i><span class="url">cerbix.example.com/login?redirect=//evil.example/i/X</span></div>
+        <div class="body">
+          <div class="quiet mono" style="font-size:11.5px; overflow-wrap:anywhere">→ /auth/login?redirect=%2F%2Fevil.example%2Fi%2FX<br>→ identity provider<br>→ / (dashboard)</div>
+          <p class="hint">Nothing is shown about it: a return address that is not a path on this site is replaced by <span class="mono">/</span> by the server (<span class="mono">sanitizeRedirect</span> refuses anything that does not start with a single <span class="mono">/</span>). Covered by a test in §11's API row.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 5b ═══════════════════════════════════════════════ -->
+  <section id="s5b">
+    <header>
+      <h2>5b · On-call &amp; escalation with phone channels — the editor as it is <span class="new">no change</span></h2>
+      <div class="where">route <code>/escalation</code> · <code>frontend/src/views/EscalationView.vue</code>, drawn <b>unchanged</b> to show how phone channels look in it: a step's target is a channel, and an SMS or Voice call channel is a channel (D2). Policy “payments on-call”: step 1 calls the three admins, step 2 texts the two managers. One of the managers' channels is not a route; the editor does not show that (decision 13 — the mark lives in the channel list), so the mark here is the mock's own annotation, outside the editor.</div>
+    </header>
+    <div class="card">
+      <div class="shell-top"><span>Acme</span><span class="sep">/</span><span>prod</span><span class="sep">/</span><b>Escalation</b></div>
+      <div class="idv" style="max-width:980px">
+        <div>
+          <h5>On-call &amp; escalation</h5>
+          <p class="muted" style="margin-top:3px; font-size:13px">Route a monitor's down alerts through an ordered ladder instead of notifying every channel at once. Acknowledge an incident to stop escalation.</p>
+        </div>
+        <div class="two">
+          <div class="panel">
+            <div class="h"><h6>Escalation policies</h6></div>
+            <div style="padding:12px 16px; border-bottom:1px solid var(--border)">
+              <div class="row"><b style="font-size:13.5px">payments on-call</b><span class="src" style="font-family:inherit; text-transform:none; letter-spacing:0">repeats last</span><span class="muted" style="margin-left:auto; font-size:12px">Edit</span><span class="muted" style="font-size:12px">Delete</span></div>
+              <ol style="margin:4px 0 0; padding:0; list-style:none; display:flex; flex-direction:column; gap:3px; font-size:12.5px; color:var(--ink-2)">
+                <li class="row" style="gap:8px; flex-wrap:nowrap; align-items:flex-start"><span class="mono" style="color:var(--ink-3)">immediately</span><span>→ Call — Ada, Call — Chen, Call — Dara</span></li>
+                <li class="row" style="gap:8px; flex-wrap:nowrap; align-items:flex-start"><span class="mono" style="color:var(--ink-3)">15m</span><span>→ SMS — Mira, <span class="hl">SMS — Omar</span></span></li>
+              </ol>
+            </div>
+            <div style="padding:16px; background:var(--surface-2); display:flex; flex-direction:column; gap:12px">
+              <div class="row"><span class="lbl">Edit policy: payments on-call</span><span class="new" style="background:var(--accent-weak); border-color:transparent; color:var(--accent)">editing</span></div>
+              <span class="in">payments on-call</span>
+              <div class="panel" style="box-shadow:none; padding:10px">
+                <div class="row" style="font-size:12px"><span class="muted">After</span><span class="in mono" style="width:90px; min-height:30px; padding:4px 8px">0</span><span class="muted">seconds</span><span class="muted" style="margin-left:auto; font-size:11.5px">remove step</span></div>
+                <div style="margin-top:8px; display:flex; flex-direction:column; gap:6px">
+                  <div class="row" style="flex-wrap:nowrap"><span class="in" style="flex:1">Call — Ada ▾</span><span class="muted">×</span></div>
+                  <div class="row" style="flex-wrap:nowrap"><span class="in" style="flex:1">Call — Chen ▾</span><span class="muted">×</span></div>
+                  <div class="row" style="flex-wrap:nowrap"><span class="in" style="flex:1">Call — Dara ▾</span><span class="muted">×</span></div>
+                  <a href="#s5b" style="font-size:12px">+ target</a>
+                </div>
+              </div>
+              <div class="panel" style="box-shadow:none; padding:10px">
+                <div class="row" style="font-size:12px"><span class="muted">After</span><span class="in mono" style="width:90px; min-height:30px; padding:4px 8px">900</span><span class="muted">seconds</span><span class="muted" style="margin-left:auto; font-size:11.5px">remove step</span></div>
+                <div style="margin-top:8px; display:flex; flex-direction:column; gap:6px">
+                  <div class="row" style="flex-wrap:nowrap"><span class="in" style="flex:1">SMS — Mira ▾</span><span class="muted">×</span></div>
+                  <div class="row" style="flex-wrap:nowrap"><span class="in hl" style="flex:1">SMS — Omar ▾</span><span class="muted">×</span></div>
+                  <a href="#s5b" style="font-size:12px">+ target</a>
+                </div>
+              </div>
+              <div class="row"><a href="#s5b" style="font-size:12.5px">+ step</a><label class="chk" style="margin-left:auto; font-size:12.5px; color:var(--ink-2)"><span class="cb on">✓</span>repeat last step (renotify)</label></div>
+              <div class="row"><span class="btn pri sm">Save changes</span><span class="btn sec sm">Cancel</span></div>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px">
+            <div class="note"><b>Annotation, not UI — “SMS — Omar” is not a route.</b> Omar Haddad has no verified number. The editor shows the channel by name, as it shows every channel; the reason is in Settings → Notification channels (3e). At run time step 2 is enqueued to “SMS — Mira” only: the step resolution leaves a non-route phone channel out (§4.6, D31). Had both of step 2's channels been non-routes, the step would enqueue nothing and the ladder would move on, exactly as a step with no channel does today.</div>
+            <div class="panel">
+              <div class="h"><h6>Channels in this policy, as the channel list shows them</h6></div>
+              <div class="tbl-wrap">
+                <table class="ch" style="min-width:420px">
+                  <tbody>
+                    <tr><td class="nm">Call — Ada<span class="to">to Ada Park</span></td><td class="ty">voice</td></tr>
+                    <tr><td class="nm">Call — Chen<span class="to">to Chen Wei</span></td><td class="ty">voice</td></tr>
+                    <tr><td class="nm">Call — Dara<span class="to">to Dara Okafor</span></td><td class="ty">voice</td></tr>
+                    <tr><td class="nm">SMS — Mira<span class="to">to Mira Santos</span></td><td class="ty">sms</td></tr>
+                    <tr><td class="nm">SMS — Omar<span class="to">to Omar Haddad</span><span class="nr"><b>Not a route</b> · Omar Haddad has no verified number</span></td><td class="ty">sms</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <p class="hint">What a phone channel on a step receives is D18's <span class="mono">escalation_step</span> row: an SMS or a call for every step, including <span class="mono">repeat_last</span>. Its text is in §6 (“ESCALATION step 2: …”).</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 6 ═══════════════════════════════════════════════ -->
+  <section id="s6">
+    <header>
+      <h2>6 · The SMS texts of part (a) (§4.4) <span class="new">message frame</span></h2>
+      <div class="where">Rendered by <code>internal/notify</code> from the <code>PhoneAlert</code> (D16); not an SPA surface, drawn because the owner reads them. The frame is ASCII; names are normalised and, by <span class="mono">sms_encoding</span>, transliterated or sent as written. Counts below are exact for the drawn text (GSM-7 septets, the tag's two brackets costing 2 each; UTF-16 units for Unicode). Instance: <span class="mono">public_base_url = https://cerbix.example.com</span>, <span class="mono">sms_max_segments = 2</span> unless stated. Part (a) messages carry <b>no</b> <span class="mono">ACK</span> text (P9).</div>
+    </header>
+
+    <h3 class="sub">By alert kind (D18), with the link</h3>
+    <div class="three">
+      <div class="sms"><span class="cap">Monitor DOWN</span><div class="bubble">[cerbix] DOWN payments-api (prod) - incident X7K2P9QM https://cerbix.example.com/i/X7K2P9QM</div><div class="meter"><span>GSM-7</span><span><b>93</b> septets</span><span><b>1</b> segment</span></div></div>
+      <div class="sms"><span class="cap">Monitor recovery</span><div class="bubble">[cerbix] RECOVERED payments-api (prod) - incident X7K2P9QM https://cerbix.example.com/i/X7K2P9QM</div><div class="meter"><span>GSM-7</span><span><b>98</b> septets</span><span><b>1</b> segment</span></div><p class="why">SMS only — a recovery is never a call (D18).</p></div>
+      <div class="sms"><span class="cap">Service alert · down</span><div class="bubble">[cerbix] DOWN service checkout (prod) - incident 7MQ4H2ZD https://cerbix.example.com/i/7MQ4H2ZD</div><div class="meter"><span>GSM-7</span><span><b>97</b> septets</span><span><b>1</b> segment</span></div><p class="why">Also <span class="mono">DEGRADED service checkout</span> (101) and <span class="mono">UNKNOWN service checkout</span> (100).</p></div>
+      <div class="sms"><span class="cap">Service alert · recovered</span><div class="bubble">[cerbix] RECOVERED service checkout (prod) - incident 7MQ4H2ZD https://cerbix.example.com/i/7MQ4H2ZD</div><div class="meter"><span>GSM-7</span><span><b>102</b> septets</span><span><b>1</b> segment</span></div><p class="why">Only for close reason <span class="mono">recovered</span>; other closes are not phoned (D18).</p></div>
+      <div class="sms"><span class="cap">Escalation step</span><div class="bubble">[cerbix] ESCALATION step 2: payments-api (prod) - incident X7K2P9QM https://cerbix.example.com/i/X7K2P9QM</div><div class="meter"><span>GSM-7</span><span><b>107</b> septets</span><span><b>1</b> segment</span></div><p class="why">A repeat reads <span class="mono">ESCALATION step 3 (repeat): service checkout (prod) - incident 7MQ4H2ZD …</span> (120).</p></div>
+      <div class="sms"><span class="cap">Budget burn</span><div class="bubble">[cerbix] BUDGET BURN payments-api (prod) - burn rate 14.4x over 1h</div><div class="meter"><span>GSM-7</span><span><b>68</b> septets</span><span><b>1</b> segment</span></div><p class="why">No incident, so no reference and no link — not a <span class="mono">no_incident_ref</span> case. A service burn reads <span class="mono">BUDGET BURN service checkout (prod) - burn rate 6x over 6h</span>.</p></div>
+    </div>
+
+    <h3 class="sub">Without a link</h3>
+    <div class="three">
+      <div class="sms"><span class="cap">6a · incident not open yet</span><div class="bubble">[cerbix] DOWN payments-api (prod)</div><div class="meter"><span>GSM-7</span><span><b>35</b> septets</span><span><b>1</b> segment</span><span>note <b>no_incident_ref</b></span></div><p class="why">D32: no open auto-incident after 1 s of waiting. Sent anyway; the row is attached when the incident opens.</p></div>
+      <div class="sms"><span class="cap">6c · no public URL</span><div class="bubble">[cerbix] DOWN payments-api (prod) - incident X7K2P9QM</div><div class="meter"><span>GSM-7</span><span><b>55</b> septets</span><span><b>1</b> segment</span><span>note <b>no_public_url</b></span></div><p class="why">The reference stays: a person who knows the instance can type <span class="mono">/i/X7K2P9QM</span>.</p></div>
+      <div class="sms"><span class="cap">6d · link dropped to fit</span><div class="bubble">[cerbix] DOWN Платёжный шлюз (прод) - incident X7K2P9QM</div><div class="meter"><span>UCS-2</span><span><b>55</b> units</span><span><b>1</b> segment of 70</span><span>note <b>link_omitted</b></span></div><p class="why"><span class="mono">unicode</span>, <span class="mono">sms_max_segments = 1</span>: the frame and link alone (84 units) cannot fit 70, so the link goes first and the names then fit whole.</p></div>
+    </div>
+
+    <h3 class="sub">Shortening long names (<span class="mono">sms_max_segments = 1</span>, transliterate) — name first, to no fewer than 12 characters; then the project; then the project goes</h3>
+    <div class="three">
+      <div class="sms"><span class="cap">6e · the name is shortened</span><div class="bubble">[cerbix] DOWN payments-api-eu-c<span class="cut">...</span> (production-europe-central-cluster-tenant-acme-retail-division-b) - incident X7K2P9QM https://cerbix.example.com/i/X7K2P9QM</div><div class="meter"><span>GSM-7</span><span><b>160</b> septets</span><span><b>1</b> segment</span></div><p class="why">Monitor <span class="mono">payments-api-eu-central-1-primary-card-authorisation-gateway</span> (60 characters) becomes 20.</p></div>
+      <div class="sms"><span class="cap">6f · then the project</span><div class="bubble">[cerbix] ESCALATION step 2: payments-<span class="cut">...</span> (production-eu<span class="cut">...</span>) - incident X7K2P9QM https://monitoring.internal.example.com/platform/reliability/cerbix/i/X7K2P9QM</div><div class="meter"><span>GSM-7</span><span><b>160</b> septets</span><span><b>1</b> segment</span></div><p class="why">A long <span class="mono">public_base_url</span>: the name is at its 12-character floor, so the project is shortened next.</p></div>
+      <div class="sms"><span class="cap">6g · then the project is dropped</span><div class="bubble">[cerbix] ESCALATION step 3 (repeat): payments-<span class="cut">...</span> - incident X7K2P9QM https://monitoring.internal.example.com/platform/reliability/oncall/cerbix/i/X7K2P9QM</div><div class="meter"><span>GSM-7</span><span><b>157</b> septets</span><span><b>1</b> segment</span></div><p class="why">The project could not keep even 8 characters (<span class="mono">(produ...)</span> would make 168), so it goes with its brackets.</p></div>
+    </div>
+
+    <h3 class="sub">Both encodings, one name (<span class="mono">Платёжный шлюз</span> in project <span class="mono">прод</span>)</h3>
+    <div class="three">
+      <div class="sms"><span class="cap">6h · transliterate (default)</span><div class="bubble">[cerbix] DOWN Platezhnyy shlyuz (prod) - incident X7K2P9QM https://cerbix.example.com/i/X7K2P9QM</div><div class="meter"><span>GSM-7</span><span><b>98</b> septets</span><span><b>1</b> segment of 160</span></div></div>
+      <div class="sms"><span class="cap">6i · unicode</span><div class="bubble">[cerbix] DOWN Платёжный шлюз (прод) - incident X7K2P9QM https://cerbix.example.com/i/X7K2P9QM</div><div class="meter"><span>UCS-2</span><span><b>93</b> units</span><span><b>2</b> segments of 67</span></div><p class="why">The same message costs two segments: the whole text is UCS-2 once one name is.</p></div>
+      <div class="sms"><span class="cap">6j · outside the BMP, and no transliteration</span><div class="bubble">[cerbix] DOWN checkout 🛒 (prod) - incident X7K2P9QM https://cerbix.example.com/i/X7K2P9QM</div><div class="meter"><span>UCS-2</span><span><b>90</b> units</span><span><b>2</b> segments</span></div><p class="why">🛒 is two UTF-16 units. Transliterated it becomes <span class="mono">checkout ?</span> — 91 septets, 1 segment; a name is never emptied.</p></div>
+    </div>
+    <div class="three">
+      <div class="sms"><span class="cap">6k · a name with a line break</span><div class="bubble">[cerbix] DOWN api ACK 000000 (prod) - incident X7K2P9QM https://cerbix.example.com/i/X7K2P9QM</div><div class="meter"><span>GSM-7</span><span><b>95</b> septets</span><span><b>1</b> segment</span></div><p class="why">A monitor named <span class="mono">api⏎ACK 000000</span>: the break is removed, so the name cannot start a line that imitates the frame.</p></div>
+      <div class="sms"><span class="cap">The tag's cost</span><div class="bubble"><span class="two-s">[</span>cerbix<span class="two-s">]</span> …</div><div class="meter"><span>10 septets for 8 characters</span></div><p class="why"><span class="mono">[</span> and <span class="mono">]</span> are GSM-7 extension characters (§4.4), counted in every figure above.</p></div>
+      <div class="sms"><span class="cap">What is never in a message</span><p class="why">A full URL of a monitored target, a heartbeat's message text, a secret value, the number itself, and — in part (a) — any <span class="mono">ACK</span> or keypress instruction.</p></div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 7 ═══════════════════════════════════════════════ -->
+  <section id="s7">
+    <header>
+      <h2>7 · Not drawn, and why</h2>
+      <div class="where">named, so the absence reads as a decision.</div>
+    </header>
+    <ul class="plain">
+      <li><b>Part (b)</b> — the inbound URLs to paste into the provider console and “Regenerate URLs” (§9 item 1b); acknowledgements and snoozes in the Phone panel (item 4b); the call's answered / no-answer status and the voice retry row; the <span class="mono">ACK</span> text and the keypress prompt in messages. Their own mock comes with part (b).</li>
+      <li><b>Part (c)</b> — quotas and usage (item 1c), quiet hours (item 2c), the fallback channel (item 3c), Project settings → Telephony with its own test SMS and usage (item 6), and the <span class="mono">quota_exceeded</span> / <span class="mono">quiet_hours_deferred</span> reasons.</li>
+      <li><b>The voice script</b> (§4.4, TTS) — not an SPA surface, and the owner asked for the SMS texts; its words follow the SMS facts (“cerbix alert. payments A P I in prod is down.”, twice).</li>
+      <li><b>Channel pickers elsewhere</b> — the monitor's linked channels, escalation-step targets, on-call participants. §9 item 3 names the channel editor only; the pickers keep listing channels by name (D-13).</li>
+      <li><b>API-token and machine callers</b> (D28 row 3, §4.2's 403 for machine users) — they have no SPA.</li>
+      <li><b>Audit entries</b> (<span class="mono">notification_channel.*</span>, <span class="mono">settings.telephony.update</span>, <span class="mono">user.phone.*</span>) — they appear in the existing audit panels as plain rows, with no new rendering.</li>
+    </ul>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════ 8 ═══════════════════════════════════════════════ -->
+  <section id="s8">
+    <header>
+      <h2>8 · Decisions for the owner — decided 2026-11-17: 17 accepted as drawn, 6 changed by revision 6</h2>
+      <div class="where">every place where this mock chose between options the spec leaves open. One decision per item, with the alternative not taken and, last, the owner's outcome. Items marked with a dashed border are things the mock ran into rather than chose. The six changed ones are redrawn above against revision 6 (spec §14, “Mock of FR-041a”).</div>
+    </header>
+    <ol class="dec">
+      <li><b>“Profile → Phone” is a tab <i>Phone</i> in the Account group of Settings</b>, after Security. The SPA has no profile page; the account menu leads to Settings, and Security already holds the person's own sign-in settings. <span class="alt">a new <span class="mono">/profile</span> route with its own menu entry — a page for one card, and two places for “my account”.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>Telephony is its own Administration tab, after Email</b>, titled “Phone alerts (SMS and voice calls)” in the card and “Telephony” in the nav. <span class="alt">a section inside Alerting — that tab is about instance-wide silence, and the provider form would double its length.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>Status pill</b> in the card title: “On · Twilio”, “On · Generic HTTP”, “Off · not configured”, “Off”, the Email card's “Deliverable / Not sending” grammar. <span class="alt">no pill; the checkbox alone — but the Email card set the precedent of a state readable at a glance.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>Provider as two radio choices with a one-line capability</b> (“SMS and voice calls” / “SMS only … no voice calls”), so the D3 limit is visible before choosing. <span class="alt">a plain select <span class="mono">twilio | generic_http</span> — the limit then appears only after a voice channel is refused.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>Generic HTTP headers as one textarea</b> (<span class="mono">Name: value</span> per line), empty with “✓ stored” when set; typing replaces the whole map, blank keeps it. There is no way to clear stored headers from the form, as there is none for the SMTP password today. <span class="alt">a key/value row editor — prettier, but it implies per-header editing the write-only contract cannot offer.</span><span class="out chg">Changed by revision 6 — <span>generic_http.headers_clear removes the stored map; refused (400) together with new headers. Drawn in 1c′ and 1c″.</span></span></li>
+      <li class="found"><b>The missing encryption key is shown as the refusal of Save</b> (1e), not as a banner on load: §9's <span class="mono">GET</span> does not say whether the key exists. <span class="alt">a <span class="mono">GET</span> flag such as <span class="mono">encryption_key_configured</span> and a banner before typing — an API field the spec does not list, so not drawn.</span><span class="out chg">Changed by revision 6 — <span>the settings read returns encryption_key_configured; the form says so on load and stays disabled. Drawn in 1e.</span></span></li>
+      <li class="found"><b>The two §4.1 warnings need the list of services before the save, and §9 gives no route for it.</b> The drawing (an inline confirmation with the services, grouped by project) does not depend on the mechanism. <span class="alt">for the builder to choose and the iteration to record: a confirm round-trip on the <span class="mono">PUT</span> (first answer lists the services, the confirmed resend saves), or a read-only preview. Owner's call whether that needs a spec note; the mock does not add one.</span><span class="out chg">Changed by revision 6 — <span>the save itself answers 409 with services_without_route (at most 50, and the total) unless it carries confirm_unroutable: true. Drawn in 1f and 1g.</span></span></li>
+      <li class="found"><b>“Phone alerts off” reaches a non-admin only as a refusal</b> — on Send code (2j) and on Create (3f) — because <span class="mono">GET /api/v1/settings/telephony</span> is global-admin only and <span class="mono">GET /api/v1/me</span> carries no instance state. The informational line in 2j appears only once the page has met that answer. <span class="alt">a telephony flag on <span class="mono">GET /api/v1/me</span> or a public capability read, so the form can say it up front — an API addition, not drawn.</span><span class="out chg">Changed by revision 6 — <span>GET /api/v1/me gains telephony_enabled; Account → Phone and the channel type list say “phone alerts are off” up front. Drawn in 2j, 2j′ and 3f.</span></span></li>
+      <li><b>Voice language</b>: the instance field is a text input (an admin knows the provider's tags); the person's is a select of “Instance default (en-US)” plus a fixed list of common BCP-47 tags. <span class="alt">a text input for both — exact, but a person should not have to know BCP-47.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>Code-state messages</b> (2c–2f) state the rule (10 minutes, 3 an hour, 10 a day) and never a count of attempts left or a time to wait. <span class="alt">“2 attempts left”, “try again at 14:52” — clearer, but they need response fields the spec does not define.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>“Test SMS” needs the settings saved and on</b>, and shows the provider's acceptance as “Accepted by the provider · HTTP 201. Check your phone.” — acceptance is all part (a) knows. <span class="alt">testing unsaved draft values — useful before go-live, but it needs a test route that takes settings, which §9 does not have.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>Fixed-number flow</b>: after Create the form stays open on the new channel with “Send code” as an explicit step, and a confirmed number does not enable the channel by itself (“Enable channel” / “Keep disabled”). <span class="alt">send the code automatically on Create and enable on verification — one click less, but a mistyped number would get an SMS at once, and enabling would be a side effect of verifying.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>“Not a route” lives in the channel list and the edit form only</b>, as a dashed chip with the reason in words; the monitor, escalation and on-call pickers are left as they are. <span class="alt">the same chip in every picker — closer to where a route is chosen, but outside §9's item 3 and a change to four more screens.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>Reasons in words</b> (“Rejected by provider”, “Storm limit”, “Phone alerts off”), with the stored code shown only for the <span class="mono">notes</span> causes and flags (<span class="mono">no_verified_number</span>, <span class="mono">no_incident_ref</span> …) as small mono chips. <span class="alt">the enum words everywhere — searchable and exact, but “voice_unsupported_by_provider” on an incident page reads as a stack trace.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>The Phone panel sits under the Timeline</b> and above “Post an update”, with a “not on the status page” chip in its header. <span class="alt">above the Timeline — first in sight during an incident, but it would push the public story below the private one on a page operators also use to write updates.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>The Phone panel is always shown</b>, one line when empty (“No phone alert was sent for this incident.”). <span class="alt">hide it when empty — tidier for projects with no phone channel, but then “nothing was sent” and “the panel is missing” look the same.</span><span class="out chg">Changed by revision 6 — <span>the panel is shown when the incident has a delivery or telephony_enabled is true; otherwise there is no panel. Drawn in 4c and 4g.</span></span></li>
+      <li><b>Deliveries of a channel open in a panel under the channel table</b>, from a “Deliveries” action on the row, for viewers too. <span class="alt">a separate page per channel — the settings tab has no sub-pages today.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b><span class="mono">/i/:ref</span> after a workspace switch shows a one-line notice</b> (“Switched to Acme / prod to open this incident.”, the existing self-notice grammar); no notice when nothing switched. The 403 page names no project; the 404 page is the same for unknown and invisible. A reference is upper-cased before the request (Crockford references are case-insensitive), and one that is not 8 Crockford characters gets the 404 page without a request. <span class="alt">switch silently — the crumbs change, but a person who was working in another project would not know why.</span><span class="out acc">Accepted as drawn</span></li>
+      <li class="found"><b>SSO sign-in loses the phone link.</b> <span class="mono">frontend/src/views/LoginView.vue</span> starts SSO with <span class="mono">redirect=/</span>, so <span class="mono">/i/:ref</span> ends on the dashboard for SSO users. Proposed: pass the page's <span class="mono">redirect</span> to the SSO start in part (a). <span class="alt">leave it for a separate fix — the link then works only for local accounts.</span><span class="out chg">Changed by revision 6 — <span>fixed in FR-041a: the SSO button passes the page’s redirect, and an off-site address is refused by the server. Drawn in 5e.</span></span></li>
+      <li><b>SMS verbs and layout</b> (the spec gives only the DOWN example): <span class="mono">DOWN</span>, <span class="mono">RECOVERED</span>, <span class="mono">DEGRADED</span>, <span class="mono">UNKNOWN</span>, <span class="mono">ESCALATION step N:</span> (and <span class="mono">(repeat)</span>), <span class="mono">BUDGET BURN</span>; a service is named <span class="mono">service &lt;slug&gt;</span>, a monitor by its name alone, as in the spec's example. <span class="alt"><span class="mono">RESOLVED</span> for a recovery (the word D18 uses in passing) — but at send time the incident may not be resolved yet (D32), while the subject has recovered.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>An escalation SMS names the subject, not the incident title</b>: titles are long and carry an em dash (“Checkout — service down”) that would force UCS-2 or a transliteration. <span class="alt">the title — what the incident page shows, but it costs a segment and the frame stops being ASCII-only.</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>A burn SMS carries the burn rate and window</b> (“burn rate 14.4x over 1h”) and no link. <span class="alt">a link to the monitor or service page — a link the spec defines only for incidents (D5).</span><span class="out acc">Accepted as drawn</span></li>
+      <li><b>Truncation details the spec leaves open</b>: the “…” counts inside the 12-character floor; the project is shortened to no fewer than 8 characters (“…” included) before it is dropped with its brackets; and the link is dropped <i>first</i> when the frame and link alone cannot fit even with the shortest names, after which names are fitted again. <span class="alt">drop the link only as the last step — then 6d would read “Платёжный...” with no project and no link, losing more than it must.</span><span class="out acc">Accepted as drawn</span></li>
+    </ol>
+  </section>
+
+</div>
+
+<script>
+/* Theme switch for the mock only (Auto follows the OS, as the app does). */
+document.querySelectorAll(".themes button").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var t = b.getAttribute("data-t");
+    if (t) document.documentElement.setAttribute("data-theme", t);
+    else document.documentElement.removeAttribute("data-theme");
+    document.querySelectorAll(".themes button").forEach(function (x) { x.classList.toggle("on", x === b); });
+  });
+});
+</script>

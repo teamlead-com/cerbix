@@ -336,7 +336,7 @@ func (s *Store) EnabledChannelsByIDs(ctx context.Context, ids []string) ([]domai
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+channelColumns+` FROM notification_channels WHERE id = ANY($1) AND enabled`, ids)
+		`SELECT `+channelColumns("c")+` FROM notification_channels c WHERE c.id = ANY($1) AND c.enabled`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("store: channels by ids: %w", err)
 	}
@@ -575,10 +575,15 @@ func (s *Store) AdvanceEscalations(ctx context.Context) (pass EscalationPass, er
 		schedules[key] = sc
 		return sc, nil
 	}
+	// channelInProject is the channel's tenancy and, for an sms/voice row ONLY, D31 rule 1 (FR-041a
+	// §4.6). It deliberately does not test `enabled`: a disabled channel of the four other types is
+	// still enqueued, still moves last_escalated_at and is dropped at send, as before (P14). A step
+	// whose channels are all non-route phones resolves to nothing — an empty step, which advances.
 	channelInProject := func(projectID, id string) (bool, error) {
 		var ok bool
 		err := tx.QueryRow(ctx,
-			`SELECT true FROM notification_channels WHERE id::text = $1 AND project_id = $2`,
+			`SELECT true FROM notification_channels c
+			  WHERE c.id::text = $1 AND c.project_id = $2 AND `+phoneRouteSQL("c"),
 			id, projectID).Scan(&ok)
 		if noRows(err) {
 			return false, nil

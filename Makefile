@@ -246,7 +246,7 @@ dev-compose-check:
 		echo "missing $(DEV_ENV_FILE); run 'make dev-init' only for a fresh broker volume" >&2; \
 		exit 2; \
 	}
-	@$(DEV_DC) --profile single --profile distributed --profile sso --profile mail config --quiet
+	@$(DEV_DC) --profile single --profile distributed --profile sso --profile mail --profile phone config --quiet
 
 geo-compose-check:
 	@test -r $(GEO_ENV_FILE) || { \
@@ -275,7 +275,7 @@ dev-up-single: dev-compose-check
 	$(call assert_no_distributed_roles)
 	@$(MAKE) --no-print-directory dev-build
 	$(DEV_DC) --profile single stop cerbix
-	$(DEV_DC) --profile sso --profile mail up -d --wait --wait-timeout 180 postgres rabbitmq mariadb keycloak mailpit
+	$(DEV_DC) --profile sso --profile mail --profile phone up -d --wait --wait-timeout 180 postgres rabbitmq mariadb keycloak mailpit phonestub
 	$(DEV_DC) --profile single run --rm --no-deps cerbix migrate --config /etc/cerbix/config.yaml
 	$(DEV_DC) --profile single up -d --no-deps cerbix
 	@$(MAKE) --no-print-directory dev-ready-single
@@ -285,7 +285,7 @@ dev-up-distributed: dev-compose-check
 	$(call assert_no_single_role)
 	@$(MAKE) --no-print-directory dev-build
 	$(DEV_DC) --profile distributed stop scheduler api worker
-	$(DEV_DC) --profile sso --profile mail up -d --wait --wait-timeout 180 postgres rabbitmq mariadb keycloak mailpit
+	$(DEV_DC) --profile sso --profile mail --profile phone up -d --wait --wait-timeout 180 postgres rabbitmq mariadb keycloak mailpit phonestub
 	$(DEV_DC) --profile distributed run --rm --no-deps api migrate --config /etc/cerbix/config.yaml
 	$(DEV_DC) --profile distributed up -d --no-deps scheduler api worker
 	@$(MAKE) --no-print-directory dev-ready-distributed
@@ -318,6 +318,10 @@ dev-ready-single: dev-compose-check
 # The dedicated local account e2e/tests/mail.spec.ts resets (sec-hardening-2 H-5): a reset ends
 # every session, so the suite never resets the shared admin. Idempotent; dev database only.
 	$(DEV_DC) exec -T postgres psql -U cerbix -d cerbix -v ON_ERROR_STOP=1 -q < e2e/seed/e2e-reset-user.sql
+# The phone-alert spec's code budget (FR-041a): 3 codes per requester an hour, so without this a
+# second run within the hour meets send_limited. Removes the bootstrap admin's phone and code rows,
+# and the code rows of deleted channels. Idempotent; dev database only; a no-op before migration 00120.
+	$(DEV_DC) exec -T postgres psql -U cerbix -d cerbix -v ON_ERROR_STOP=1 -q < e2e/seed/e2e-phone-reset.sql
 
 dev-ready-distributed: dev-compose-check
 	$(call assert_no_geo_stack)
@@ -364,7 +368,7 @@ mac-smoke:
 # Teardown is intentionally narrow and non-destructive: only services declared
 # by the fixed manifests, with no orphan or named-volume removal.
 dev-down: dev-compose-check
-	$(DEV_DC) --profile single --profile distributed --profile sso --profile mail down --timeout 30
+	$(DEV_DC) --profile single --profile distributed --profile sso --profile mail --profile phone down --timeout 30
 
 geo-down: geo-compose-check
 	$(GEO_DC) --profile geo1 --profile geo2 down --timeout 30

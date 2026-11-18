@@ -11,7 +11,7 @@ import (
 // The dangerous way to build this is to ask the same question in different words. `ActiveDelegation`
 // already owns "armed", and a badge that decided it independently would eventually say ARMED while
 // delivery said otherwise — which is worse than no badge, because it would be believed. So this read
-// is composed from the SAME predicate constants the delegation lookup is composed from
+// is composed from the SAME predicate texts the delegation lookup is composed from
 // (`routablePredicate`, `burnReplacementExistsSQL`, `burnNothingBlindSQL`,
 // `burnEveryRuleLatchedSQL`, `effectiveRevisionSQL`), and `Armed` is their conjunction rather than a
 // separate opinion. The regression that matters asserts exactly that: for every dis-arming cause,
@@ -104,8 +104,9 @@ type ServiceAlertingState struct {
 // serviceCoverageClausesSQL is every clause of both conjunctions as its own boolean, in the order the
 // verdict functions below read them. It is shared TEXT rather than two copies because the badge and
 // the delivery-time lookup must answer the same question the same way: a badge that says ARMED while
-// delivery suppresses (or the reverse) is a bug an operator cannot even describe.
-const serviceCoverageClausesSQL = `
+// delivery suppresses (or the reverse) is a bug an operator cannot even describe. A variable because
+// routablePredicate is one.
+var serviceCoverageClausesSQL = `
 	       s.owns_paging,
 	       (cardinality(s.page_on) > 0 OR s.page_on_unknown),
 	       COALESCE(` + livePageableStateSQL + `, false),

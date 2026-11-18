@@ -563,6 +563,7 @@ Semantic mappings remain, with that explicit historical writer exception:
 | successful serve/migrate/reencrypt/recovery command | 0 |
 | config, database, broker, key, runtime, migration, adoption, or enqueue failure | 1 |
 | CLI usage/validation failure | 2 |
+| `reencrypt`: completed, but phone numbers skipped and left under the previous key (keep it, run again) | 3 |
 | `gate check`: ALLOW or WARN, including UNKNOWN whose configured action is ALLOW/WARN | 0 |
 | `gate check`: transport, timeout, TLS, auth, server, redirect, 429, or malformed response | 1 |
 | `gate check`: BLOCK, including UNKNOWN whose configured action is BLOCK | 2 |

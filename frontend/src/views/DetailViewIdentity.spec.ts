@@ -20,6 +20,17 @@ import MonitorDetailView from "@/views/MonitorDetailView.vue";
 
 const apiMock = vi.hoisted(() => ({ GET: vi.fn(), POST: vi.fn(), PATCH: vi.fn(), PUT: vi.fn(), DELETE: vi.fn() }));
 vi.mock("@/api/client", () => ({ api: apiMock }));
+// FR-041a mock 5a-2: the incident page takes the /i/:ref notice from the ui store, read-once.
+const uiNotice = vi.hoisted(() => ({ next: "" }));
+vi.mock("@/stores/ui", () => ({
+  useUi: () => ({
+    takeIncidentNotice: () => {
+      const s = uiNotice.next;
+      uiNotice.next = "";
+      return s;
+    },
+  }),
+}));
 
 // A REACTIVE route, which is the whole point: a static mock cannot express the navigation that broke.
 const route = vi.hoisted(() => ({ current: null as unknown as { params: { id: string } } }));
@@ -157,5 +168,32 @@ describe("a detail view follows the id in the route", () => {
 
     expect(w.text()).toContain("incident inc-b");
     expect(w.text()).not.toContain("incident inc-a");
+  });
+
+  it("the /i/:ref notice belongs to the incident it was left for: an A → B navigation removes it", async () => {
+    route.current = reactive({ params: { id: "inc-a" } });
+    uiNotice.next = "Switched to Acme / prod to open this incident.";
+    apiMock.GET.mockReset();
+    apiMock.GET.mockImplementation(async (path: string, opts?: { params?: { path?: Record<string, string> } }) => {
+      const iid = opts?.params?.path?.incidentID;
+      if (path === "/api/v1/incidents/{incidentID}") {
+        return { data: { id: iid, project_id: "p1", title: `incident ${iid}`, status: "investigating", impact: "major", source: "manual", started_at: "2026-08-26T00:00:00Z" } };
+      }
+      if (path === "/api/v1/incidents/{incidentID}/updates") return { data: [] };
+      if (path === "/api/v1/incidents/{incidentID}/postmortem") return { error: {} };
+      return { data: undefined };
+    });
+
+    const w = mount(IncidentDetailView, {
+      global: { stubs: { RouterLink: { props: ["to"], template: "<a><slot /></a>" } } },
+    });
+    await flushPromises();
+    expect(w.find('[data-testid="incident-notice"]').text()).toContain("Switched to Acme / prod to open this incident.");
+
+    route.current.params.id = "inc-b";
+    await flushPromises();
+
+    expect(w.text()).toContain("incident inc-b");
+    expect(w.find('[data-testid="incident-notice"]').exists()).toBe(false);
   });
 });

@@ -4,8 +4,10 @@ import { useRoute } from "vue-router";
 import { api } from "@/api/client";
 import type { components } from "@/api/schema";
 import AppShell from "@/components/AppShell.vue";
+import IncidentPhonePanel from "@/components/IncidentPhonePanel.vue";
 import IncidentSubjectChip from "@/components/IncidentSubjectChip.vue";
 import { useSession } from "@/stores/session";
+import { useUi } from "@/stores/ui";
 import { useWorkspace } from "@/stores/workspace";
 import {
   CHIP_ACC,
@@ -30,6 +32,7 @@ import { utcClockLabel } from "@/lib/wallclock";
 import { forwardStatuses, impactBadge, impactBasisForm, impactPhrase, relTime, statusBadge, systemNoteKind } from "@/lib/incident";
 import { PM_SECTIONS, emptySections, parsePostmortem, renderSections, serializePostmortem } from "@/lib/postmortem";
 import { sealedLabel } from "@/lib/services";
+import type { PhoneDelivery } from "@/lib/phone";
 
 type Incident = components["schemas"]["AuthedIncident"];
 type IncidentUpdate = components["schemas"]["IncidentUpdate"];
@@ -44,6 +47,12 @@ const session = useSession();
 // compares the WORKSPACE's org against the loaded incident's project, so a stale tenant hid
 // acknowledge, resolve and postmortem from a legitimate editor of the incident actually on screen.
 const id = computed(() => route.params.id as string);
+// FR-041a mock 5a-2: "Switched to <org> / <project> to open this incident." — left by `/i/:ref` when
+// it changed the workspace, taken ONCE here, and gone when the page moves to another incident.
+const switchNotice = ref(useUi().takeIncidentNotice());
+watch(id, () => {
+  switchNotice.value = "";
+});
 // A slower response for the previous incident must not overwrite the current one.
 let loadTicket = 0;
 
@@ -88,6 +97,12 @@ const precededError = ref("");
 const precededStatus = ref<number | null>(null);
 const openedAt = computed(() => incident.value?.started_at || "");
 
+// FR-041a §5.5, mock §4: the Phone panel's read. `hidden` is a 403 or 404 from it — the panel is not
+// for this reader or this incident, and the rest of the page stays. Any other failure is `failed`,
+// which the panel says in its own sentence (4d) without touching anything else on the page.
+const phoneState = ref<"idle" | "loading" | "ready" | "failed" | "hidden">("idle");
+const phoneDeliveries = ref<PhoneDelivery[]>([]);
+
 function workspaceGeneration() {
   return ws.transition?.generation ?? 0;
 }
@@ -110,6 +125,8 @@ function clearLoadedData() {
   precededLoading.value = false;
   precededError.value = "";
   precededStatus.value = null;
+  phoneState.value = "idle";
+  phoneDeliveries.value = [];
   editingPm.value = false;
 }
 
@@ -145,6 +162,28 @@ async function loadPreceded(ticket: number, generation: number, projectID: strin
   }
 }
 
+async function loadPhone(ticket: number, generation: number, projectID: string) {
+  phoneDeliveries.value = [];
+  if (!incident.value || !isCurrentContext(ticket, generation, projectID)) return;
+  phoneState.value = "loading";
+  try {
+    const res = await api.GET("/api/v1/incidents/{incidentID}/phone-activity", {
+      params: { path: { incidentID: id.value } },
+    });
+    if (!isCurrentContext(ticket, generation, projectID)) return;
+    if (res.error || !res.data) {
+      const status = failureOf(res).status;
+      phoneState.value = status === 403 || status === 404 ? "hidden" : "failed";
+      return;
+    }
+    // The API's order — oldest first (P3-2) — is the panel's order; nothing re-sorts it.
+    phoneDeliveries.value = res.data.deliveries ?? [];
+    phoneState.value = "ready";
+  } catch {
+    if (isCurrentContext(ticket, generation, projectID)) phoneState.value = "failed";
+  }
+}
+
 /** The upstream service's slug from the impact links this page already holds; the id, shortened, when the graph no longer names it. */
 function upstreamSlug(c: IncidentChange): string {
   return impacts.value.find((l) => l.service_id === c.change.service_id)?.slug || shortId(c.change.service_id);
@@ -176,9 +215,11 @@ async function acknowledge() {
     // and keep the impact state this endpoint knows nothing about. The same holds for the
     // impact BASIS (FR-042 §4.6, D15): the acknowledge response never carries it, so without the
     // carry-over the line under the header would turn into "basis not recorded" after a click.
+    // The incident's short `ref` (FR-041a D21) is on the authed detail only, so it is carried too.
     if (!res.error && res.data && incident.value) {
       incident.value = {
         ...res.data,
+        ref: incident.value.ref,
         impacts: incident.value.impacts,
         impacts_unavailable: incident.value.impacts_unavailable,
         impact_basis: incident.value.impact_basis,
@@ -235,6 +276,7 @@ async function load() {
     loading.value = false;
     loadSubjectName(ticket, generation, projectID).catch(() => {});
     loadPreceded(ticket, generation, projectID).catch(() => {});
+    loadPhone(ticket, generation, projectID).catch(() => {});
   } catch {
     if (ticket !== loadTicket) return;
     clearLoadedData();
@@ -385,6 +427,11 @@ watch(
     </template>
 
     <div class="mx-auto max-w-[900px] px-[22px] pb-16 pt-6">
+      <div v-if="switchNotice" class="mb-4 flex items-center gap-[10px] rounded border border-border bg-surface px-4 py-[10px] text-[13px] shadow-card" data-testid="incident-notice">
+        <span class="h-2 w-2 flex-none rounded-full bg-up"></span>
+        <span class="min-w-0 flex-1">{{ switchNotice }}</span>
+        <button type="button" class="text-[12px] text-ink-3 hover:text-ink" @click="switchNotice = ''">Dismiss</button>
+      </div>
       <div
         v-if="loadError"
         role="alert"
@@ -570,6 +617,15 @@ watch(
           <li v-if="!updates.length && !loading" class="px-4 py-6 text-center text-[13px] text-ink-3">No updates yet.</li>
         </ol>
       </section>
+
+      <!-- Phone (FR-041a §5.5, mock §4): directly under the Timeline, above "Post an update". The panel
+           itself decides whether it shows (revision 6); a 403 or 404 from its read hides it. -->
+      <IncidentPhonePanel
+        v-if="incident && (phoneState === 'ready' || phoneState === 'failed')"
+        :state="phoneState"
+        :deliveries="phoneDeliveries"
+        :telephony-enabled="!!session.telephonyEnabled"
+      />
 
       <!-- add update -->
       <section v-if="incident && !isResolved && canWrite" class="mb-5 flex flex-col gap-3 rounded border border-border bg-surface p-4 shadow-card">

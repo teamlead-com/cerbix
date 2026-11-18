@@ -3,7 +3,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import {
-  instantLabel, instantLabelShort, instantRangeLabel,
+  instantClockDayLabel, instantLabel, instantLabelShort, instantRangeLabel,
   utcCellExtentLabel, utcClockLabel, utcClockRangeLabel,
   utcCompactInstantLabel, utcDayClockLabel, utcDayLabel, utcDayRangeLabel,
   localInputRangeZoneHint, localInputZoneHint, utcDayInputHint,
@@ -232,7 +232,7 @@ describe("the mechanism's shape", () => {
     const src = stripComments(readFileSync(join(SRC, "lib/wallclock.ts"), "utf8"));
     const exported = [...src.matchAll(/export function (\w+)/g)].map((m) => m[1]).sort();
     expect(exported).toEqual([
-      "instantLabel", "instantLabelShort", "instantRangeLabel",
+      "instantClockDayLabel", "instantLabel", "instantLabelShort", "instantRangeLabel",
       "localInputRangeZoneHint", "localInputValue", "localInputZoneHint",
       "utcCellExtentLabel", "utcClockLabel", "utcClockRangeLabel",
       "utcCompactInstantLabel", "utcDayClockLabel", "utcDayInputHint", "utcDayLabel",
@@ -702,7 +702,7 @@ describe("the mechanism's shape", () => {
     }
     // the derivation itself is asserted, or a broken regex would silently guard nothing
     expect(zoneArg).toEqual({
-      instantLabel: 1, instantLabelShort: 1, utcCellExtentLabel: 2, instantRangeLabel: 2,
+      instantLabel: 1, instantLabelShort: 1, utcCellExtentLabel: 2, instantRangeLabel: 2, instantClockDayLabel: 2,
       localInputValue: 1, localInputZoneHint: 1, localInputRangeZoneHint: 2,
     });
 
@@ -890,5 +890,43 @@ describe("the UTC subjects say UTC", () => {
     }
     expect(utcDayRangeLabel("2026-08-01T00:00:00Z", null)).toBe("—");
     expect(utcClockRangeLabel(null, "2026-08-01T00:00:00Z")).toBe("—");
+  });
+});
+
+// FR-041a mock 3g: a channel's deliveries list the clock a reader scans ("14:07:12") over a relative
+// day ("today", "yesterday", else the date), in the viewer's zone — and, like every local rendering
+// here, with the offset in force AT the instant.
+describe("instantClockDayLabel", () => {
+  const Z = "Asia/Yekaterinburg"; // UTC+05:00, no DST
+  it("renders the clock to the second, today, and the offset", () => {
+    expect(instantClockDayLabel("2026-09-03T15:04:31Z", new Date("2026-09-03T18:00:00Z"), Z)).toEqual({
+      clock: "20:04:31",
+      day: "today",
+      offset: "UTC+05:00",
+    });
+  });
+
+  it("calls the viewer's previous calendar day yesterday, and an older one by its date", () => {
+    const now = new Date("2026-09-03T20:30:00Z"); // 04.09 01:30 local
+    expect(instantClockDayLabel("2026-09-03T15:04:31Z", now, Z).day, "03.09 20:04 local").toBe("yesterday");
+    expect(instantClockDayLabel("2026-09-03T19:30:00Z", now, Z).day, "04.09 00:30 local").toBe("today");
+    expect(instantClockDayLabel("2026-09-02T15:04:31Z", now, Z).day).toBe("02.09.2026");
+  });
+
+  it("finds yesterday by the calendar, not by 24 hours, across a DST change", () => {
+    // Berlin springs forward on 29.03.2026: that day has 23 hours. At 30.03 00:10 local, 24 hours
+    // back is 28.03 23:10 — but yesterday is the 29th.
+    const now = new Date("2026-03-29T22:10:00Z"); // 30.03 00:10 (UTC+02:00)
+    expect(instantClockDayLabel("2026-03-29T00:30:00Z", now, "Europe/Berlin")).toEqual({
+      clock: "01:30:00",
+      day: "yesterday",
+      offset: "UTC+01:00",
+    });
+    expect(instantClockDayLabel("2026-03-28T22:30:00Z", now, "Europe/Berlin").day).toBe("28.03.2026");
+  });
+
+  it("renders the absent mark for something it cannot read", () => {
+    expect(instantClockDayLabel(null).clock).toBe("—");
+    expect(instantClockDayLabel("not a date").clock).toBe("—");
   });
 });

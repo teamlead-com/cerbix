@@ -6,12 +6,14 @@ import { SYSTEM_NOTE_MARKERS } from "@/lib/incident";
 
 const apiMock = vi.hoisted(() => ({ GET: vi.fn(), POST: vi.fn() }));
 vi.mock("@/api/client", () => ({ api: apiMock }));
+// FR-041a: the incident page takes the /i/:ref notice from the ui store (none here).
+vi.mock("@/stores/ui", () => ({ useUi: () => ({ takeIncidentNotice: () => "" }) }));
 vi.mock("vue-router", () => ({
   useRoute: () => ({ params: { id: "inc1" } }),
   RouterLink: { props: ["to"], template: '<a :data-to="JSON.stringify(to)"><slot /></a>' },
 }));
 vi.mock("@/components/AppShell.vue", () => ({ default: { name: "AppShell", template: "<div><slot name='actions' /><slot /></div>" } }));
-vi.mock("@/stores/session", () => ({ useSession: () => ({ canProjectWrite: () => true }) }));
+vi.mock("@/stores/session", () => ({ useSession: () => ({ canProjectWrite: () => true, telephonyEnabled: false }) }));
 vi.mock("@/stores/workspace", () => ({ useWorkspace: () => ({ init: () => Promise.resolve(), orgId: "o1", projectId: "p1" }) }));
 
 // FR-025 D-0210 item 4, mock screen 4: the incident page's `Preceded by` section and the
@@ -85,6 +87,7 @@ function serve(opts: { incident?: Record<string, unknown>; changes?: Res | (() =
     }
     if (path.endsWith("/updates")) return Promise.resolve(ok(opts.updates ?? []));
     if (path.endsWith("/postmortem")) return Promise.resolve(refused(404, "not found"));
+    if (path.endsWith("/phone-activity")) return Promise.resolve(ok({ deliveries: [] }));
     if (path.endsWith("/services/{serviceID}")) return Promise.resolve(ok({ service: { id: OWN_SERVICE, slug: "checkout", name: "Checkout" } }));
     if (path.endsWith("/monitors/{monitorID}")) return Promise.resolve(refused(404, "not found"));
     return Promise.resolve(ok(incident));
